@@ -1,0 +1,15 @@
+/target
+
+.idea/
+.vscode/
+
+# Web Core (@metteur/webcore)
+modules/webcore/node_modules/
+modules/webcore/dist/
+modules/webcore/playwright-report/
+modules/webcore/test-results/
+modules/webcore/.tmp/
+
+.pnpm-store/
+
+/dev-notes/

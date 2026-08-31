@@ -1,0 +1,222 @@
+@import 'tailwindcss';
+@import './theme.css';
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Slim, quiet scrollbars that fit the IDE look. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--subtle);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Focus rings stay consistent across the app. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+@layer components {
+  /* Buttons                                                             */
+  .btn {
+    @apply inline-flex h-8 shrink-0 select-none items-center justify-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply text-foreground hover:bg-hover;
+  }
+
+  .btn-outline {
+    @apply text-foreground hover:bg-hover;
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+
+  .btn-primary {
+    @apply text-primary-foreground hover:brightness-105;
+    background: var(--primary);
+  }
+
+  .btn-danger-outline {
+    @apply text-danger hover:bg-danger-soft;
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+
+  .btn-icon {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md p-0 text-muted-foreground transition-colors duration-150 hover:bg-hover hover:text-foreground;
+  }
+
+  /* Inputs                                                              */
+  /* Inputs get a hairline highlight on focus instead of a loud ring. */
+  .input {
+    @apply h-8 rounded-md px-2.5 text-[13px] transition-colors duration-150 placeholder:text-subtle focus:outline-none focus:ring-1 focus:ring-ring/45;
+    background: var(--input);
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+
+  /* Editor toolbar icon action — compact, borderless, appears only on hover. */
+  .editor-tool-icon {
+    @apply inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-md p-0 text-muted-foreground transition-colors duration-150 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .editor-tool-icon:hover {
+    background: var(--hover);
+  }
+
+  /* Panels & cards                                                      */
+  .panel {
+    @apply bg-surface shadow-card;
+    border-radius: 10px;
+  }
+
+  .panel-muted {
+    @apply bg-surface-muted;
+    box-shadow: inset 0 0 0 1px var(--divider);
+    border-radius: 10px;
+  }
+
+  /* Chips & badges                                                     */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium;
+    background: var(--surface-muted);
+    color: var(--muted-foreground);
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+
+  /* Section headers of a panel                                         */
+  .panel-heading {
+    @apply px-3 text-[11px] font-semibold uppercase tracking-wider text-subtle;
+  }
+
+  /* Frosted glass — used by floating overlays only                     */
+  /* Translucent surface + hard-coded blurred filter. Both the prefixed and
+     unprefixed forms are declared so the effect holds in every engine; the
+     alpha background comes from theme tokens (never derived via color-mix,
+     which bundlers may downgrade to an opaque fallback). */
+  .glass {
+    background: var(--surface-glass);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    backdrop-filter: blur(18px) saturate(1.4);
+    box-shadow: var(--shadow-popover);
+  }
+}
+
+/* vue-flow ships its own stylesheet; give nodes a quiet, app-aligned look. */
+.blueprint-flow .vue-flow__handle {
+  border-color: transparent;
+}
+
+/* Edges: control flow is the visual spine — a heavy, solid exec wire (Unreal
+   uses white-on-navy) — while data wires are normal-thickness, colour-coded
+   solid lines so they complement rather than compete with the exec path. */
+.blueprint-flow .vue-flow__edge-path {
+  stroke: var(--border);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.blueprint-flow .vue-flow__edge.metteur-edge--data .vue-flow__edge-path {
+  stroke-width: 1.5;
+  opacity: 0.92;
+}
+
+.blueprint-flow .vue-flow__edge.metteur-edge--exec .vue-flow__edge-path {
+  stroke: var(--exec-wire);
+  stroke-width: 2.5;
+}
+
+.blueprint-flow .vue-flow__edge.selected .vue-flow__edge-path {
+  stroke: var(--ring);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 4px var(--selection));
+}
+
+/* Live wire being dragged out of a pin. Valid links preview in the exec-wire
+   colour; type mismatches render red and are rejected on drop (item 8). */
+.blueprint-flow .vue-flow__connection-path {
+  stroke: var(--exec-wire);
+  stroke-width: 2.5;
+  fill: none;
+}
+
+.blueprint-flow .vue-flow__connection-path.invalid {
+  stroke: var(--danger);
+  stroke-width: 2.5;
+}
+
+/* Keep interaction tokens subtle on the canvas: hover lifts nodes gently. */
+.metteur-node {
+  transition: box-shadow 150ms ease, transform 150ms ease;
+}
+
+/* Visual audit: the run's current node breathes, finished nodes stay flushed. */
+.metteur-node.metteur-node--running {
+  animation: metteur-pulse 1.2s ease-in-out infinite;
+}
+.metteur-node.metteur-node--done {
+  outline: 2px solid rgba(47, 191, 143, 0.35);
+  outline-offset: 2px;
+}
+.metteur-node__live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #fff;
+  animation: metteur-pulse 1.2s ease-in-out infinite;
+}
+@keyframes metteur-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(63, 140, 255, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(63, 140, 255, 0);
+  }
+}
+
+.blueprint-flow .vue-flow__node:hover .metteur-node {
+  box-shadow: var(--shadow-card), 0 6px 20px rgba(19, 19, 26, 0.12);
+  transform: translateY(-1px);
+}
+
+/* Focus ring must survive the hover lift — bump specificity so a selected
+   node keeps its highlight even while the pointer stays over it. */
+.blueprint-flow .vue-flow__node .metteur-node.metteur-node--selected,
+.blueprint-flow .vue-flow__node:hover .metteur-node.metteur-node--selected {
+  box-shadow:
+    var(--shadow-card),
+    0 6px 20px rgba(19, 19, 26, 0.12),
+    0 0 0 2px var(--ring);
+  transform: translateY(-1px);
+}

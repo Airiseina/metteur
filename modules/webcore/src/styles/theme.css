@@ -1,0 +1,174 @@
+/*!
+ * Theme tokens for Metteur Web Core.
+ *
+ * A calm, layered palette tuned for a desktop productivity tool (VSCode / IDEA
+ * / Unreal style). Surfaces are stacked by luminance, and borders stay hairline
+ * so panels read as nested layers instead of fenced boxes. The palette derives
+ * from the Forui Blue scheme but is adjusted for desk-bound contrast.
+ *
+ * Light lives on `:root`, dark on `.dark`. `@theme inline` re-exports each raw
+ * var as a Tailwind utility, e.g. `bg-background`, `bg-surface`, `text-muted`,
+ * `border-divider`, `bg-primary`, `bg-primary-soft`, `bg-danger-soft`.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* Base surfaces */
+  --background: #fbfbfd;
+  --surface: #ffffff;
+  --surface-muted: #f5f5f8;
+  --sidebar: #f6f6f9;
+  --popover: #ffffff;
+  --input: #f7f7fa;
+
+  /* Text */
+  --foreground: #1b1b20;
+  --muted-foreground: #6f6f7b;
+  --subtle: #9d9da8;
+
+  /* Brand */
+  --primary: #4b5cc4;
+  --primary-foreground: #ffffff;
+  --primary-soft: #eef0fc;
+
+  /* Secondary surfaces */
+  --secondary: #f2f2f5;
+  --secondary-foreground: #2a2a31;
+  --accent: #e8ecfb;
+  --accent-foreground: #2a2a31;
+
+  /* Feedback */
+  --danger: #e5484d;
+  --danger-foreground: #ffffff;
+  --danger-soft: #fdecec;
+
+  /* Hairline structure */
+  --border: #e4e4eb;
+  --divider: #ededf2;
+
+  /* Interaction */
+  --ring: #6a7fe0;
+  --hover: rgba(15, 16, 26, 0.055);
+  --selection: rgba(75, 92, 196, 0.16);
+
+  /* Blueprint control-flow wire — dark graphite so it stays the visual spine
+     against the light canvas, mirroring Unreal's white-on-navy exec spine. */
+  --exec-wire: #3b3b46;
+
+  /* Blueprint canvas dot grid — visible but quiet against the light surface. */
+  --grid-dot: #c8c8d6;
+
+  /* Frosted overlay surface: translucent so backdrop blur stays visible even
+     in clients that lack `color-mix` (fixed rgba, never opaque). */
+  --surface-glass: rgba(255, 255, 255, 0.72);
+
+  /* Elevation */
+  --overlay: rgba(19, 19, 26, 0.42);
+  --shadow-soft: 0 1px 2px rgba(19, 19, 26, 0.05);
+  --shadow-card: 0 1px 2px rgba(19, 19, 26, 0.04), 0 6px 22px rgba(19, 19, 26, 0.06);
+  --shadow-popover: 0 4px 10px rgba(19, 19, 26, 0.08), 0 18px 48px rgba(19, 19, 26, 0.12);
+}
+
+.dark {
+  /* Base surfaces */
+  --background: #17171b;
+  --surface: #1f1f24;
+  --surface-muted: #26262c;
+  --sidebar: #16161a;
+  --popover: #26262c;
+  --input: #2b2b31;
+
+  /* Text */
+  --foreground: #ebebf0;
+  --muted-foreground: #a2a2ad;
+  --subtle: #70707c;
+
+  /* Brand */
+  --primary: #6a8bff;
+  --primary-foreground: #ffffff;
+  --primary-soft: rgba(106, 139, 255, 0.16);
+
+  /* Secondary surfaces */
+  --secondary: #2a2a30;
+  --secondary-foreground: #e7e7ed;
+  --accent: rgba(106, 139, 255, 0.14);
+  --accent-foreground: #e7e7ed;
+
+  /* Feedback */
+  --danger: #f2555a;
+  --danger-foreground: #ffffff;
+  --danger-soft: rgba(242, 85, 90, 0.16);
+
+  /* Hairline structure */
+  --border: #303036;
+  --divider: #2a2a30;
+
+  /* Interaction */
+  --ring: #6a8bff;
+  --hover: rgba(255, 255, 255, 0.06);
+  --selection: rgba(106, 139, 255, 0.22);
+
+  /* Blueprint control-flow wire — white like Unreal's navy-canvas exec spine. */
+  --exec-wire: #f4f4f8;
+
+  /* Blueprint canvas dot grid — brighter than the divider so it reads on dark. */
+  --grid-dot: #3a3a46;
+
+  --surface-glass: rgba(31, 31, 36, 0.72);
+
+  /* Elevation */
+  --overlay: rgba(0, 0, 0, 0.55);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32), 0 8px 26px rgba(0, 0, 0, 0.36);
+  --shadow-popover: 0 4px 10px rgba(0, 0, 0, 0.4), 0 20px 52px rgba(0, 0, 0, 0.5);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-sidebar: var(--sidebar);
+  --color-popover: var(--popover);
+  --color-input: var(--input);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle: var(--subtle);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-danger-soft: var(--danger-soft);
+  --color-border: var(--border);
+  --color-divider: var(--divider);
+  --color-ring: var(--ring);
+  --color-hover: var(--hover);
+  --color-selection: var(--selection);
+  --color-overlay: var(--overlay);
+  --shadow-soft: var(--shadow-soft);
+  --shadow-card: var(--shadow-card);
+  --shadow-popover: var(--shadow-popover);
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+  }
+
+  ::selection {
+    background: var(--selection);
+  }
+}

@@ -1,0 +1,292 @@
+//! Execution state and shared execution context.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use metteur_shared::config::Config;
+use metteur_shared::{Blueprint, NodeId, PinId, Value};
+use tokio::sync::RwLock;
+
+use crate::audit::AuditWriter;
+use crate::llm::LlmClientFactory;
+use crate::persistence::Db;
+use crate::registry::Registry;
+
+use super::interrupt::InterruptBus;
+use super::transaction::TransactionLog;
+
+/// A frame on the execution call stack.
+///
+/// The bottom frame tracks the in-flight root node; every frame above it
+/// represents an entered function body with its own scheduler.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Frame {
+    /// The node currently associated with this frame: for the root frame the
+    /// in-flight root node, for a function frame the caller's `CallFunction`
+    /// node.
+    pub node_id: NodeId,
+    /// The index of the next output execution pin to follow.
+    pub pc: usize,
+    /// Present while executing inside a function body.
+    #[serde(default)]
+    pub function: Option<FunctionBody>,
+}
+
+/// Runtime state of one called function body.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FunctionBody {
+    /// The function entry id; the body is re-fetched from the registry on
+    /// resume.
+    pub id: uuid::Uuid,
+    /// The independent scheduler of this function frame.
+    pub scheduler: Scheduler,
+}
+
+/// Scheduling state of one execution frame.
+///
+/// The root frame's scheduler lives in [`ExecutionState`]; each entered
+/// function body carries its own so nested bodies schedule independently.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Scheduler {
+    triggered: HashSet<NodeId>,
+    executed: HashSet<NodeId>,
+    queue: VecDeque<NodeId>,
+}
+
+impl Scheduler {
+    /// Reconstructs a scheduler from checkpoint lists.
+    pub fn from_checkpoint(
+        executed: Vec<NodeId>,
+        pending: Vec<NodeId>,
+        triggered: Vec<NodeId>,
+    ) -> Self {
+        Self {
+            triggered: triggered.into_iter().collect(),
+            executed: executed.into_iter().collect(),
+            queue: pending.into_iter().collect(),
+        }
+    }
+
+    /// Seeds the worklist with the frame's entry node.
+    pub fn seed(&mut self, entry: NodeId) {
+        self.triggered.insert(entry);
+        self.queue.push_back(entry);
+    }
+
+    /// Completed node ids, in arbitrary order.
+    pub fn executed_list(&self) -> Vec<NodeId> {
+        self.executed.iter().copied().collect()
+    }
+
+    /// Pending (queued) node ids, in scheduling order.
+    pub fn pending_list(&self) -> Vec<NodeId> {
+        self.queue.iter().copied().collect()
+    }
+
+    /// Ever-triggered node ids, in arbitrary order.
+    pub fn triggered_list(&self) -> Vec<NodeId> {
+        self.triggered.iter().copied().collect()
+    }
+
+    /// Whether `node_id` already completed.
+    pub fn is_executed(&self, node_id: NodeId) -> bool {
+        self.executed.contains(&node_id)
+    }
+
+    /// Whether `node_id` was ever triggered.
+    pub fn is_triggered(&self, node_id: NodeId) -> bool {
+        self.triggered.contains(&node_id)
+    }
+
+    /// Marks a node as completed.
+    pub fn mark_executed(&mut self, node_id: NodeId) {
+        self.executed.insert(node_id);
+    }
+
+    /// Un-marks a node so the circuit breaker can re-queue it after a replan.
+    pub fn unmark_executed(&mut self, node_id: NodeId) {
+        self.executed.remove(&node_id);
+    }
+
+    /// Removes the next queued node, if any.
+    pub fn pop(&mut self) -> Option<NodeId> {
+        self.queue.pop_front()
+    }
+
+    /// Marks `node_id` as triggered and queues it when inputs allow later.
+    pub fn enqueue(&mut self, node_id: NodeId) {
+        self.triggered.insert(node_id);
+        self.queue.push_back(node_id);
+    }
+}
+
+/// The runtime state of a single blueprint execution.
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+pub struct ExecutionState {
+    /// The blueprint being executed.
+    pub blueprint_id: uuid::Uuid,
+    /// The execution call stack (root frame + function frames).
+    pub call_stack: Vec<Frame>,
+    /// Values produced on data output pins.
+    pub data_values: HashMap<PinId, Value>,
+    /// The node at which execution is paused, if any.
+    pub paused_at: Option<NodeId>,
+}
+
+/// Shared capabilities available to node executors during execution.
+///
+/// This is created once per execution and passed by mutable reference to each
+/// node executor, giving them access to the registry, LLM clients, audit
+/// logging, interrupt handling and the transaction log.
+pub struct ExecutionContext {
+    /// The resource registry.
+    pub registry: Arc<Registry>,
+    /// The LLM client factory.
+    pub llm_factory: LlmClientFactory,
+    /// The workspace root path.
+    pub workspace_root: std::path::PathBuf,
+    /// The transaction log for rollback.
+    pub transaction_log: TransactionLog,
+    /// The interrupt bus, if interrupts are enabled.
+    pub interrupts: Option<InterruptBus>,
+    /// Normal interrupts deferred until the next Call LLM node.
+    pub pending_normal: VecDeque<String>,
+    /// Set when execution should pause (shared with the control RPCs).
+    pub pause_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when execution should cancel (shared with the control RPCs).
+    pub cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// The workspace audit writer, if audit logging is enabled.
+    pub audit: Option<AuditWriter>,
+    /// The id of the current execution run.
+    pub run_id: uuid::Uuid,
+    /// Execution start time in milliseconds since the Unix epoch.
+    pub started_at: u64,
+    /// The authenticated subject performing the execution.
+    pub user: String,
+    /// The merged workspace configuration (for LLM defaults and reloads).
+    pub config: Option<Arc<RwLock<Config>>>,
+    /// The node currently being executed.
+    pub current_node: NodeId,
+    /// Sandbox approval channel, when live event streaming is attached.
+    pub approvals: Option<Arc<crate::sandbox::approval::ApprovalBroker>>,
+    /// Live event sink for streaming events to clients as they occur.
+    pub events: Option<tokio::sync::mpsc::UnboundedSender<super::interpreter::ExecutionEvent>>,
+    /// The workspace database (persistent sandbox grants).
+    pub workspace_db: Option<Db>,
+    /// The global database (global grants).
+    pub global_db: Option<Db>,
+    /// SubAgent nesting depth of this context.
+    pub depth: u32,
+    /// Process-wide metrics, when attached.
+    pub metrics: Option<Arc<crate::metrics::Metrics>>,
+    /// Language-server manager for this workspace, when LSP is enabled.
+    pub lsp: Option<Arc<crate::lsp::LspManager>>,
+    /// Addon prompt fragments injected into fresh CallLLM contexts.
+    pub addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
+    /// Shared handle to the executing root blueprint (replan hot-apply).
+    pub blueprint: Option<Arc<parking_lot::RwLock<Blueprint>>>,
+}
+
+impl ExecutionContext {
+    /// Creates a new execution context.
+    pub fn new(
+        registry: Arc<Registry>,
+        llm_factory: LlmClientFactory,
+        workspace_root: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            registry,
+            llm_factory,
+            workspace_root,
+            transaction_log: TransactionLog::new(),
+            interrupts: None,
+            pending_normal: VecDeque::new(),
+            pause_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audit: None,
+            run_id: uuid::Uuid::nil(),
+            started_at: 0,
+            user: "local".to_string(),
+            config: None,
+            current_node: uuid::Uuid::nil(),
+            approvals: None,
+            events: None,
+            workspace_db: None,
+            global_db: None,
+            depth: 0,
+            metrics: None,
+            lsp: None,
+            addon_fragments: Vec::new(),
+            blueprint: None,
+        }
+    }
+
+    /// Attaches the workspace language-server manager.
+    pub fn with_lsp(mut self, lsp: Arc<crate::lsp::LspManager>) -> Self {
+        self.lsp = Some(lsp);
+        self
+    }
+
+    /// Attaches an audit writer.
+    pub fn with_audit(mut self, audit: AuditWriter) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Creates a child context for nested execution (SubAgent / Abstract).
+    ///
+    /// The child shares the registry, LLM factory, workspace root,
+    /// configuration, interrupt bus, approval broker, event sink, control
+    /// flags, identity and audit writer of this context, but starts with a
+    /// fresh transaction log and an incremented nesting depth.
+    pub fn child_nested(&self) -> Self {
+        let mut child =
+            Self::new(self.registry.clone(), self.llm_factory.clone(), self.workspace_root.clone());
+        child.config = self.config.clone();
+        child.interrupts = self.interrupts.clone();
+        child.approvals = self.approvals.clone();
+        child.events = self.events.clone();
+        child.pause_requested = self.pause_requested.clone();
+        child.cancel_requested = self.cancel_requested.clone();
+        child.user = self.user.clone();
+        child.audit = self.audit.clone();
+        child.run_id = self.run_id;
+        child.started_at = self.started_at;
+        child.current_node = self.current_node;
+        child.workspace_db = self.workspace_db.clone();
+        child.global_db = self.global_db.clone();
+        child.metrics = self.metrics.clone();
+        child.lsp = self.lsp.clone();
+        child.addon_fragments = self.addon_fragments.clone();
+        child.blueprint = self.blueprint.clone();
+        child.depth = self.depth + 1;
+        child
+    }
+
+    /// Attaches the current run identity.
+    pub fn with_run(mut self, run_id: uuid::Uuid, started_at: u64) -> Self {
+        self.run_id = run_id;
+        self.started_at = started_at;
+        self
+    }
+
+    /// Attaches the authenticated subject.
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = user.into();
+        self
+    }
+
+    /// Attaches the merged workspace configuration.
+    pub fn with_config(mut self, config: Arc<RwLock<Config>>) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Records an audit entry if an audit writer is attached.
+    pub fn audit(&self, operation: &str, detail: serde_json::Value) {
+        if let Some(writer) = &self.audit {
+            let _ = writer.record(&self.user, operation, detail);
+        }
+    }
+}

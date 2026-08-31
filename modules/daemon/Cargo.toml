@@ -1,0 +1,61 @@
+[package]
+name = "metteur-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "metteurd"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+directories.workspace = true
+ed25519-dalek.workspace = true
+extism.workspace = true
+http.workspace = true
+libc.workspace = true
+lsp-types.workspace = true
+metteur-proto = { path = "../proto" }
+metteur-shared = { path = "../shared" }
+mimalloc.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+rcgen.workspace = true
+rand_core.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rmcp.workspace = true
+rocksdb.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+toml.workspace = true
+tonic.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+twox-hash.workspace = true
+uuid.workspace = true
+x509-parser.workspace = true
+zip.workspace = true
+zip-extensions.workspace = true
+
+[dev-dependencies]
+wat.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+windows-sys.workspace = true
+winreg.workspace = true

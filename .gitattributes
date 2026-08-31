@@ -1,0 +1,33 @@
+# Normalize text files to LF on both commit and checkout.
+* text=auto
+
+# Force LF for all source, config and documentation text.
+*.rs     text eol=lf
+*.toml   text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.h      text eol=lf
+*.sh     text eol=lf
+.gitignore text eol=lf
+rustfmt.toml text eol=lf
+Cargo.lock   text eol=lf
+LICENSE      text eol=lf
+
+# Tell git never to touch binary files.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.wav   binary
+*.mp3   binary
+*.ogg   binary
+*.flac  binary
+*.wasm  binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.dylib binary
+*.a     binary

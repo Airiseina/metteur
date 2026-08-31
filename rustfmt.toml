@@ -1,0 +1,26 @@
+edition = "2024"
+style_edition = "2024"
+
+max_width = 100
+tab_spaces = 4
+hard_tabs = false
+newline_style = "Unix"
+indent_style = "Block"
+
+use_try_shorthand = true
+use_field_init_shorthand = true
+use_small_heuristics = "Off"
+
+imports_granularity = "Preserve"
+group_imports = "StdExternalCrate"
+reorder_imports = true
+reorder_modules = true
+
+normalize_doc_attributes = true
+
+ignore = [
+    "/target/",
+    "/build/",
+    "/vendor/",
+    "**/*.rs.bk",
+]

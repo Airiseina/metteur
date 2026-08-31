@@ -1,0 +1,521 @@
+syntax = "proto3";
+
+package metteur;
+
+// The Metteur daemon service.
+service Daemon {
+  // Workspace management.
+  rpc OpenWorkspace(OpenWorkspaceRequest) returns (WorkspaceInfo);
+  rpc CloseWorkspace(CloseWorkspaceRequest) returns (Empty);
+  rpc ListWorkspaces(Empty) returns (WorkspaceList);
+
+  // Blueprint management.
+  rpc SaveBlueprint(SaveBlueprintRequest) returns (Empty);
+  rpc LoadBlueprint(LoadBlueprintRequest) returns (Blueprint);
+  rpc ExecuteBlueprint(ExecuteBlueprintRequest) returns (stream ExecutionEvent);
+
+  // Execution control.
+  rpc CancelExecution(CancelRequest) returns (Empty);
+  rpc PauseExecution(PauseRequest) returns (Empty);
+  rpc ResumeExecution(ResumeRequest) returns (Empty);
+  rpc SendInterrupt(InterruptRequest) returns (Empty);
+
+  // Registry.
+  rpc ListTools(Empty) returns (ToolList);
+
+  // Configuration.
+  rpc GetConfig(GetConfigRequest) returns (Config);
+  rpc SetConfig(SetConfigRequest) returns (Empty);
+
+  // Version management.
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (SnapshotInfo);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (SnapshotList);
+  rpc Rollback(RollbackRequest) returns (Empty);
+  rpc GetFileHistory(GetFileHistoryRequest) returns (FileHistory);
+
+  // Execution state management.
+  rpc ListExecutions(ListExecutionsRequest) returns (ExecutionList);
+  rpc ContinueExecution(ContinueExecutionRequest) returns (stream ExecutionEvent);
+
+  // Audit log.
+  rpc ListAuditLog(ListAuditLogRequest) returns (AuditLogList);
+
+  // Sandbox approvals.
+  rpc RespondApproval(ApprovalDecisionRequest) returns (Empty);
+
+  // Usage and cost.
+  rpc GetExecutionUsage(GetExecutionUsageRequest) returns (UsageSummary);
+
+  // Registry.
+  rpc ListNodeKinds(Empty) returns (NodeKindList);
+
+  // MCP host.
+  rpc ListMcpServers(Empty) returns (McpServerList);
+
+  // Addon management.
+  rpc InstallAddon(InstallAddonRequest) returns (AddonInfo);
+  rpc ListAddons(ListAddonsRequest) returns (AddonList);
+  rpc UninstallAddon(UninstallAddonRequest) returns (Empty);
+  rpc SetAddonEnabled(SetAddonEnabledRequest) returns (Empty);
+
+  // Blueprint function library.
+  rpc SaveFunction(SaveFunctionRequest) returns (SaveFunctionResponse);
+  rpc ListFunctions(ListFunctionsRequest) returns (FunctionList);
+  rpc LoadFunction(LoadFunctionRequest) returns (LoadFunctionResponse);
+  rpc DeleteFunction(DeleteFunctionRequest) returns (Empty);
+
+  // Blueprint DSL.
+  rpc CompileDsl(CompileDslRequest) returns (Blueprint);
+  rpc DecompileBlueprint(DecompileBlueprintRequest) returns (DecompileDslResponse);
+
+  // File operations (workspace-relative paths; `/.metteur` metadata is read-only).
+  rpc ListFiles(ListFilesRequest) returns (FileList);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc WriteFile(WriteFileRequest) returns (Empty);
+  rpc StatFile(StatFileRequest) returns (FileInfo);
+  rpc CreateDir(CreateDirRequest) returns (Empty);
+  rpc RemoveFile(RemoveFileRequest) returns (Empty);
+  rpc RenameFile(RenameFileRequest) returns (Empty);
+  // Live file-change events for the workspace (created / modified / removed).
+  rpc WatchWorkspace(WatchWorkspaceRequest) returns (stream WatchEvent);
+
+  // ReAct chat (one chat run per workspace at a time).
+  rpc SendChat(SendChatRequest) returns (stream ChatEvent);
+  rpc AbortChat(AbortChatRequest) returns (Empty);
+}
+
+message Empty {}
+
+message OpenWorkspaceRequest {
+  string path = 1;
+}
+
+message CloseWorkspaceRequest {
+  string path = 1;
+}
+
+message WorkspaceInfo {
+  string path = 1;
+  bool locked = 2;
+}
+
+message WorkspaceList {
+  repeated WorkspaceInfo workspaces = 1;
+}
+
+message SaveBlueprintRequest {
+  string workspace_path = 1;
+  Blueprint blueprint = 2;
+}
+
+message LoadBlueprintRequest {
+  string workspace_path = 1;
+  string blueprint_id = 2;
+}
+
+message ExecuteBlueprintRequest {
+  string workspace_path = 1;
+  string blueprint_id = 2;
+}
+
+message ExecutionEvent {
+  string node_id = 1;
+  string kind = 2; // started | finished | message | approval_request
+  string message = 3;
+  string detail_json = 4; // structured payload for approval_request / message
+}
+
+message CancelRequest {
+  string workspace_path = 1;
+}
+
+message PauseRequest {
+  string workspace_path = 1;
+}
+
+message ResumeRequest {
+  string workspace_path = 1;
+}
+
+message InterruptRequest {
+  string workspace_path = 1;
+  string priority = 2; // Normal | Urgent | Emergency
+  string message = 3;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+}
+
+message ToolList {
+  repeated ToolInfo tools = 1;
+}
+
+message GetConfigRequest {
+  string workspace_path = 1;
+}
+
+message SetConfigRequest {
+  string workspace_path = 1;
+  string config_json = 2;
+}
+
+message Config {
+  string config_json = 1;
+}
+
+message CreateSnapshotRequest {
+  string workspace_path = 1;
+  string description = 2;
+  // Optional human-friendly alias used to reference the snapshot on rollback.
+  string alias = 3;
+}
+
+message SnapshotInfo {
+  string id = 1;
+  string description = 2;
+  int64 created_at = 3;
+  string alias = 4;
+}
+
+message SnapshotList {
+  repeated SnapshotInfo snapshots = 1;
+}
+
+message ListSnapshotsRequest {
+  string workspace_path = 1;
+}
+
+message RollbackRequest {
+  string workspace_path = 1;
+  // Snapshot id used when `alias` is empty.
+  string snapshot_id = 2;
+  // Snapshot alias; mutually exclusive with `snapshot_id`.
+  string alias = 3;
+}
+
+message GetFileHistoryRequest {
+  string workspace_path = 1;
+  string path = 2;
+}
+
+message FileHistoryEntry {
+  string snapshot_id = 1;
+  string description = 2;
+  int64 created_at = 3;
+  string status = 4; // Added | Modified | Deleted | Unchanged
+  string content_hash = 5;
+}
+
+message FileHistory {
+  repeated FileHistoryEntry entries = 1;
+}
+
+message ListExecutionsRequest {
+  string workspace_path = 1;
+}
+
+message ExecutionInfo {
+  string run_id = 1;
+  string blueprint_id = 2;
+  string status = 3; // Running | Suspended | Completed | Failed
+  int64 started_at = 4;
+  int64 updated_at = 5;
+  int32 executed_nodes = 6;
+  string data_json = 7;
+}
+
+message ExecutionList {
+  repeated ExecutionInfo executions = 1;
+}
+
+message ContinueExecutionRequest {
+  string workspace_path = 1;
+  string run_id = 2;
+}
+
+message ListAuditLogRequest {
+  string workspace_path = 1; // empty = global audit
+}
+
+message AuditEntry {
+  int64 timestamp = 1;
+  string user_id = 2;
+  string operation = 3;
+  string detail_json = 4;
+}
+
+message AuditLogList {
+  repeated AuditEntry entries = 1;
+}
+
+message ApprovalDecisionRequest {
+  string workspace_path = 1;
+  string request_id = 2;
+  // AllowOnce | AllowRun | AllowWorkspace | AllowGlobal |
+  // DenyOnce | DenyRun | DenyWorkspace | DenyGlobal
+  string decision = 3;
+}
+
+message GetExecutionUsageRequest {
+  string workspace_path = 1;
+  string run_id = 2;
+}
+
+message ModelUsage {
+  string model = 1;
+  uint64 calls = 2;
+  uint64 input_tokens = 3;
+  uint64 output_tokens = 4;
+  uint64 reasoning_tokens = 5;
+  uint64 cost_micros = 6;
+}
+
+message UsageSummary {
+  string currency = 1;
+  uint64 total_cost_micros = 2;
+  repeated ModelUsage models = 3;
+}
+
+message NodeKindList {
+  repeated string kinds = 1;
+}
+
+message McpServerInfo {
+  string name = 1;
+  string status = 2; // Connected | Failed | Disabled
+  uint32 tool_count = 3;
+  string error = 4;
+}
+
+message McpServerList {
+  repeated McpServerInfo servers = 1;
+}
+
+message InstallAddonRequest {
+  // Path to a .zip package or an unpacked directory (development mode).
+  string package_path = 1;
+  // Empty = install into the global addon directory.
+  string workspace_path = 2;
+  repeated string granted_permissions = 3;
+}
+
+message AddonInfo {
+  string id = 1;
+  string version = 2;
+  string name = 3;
+  string description = 4;
+  bool enabled = 5;
+  string scope = 6; // global | workspace
+  repeated string required_permissions = 7;
+  repeated string granted_permissions = 8;
+  uint32 tool_count = 9;
+  uint32 fragment_count = 10;
+}
+
+message ListAddonsRequest {
+  // Empty = list addons from all scopes.
+  string workspace_path = 1;
+}
+
+message AddonList {
+  repeated AddonInfo addons = 1;
+}
+
+message UninstallAddonRequest {
+  string id = 1;
+  string workspace_path = 2;
+}
+
+message SetAddonEnabledRequest {
+  string id = 1;
+  string workspace_path = 2;
+  bool enabled = 3;
+}
+
+// ---- Blueprint function library -------------------------------------------
+
+message FnPin {
+  string name = 1;
+  string data_type = 2;
+  string description = 3;
+}
+
+message FunctionInfo {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated FnPin inputs = 4;
+  repeated FnPin outputs = 5;
+  string source = 6; // builtin | global | workspace
+  int64 updated_at = 7;
+}
+
+message SaveFunctionRequest {
+  string workspace_path = 1; // empty = global library
+  FunctionInfo info = 2;
+  Blueprint body = 3;
+}
+
+message SaveFunctionResponse { FunctionInfo info = 1; }
+
+message ListFunctionsRequest { string workspace_path = 1; } // empty = global + builtin
+
+message FunctionList { repeated FunctionInfo functions = 1; }
+
+message LoadFunctionRequest {
+  string workspace_path = 1;
+  string name = 2;
+}
+
+message LoadFunctionResponse {
+  FunctionInfo info = 1;
+  Blueprint body = 2;
+}
+
+message DeleteFunctionRequest {
+  string workspace_path = 1;
+  string name = 2;
+}
+
+// ---- Blueprint DSL -----------------------------------------------------------
+
+message CompileDslRequest { string source = 1; }
+
+message DecompileBlueprintRequest {
+  string workspace_path = 1;
+  string blueprint_id = 2;
+}
+
+message DecompileDslResponse { string source = 1; }
+
+// ---- File operations --------------------------------------------------------
+
+message ListFilesRequest {
+  string workspace_path = 1;
+  // Workspace-relative directory; empty = workspace root.
+  string dir = 2;
+}
+
+message FileEntry {
+  string name = 1;
+  // Workspace-relative path of the entry.
+  string path = 2;
+  bool is_dir = 3;
+}
+
+message FileList {
+  repeated FileEntry entries = 1;
+}
+
+message ReadFileRequest {
+  string workspace_path = 1;
+  string path = 2;
+}
+
+message ReadFileResponse {
+  string content = 1;
+}
+
+message WriteFileRequest {
+  string workspace_path = 1;
+  string path = 2;
+  string content = 3;
+}
+
+message StatFileRequest {
+  string workspace_path = 1;
+  string path = 2;
+}
+
+message FileInfo {
+  string path = 1;
+  bool is_dir = 2;
+  int64 len = 3;
+}
+
+message CreateDirRequest {
+  string workspace_path = 1;
+  string path = 2;
+}
+
+message RemoveFileRequest {
+  string workspace_path = 1;
+  string path = 2;
+}
+
+message RenameFileRequest {
+  string workspace_path = 1;
+  string from = 2;
+  string to = 3;
+}
+
+message WatchWorkspaceRequest {
+  string workspace_path = 1;
+}
+
+message WatchEvent {
+  // Workspace-relative path, using `/` as the separator.
+  string path = 1;
+  // One of: created | modified | removed.
+  string kind = 2;
+}
+
+// ---- ReAct chat ---------------------------------------------------------------
+
+message SendChatRequest {
+  string workspace_path = 1;
+  string message = 2;
+  // JSON array of `{role, content}` messages of the conversation so far.
+  string history_json = 3;
+  // JSON object with model / temperature / top_p / max_tokens /
+  // reasoning_effort / max_iterations.
+  string options_json = 4;
+}
+
+message ChatEvent {
+  // assistant | tool | done | error
+  string kind = 1;
+  string content = 2;
+  // Structured payload: tool name, model, usage, error message.
+  string detail_json = 3;
+}
+
+message AbortChatRequest {
+  string workspace_path = 1;
+}
+
+// Blueprint model mirrored from the shared crate.
+message Blueprint {
+  string id = 1;
+  string name = 2;
+  repeated Node nodes = 3;
+  repeated Edge edges = 4;
+  string entry_node_id = 5;
+}
+
+message Node {
+  string id = 1;
+  string node_type = 2;
+  string kind = 3;
+  float pos_x = 4;
+  float pos_y = 5;
+  repeated Pin pins = 6;
+  string data_json = 7;
+}
+
+message Pin {
+  string id = 1;
+  string name = 2;
+  string pin_type = 3;
+  string data_type = 4;
+}
+
+message Edge {
+  string id = 1;
+  string source_node = 2;
+  string source_pin = 3;
+  string target_node = 4;
+  string target_pin = 5;
+}

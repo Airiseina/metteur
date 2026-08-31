@@ -1,0 +1,93 @@
+<script setup lang="ts">
+import { inject } from 'vue'
+import type { Component } from 'vue'
+import { ChevronRight, FileCode, FileJson, FileText, Folder, FolderOpen, Workflow } from '@lucide/vue'
+import type { FileTreeNode } from '@/core'
+import { TREE_API, TREE_CREATE } from '@/lib/tree'
+
+defineOptions({ name: 'TreeItem' })
+
+const api = inject(TREE_API)!
+const create = inject(TREE_CREATE, null)
+
+const props = defineProps<{
+  node: FileTreeNode
+  depth: number
+}>()
+
+function icon(node: FileTreeNode): Component {
+  if (node.kind === 'dir') return api.isOpen(node.path) ? FolderOpen : Folder
+  if (node.path.endsWith('.blueprint')) return Workflow
+  if (node.path.endsWith('.json')) return FileJson
+  if (node.path.endsWith('.ts') || node.path.endsWith('.js')) return FileCode
+  return FileText
+}
+
+function fileName(path: string): string {
+  const seg = path.split(/[\\/]/).filter(Boolean)
+  return seg[seg.length - 1] ?? path
+}
+
+function selectAll(e: FocusEvent) {
+  const el = e.target as HTMLInputElement
+  el.select()
+}
+</script>
+
+<template>
+  <div class="tree-row text-[12.5px]">
+    <button
+      class="relative flex w-full items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors duration-100 hover:bg-hover hover:text-foreground"
+      :class="node.kind === 'file' ? api.activeCls(node.path) : ''"
+      :style="{ paddingLeft: 8 + depth * 14 + 'px' }"
+      type="button"
+      @click="node.kind === 'dir' ? api.toggle(node) : api.openFile(node)"
+      @contextmenu.prevent="api.onRowContextMenu(node, $event)"
+    >
+      <!-- Fixed chevron column: a dir shows a caret, a file leaves it empty so
+           icons at the same depth line up. -->
+      <span class="flex w-3.5 shrink-0 items-center justify-center">
+        <ChevronRight
+          v-if="node.kind === 'dir'"
+          class="h-3 w-3 text-subtle transition-transform duration-150"
+          :class="api.isOpen(node.path) ? 'rotate-90' : ''"
+        />
+      </span>
+      <component :is="icon(node)" class="h-3.5 w-3.5 shrink-0 text-subtle" />
+      <span class="truncate font-medium">{{ fileName(node.path) }}</span>
+    </button>
+
+    <div
+      v-if="node.kind === 'dir' && api.isOpen(node.path) && node.children"
+      class="relative"
+    >
+      <!-- Vertical guide from this folder's icon down to its children. -->
+      <div
+        class="pointer-events-none absolute bottom-0 top-0 w-px bg-divider"
+        :style="{ left: 8 + depth * 14 + 7 + 'px' }"
+      />
+      <TreeItem
+        v-for="child in node.children"
+        :key="child.path"
+        :node="child"
+        :depth="depth + 1"
+      />
+      <!-- Inline creation input rendered as the folder's last child. -->
+      <div
+        v-if="create && create.active && create.active.dir === node.path"
+        class="py-0.5 pr-2"
+        :style="{ paddingLeft: 8 + (depth + 1) * 14 + 'px' }"
+      >
+        <input
+          v-model="create.name"
+          class="input h-7! w-full text-[12px]"
+          autofocus
+          @focus="selectAll"
+          @keydown.enter="create.confirm()"
+          @keydown.esc="create.cancel()"
+          @blur="create.confirm()"
+        />
+      </div>
+    </div>
+  </div>
+</template>
