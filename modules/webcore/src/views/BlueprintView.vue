@@ -1,10 +1,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { useVueFlow, VueFlow, ConnectionMode } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
-import { FileDown, FileUp, GitBranch, Play, Redo2, Save, Undo2, Workflow } from '@lucide/vue'
+import {
+  Activity,
+  FileDown,
+  FileUp,
+  GitBranch,
+  Pause,
+  Play,
+  Redo2,
+  Save,
+  Square,
+  Undo2,
+  Workflow,
+} from '@lucide/vue'
 import type {
   Node as FlowNode,
   Edge as FlowEdge,
@@ -26,22 +37,32 @@ import { useExecutionStore } from '@/stores/execution'
 import { useTabsStore } from '@/stores/tabs'
 import { useRightPanelStore } from '@/stores/right-panel'
 import BlueprintNodeComp from '@/components/BlueprintNode.vue'
+import BlueprintAuditDrawer from '@/components/BlueprintAuditDrawer.vue'
 import ContextMenu, { type MenuGroup } from '@/components/ContextMenu.vue'
 import FileVersionPanel from '@/components/FileVersionPanel.vue'
 import { CATEGORIES, execInOf, makeCallFunctionNode, makeFlowNode, NODE_PRESETS, uuid } from '@/lib/blueprint'
-import { wurl } from '@/lib/workspace-url'
 
 const workspace = useWorkspaceStore()
 const store = useBlueprintStore()
 const execution = useExecutionStore()
 const tabs = useTabsStore()
 const rightPanel = useRightPanelStore()
-const router = useRouter()
 const feedback = useFeedbackStore()
 const props = defineProps<{ filePath?: string }>()
 const { screenToFlowCoordinate, viewport } = useVueFlow()
 
-/** Mirror the live execution trail onto node status classes (visual audit). */
+/** Whether the docked audit drawer is open. */
+const auditOpen = ref(false)
+
+/** Whether the given node has started executing (drives the trail). */
+function nodeStarted(nodeId: string): boolean {
+  const a = execution.nodeAudits.get(nodeId)
+  return !!a?.startedAt
+}
+
+/** Mirror the live execution trail onto the canvas: node status classes plus
+ *  pulse animation on the exec edges already crossed (Unreal debug mode). The
+ *  drawn trail state never feeds `graphKey`, so it cannot dirty a clean file. */
 watch(
   [execution.runningNodeId, execution.status, execution.nodeAudits],
   () => {
@@ -55,9 +76,31 @@ watch(
           : 'running'
         : undefined
     }
+    const live = execution.status === 'running' || execution.status === 'paused'
+    for (const edge of flowEdges.value) {
+      if (edge.class !== 'metteur-edge--exec' || !edge.target) continue
+      const traversed = nodeStarted(edge.target)
+      edge.animated = live && traversed
+      edge.class = traversed ? 'metteur-edge--exec is-traversed' : 'metteur-edge--exec'
+    }
   },
   { deep: true },
 )
+
+const statusChip = computed(() => {
+  switch (execution.status) {
+    case 'running':
+      return 'bg-primary/15 text-primary'
+    case 'paused':
+      return 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+    case 'cancelled':
+      return 'bg-danger-soft text-danger'
+    case 'finished':
+      return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+    default:
+      return 'text-muted-foreground'
+  }
+})
 
 const BLUEPRINT_ID = 'bp-build-feature'
 const BLUEPRINT_TITLE = 'build-feature.blueprint'
@@ -1198,9 +1241,16 @@ async function handleSave() {
 async function handleRun() {
   const ws = workspace.active
   if (!ws) return
+  // Persist the canvas first so the executed blueprint matches what the user
+  // sees, then run it in place with the audit drawer open.
+  await handleSave()
   const id = store.uuidFor(fileKey.value) ?? blueprintId.value
-  await execution.run(id)
-  router.push(wurl('/execution'))
+  auditOpen.value = true
+  try {
+    await execution.run(id)
+  } catch (err) {
+    feedback.toast('error', 'Run failed', String(err))
+  }
 }
 
 /** Import a blueprint from DSL text, replacing the current canvas. */
@@ -1253,6 +1303,43 @@ function openVersionPanel() {
       />
       <span v-else class="h-1.5 w-1.5 rounded-full bg-subtle" />
 
+      <!-- Run state: chip + controls run the graph in place (Unreal debug). -->
+      <span
+        v-if="execution.status !== 'idle'"
+        class="chip ml-1"
+        :class="statusChip"
+      >
+        <span
+          v-if="execution.status === 'running'"
+          class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary"
+        />
+        {{ execution.status }}
+      </span>
+      <button
+        v-if="execution.status === 'running'"
+        class="btn btn-outline ml-1"
+        type="button"
+        @click="execution.pause()"
+      >
+        <Pause class="h-3.5 w-3.5" /> Pause
+      </button>
+      <button
+        v-if="execution.status === 'paused'"
+        class="btn btn-outline ml-1"
+        type="button"
+        @click="execution.resume()"
+      >
+        <Play class="h-3.5 w-3.5" /> Resume
+      </button>
+      <button
+        v-if="execution.running"
+        class="btn btn-danger-outline ml-1"
+        type="button"
+        @click="execution.cancel()"
+      >
+        <Square class="h-3.5 w-3.5" /> Cancel
+      </button>
+
       <div class="pr-1"><!-- spacer keeps icons from hugging the edge --></div>
       <div class="ml-auto flex items-center gap-3">
         <button
@@ -1304,6 +1391,16 @@ function openVersionPanel() {
           @click="importDsl"
         >
           <FileUp class="h-4 w-4" />
+        </button>
+        <button
+          class="editor-tool-icon"
+          type="button"
+          title="Audit drawer"
+          aria-label="Audit"
+          :class="auditOpen ? 'bg-hover text-foreground' : ''"
+          @click="auditOpen = !auditOpen"
+        >
+          <Activity class="h-4 w-4" />
         </button>
         <button
           class="inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-md p-0 text-primary-foreground transition-colors duration-150 hover:brightness-105"
@@ -1384,6 +1481,9 @@ function openVersionPanel() {
           stroke-linecap="round"
         />
       </svg>
+
+      <!-- Docked execution audit (Unreal-style debug trail). -->
+      <BlueprintAuditDrawer v-if="auditOpen" v-model:open="auditOpen" :node-id="selectedId" />
     </div>
 
     <!-- Floating context menus -->

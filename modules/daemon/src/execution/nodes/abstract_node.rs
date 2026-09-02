@@ -1,5 +1,4 @@
-//! Abstract node executor: plans and executes a nested blueprint at runtime
-//! (doc §6.5).
+//! Abstract node executor: plans and executes a nested blueprint at runtime.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use async_trait::async_trait;
 use metteur_shared::llm::{ContextManager, Message, Role};
 use metteur_shared::{Blueprint, Node, PinId, Value};
 
-use crate::anon::Anonymizer;
+use crate::observability::anon::Anonymizer;
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
 use crate::execution::interpreter::{ExecutionEvent, Interpreter};

@@ -14,9 +14,9 @@ use metteur_proto::proto::{
     ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest, LoadFunctionRequest,
     LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
     ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest, ResumeRequest,
-    RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse,
-    SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList,
-    StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList,
+    RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest,
+    SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo,
+    SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList,
     WriteFileRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -361,6 +361,13 @@ impl Daemon for ForwardService {
         self.client.clone().rename_file(request).await
     }
 
+    async fn reveal_in_explorer(
+        &self,
+        request: Request<RevealInExplorerRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.client.clone().reveal_in_explorer(request).await
+    }
+
     type WatchWorkspaceStream = ReceiverStream<Result<WatchEvent, Status>>;
 
     async fn watch_workspace(
@@ -420,6 +427,13 @@ mod tests {
                     locked: false,
                 }],
             }))
+        }
+
+        async fn reveal_in_explorer(
+            &self,
+            _request: Request<RevealInExplorerRequest>,
+        ) -> Result<Response<Empty>, Status> {
+            Ok(Response::new(Empty {}))
         }
 
         async fn execute_blueprint(

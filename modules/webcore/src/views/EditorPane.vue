@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { GitBranch, Redo2, Save, TriangleAlert, Undo2 } from '@lucide/vue'
+import { GitBranch, Redo2, Save, TriangleAlert, Undo2, Workflow } from '@lucide/vue'
 import { gateway } from '@/core'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useTabsStore } from '@/stores/tabs'
 import { useRightPanelStore } from '@/stores/right-panel'
 import { useFileWatchStore } from '@/stores/filewatch'
+import { useFeedbackStore } from '@/stores/feedback'
 import CodeEditor from '@/components/CodeEditor.vue'
 import BlueprintView from './BlueprintView.vue'
 import FileVersionPanel from '@/components/FileVersionPanel.vue'
 import { dirOf } from '@/lib/path'
-import { pathByFileParam } from '@/lib/file-token'
+import { fileRoute, pathByFileParam } from '@/lib/file-token'
 import { wurl } from '@/lib/workspace-url'
 
 const route = useRoute()
@@ -20,11 +21,15 @@ const workspace = useWorkspaceStore()
 const tabs = useTabsStore()
 const rightPanel = useRightPanelStore()
 const fileWatch = useFileWatchStore()
+const feedback = useFeedbackStore()
 
 /** The file path comes from the `?f=` hash, resolved via the persisted
  *  hash→path map — never from raw URL bytes (no path traversal surface). */
 const filePath = computed(() => pathByFileParam(String(route.query.f ?? '')))
 const isBlueprint = computed(() => filePath.value.endsWith('.blueprint'))
+/** A `.mbp` file is a text-drawn blueprint (the DSL); a toolbar action can
+ *  compile it straight into a visual blueprint file. */
+const isDsl = computed(() => filePath.value.toLowerCase().endsWith('.mbp'))
 
 const content = ref('')
 const loaded = ref(false)
@@ -47,6 +52,7 @@ const fileName = computed(() => {
 function languageOf(path: string): string {
   const ext = path.split('.').pop() ?? ''
   const map: Record<string, string> = {
+    mbp: 'mbp',
     json: 'json',
     toml: 'toml',
     ts: 'ts',
@@ -202,6 +208,34 @@ function onHistory(u: boolean, r: boolean) {
 function openVersionPanel() {
   if (filePath.value) rightPanel.show(FileVersionPanel, 'Version History', { filePath: filePath.value })
 }
+
+/** Compile the open `.mbp` DSL text into a visual blueprint file next to it
+ *  and open that file on the canvas. The DSL file itself is left untouched. */
+async function compileToBlueprint() {
+  const ws = workspace.active
+  if (!ws || !filePath.value) return
+  const r = await gateway.compileDsl(content.value)
+  if (!r.ok) {
+    feedback.toast('error', 'DSL compile failed', r.error)
+    return
+  }
+  const name = fileName.value.replace(/\.mbp$/i, '') || 'blueprint'
+  const dir = dirOf(filePath.value)
+  const target = dir ? `${dir}/${name}.blueprint` : `${name}.blueprint`
+  const ok = await gateway.writeFile(
+    ws.path,
+    target,
+    JSON.stringify({ ...r.data, name }, null, 2),
+  )
+  if (!ok) {
+    feedback.toast('error', 'Write blueprint failed', target)
+    return
+  }
+  workspace.invalidateDir(ws.path, dirOf(target))
+  tabs.openFile(target)
+  feedback.toast('success', 'Blueprint created', target)
+  router.push(fileRoute(target))
+}
 </script>
 
 <template>
@@ -230,6 +264,16 @@ function openVersionPanel() {
           style="background: var(--primary)"
           title="Unsaved changes"
         />
+        <button
+          v-if="isDsl"
+          class="btn btn-primary h-7! shrink-0"
+          type="button"
+          title="Compile DSL into a visual blueprint"
+          :aria-label="'Compile to blueprint'"
+          @click="compileToBlueprint"
+        >
+          <Workflow class="h-3.5 w-3.5" /> To Blueprint
+        </button>
         <button
           class="editor-tool-icon"
           type="button"

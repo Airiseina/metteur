@@ -38,3 +38,20 @@ export interface TreeCreateApi {
 
 /** Injection token so directory rows can host the inline creation input. */
 export const TREE_CREATE: InjectionKey<TreeCreateApi> = Symbol('tree-create')
+
+/** Pending in-tree file/folder rename state shown as the row's inline input. */
+export interface TreeRenameApi {
+  /** Path of the row being renamed; `null` when idle. */
+  activePath: string | null
+  /** Live name field of the inline input. */
+  name: string
+  /** Push a keystroke into the rename field. */
+  setName(value: string): void
+  /** Commit the current name (Enter / blur). */
+  confirm(): void
+  /** Abort the rename (Escape), reverting to the original name. */
+  cancel(): void
+}
+
+/** Injection token so any row can become an inline rename input. */
+export const TREE_RENAME: InjectionKey<TreeRenameApi> = Symbol('tree-rename')

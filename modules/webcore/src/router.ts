@@ -49,12 +49,6 @@ const routes = [
     meta: { title: 'File', workspace: true },
   },
   {
-    path: '/work/:wid/execution',
-    name: 'execution',
-    component: () => import('./views/ExecutionView.vue'),
-    meta: { title: 'Execution', workspace: true },
-  },
-  {
     path: '/work/:wid/version',
     name: 'version',
     component: () => import('./views/VersionView.vue'),

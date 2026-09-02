@@ -14,7 +14,7 @@ use super::manifest::Manifest;
 /// Default plugin-call timeout when neither config nor manifest set one.
 const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
 
-/// Permissions an addon can hold (doc §6.4.3).
+/// Permissions an addon can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Permission {
     FsRead,
@@ -43,14 +43,14 @@ pub struct InvocationContext {
     /// Runtime handle captured before entering `spawn_blocking`.
     pub runtime: tokio::runtime::Handle,
     pub permissions: HashSet<Permission>,
-    /// Registry names of all addon tools, hidden from `call_tool` (doc §6.4.5).
+    /// Registry names of all addon tools, hidden from `call_tool`.
     pub addon_tool_names: HashSet<String>,
     pub registry: Arc<crate::registry::Registry>,
-    pub workspace_fs: Option<Arc<crate::fs::WorkspaceFs>>,
+    pub workspace_fs: Option<Arc<crate::workspace::fs::WorkspaceFs>>,
     pub transaction_log: crate::execution::transaction::TransactionLog,
     pub llm_factory: crate::llm::LlmClientFactory,
     pub config: Option<Arc<tokio::sync::RwLock<metteur_shared::config::Config>>>,
-    pub audit: Option<crate::audit::AuditWriter>,
+    pub audit: Option<crate::observability::audit::AuditWriter>,
     pub http: reqwest::blocking::Client,
 }
 
@@ -74,7 +74,7 @@ fn host_error(err: impl std::fmt::Display) -> extism::Error {
     extism::Error::msg(err.to_string())
 }
 
-/// Tools that addons may never reach through `call_tool` (doc §6.4.5).
+/// Tools that addons may never reach through `call_tool`.
 fn is_hidden_from_addons(name: &str, addon_tools: &HashSet<String>) -> bool {
     matches!(name, "ExecuteCommand" | "SpawnSubAgent") || addon_tools.contains(name)
 }
@@ -301,7 +301,7 @@ fn base64_encode(data: &[u8]) -> String {
 /// Invokes one exported addon function with JSON input/output.
 ///
 /// The plugin is instantiated per call: stateless, timeout-enforced and safe
-/// under concurrency (doc §6.4.4).
+/// under concurrency.
 pub fn invoke(
     package_dir: &Path,
     manifest: &Manifest,

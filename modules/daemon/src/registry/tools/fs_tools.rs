@@ -5,7 +5,7 @@ use metteur_shared::Value;
 
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
-use crate::fs::WorkspaceFs;
+use crate::workspace::fs::WorkspaceFs;
 
 use crate::registry::tool::Tool;
 

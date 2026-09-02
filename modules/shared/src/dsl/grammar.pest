@@ -1,0 +1,47 @@
+// Metteur blueprint DSL grammar (Pest PEG).
+//
+// The language is line-oriented: every statement occupies one line and `#`
+// starts a comment. Node arguments may span multiple lines inside parens.
+//
+// ```text
+// blueprint "MyFlow"
+// entry start: Start(A = 4, B = 3)
+// sum: Add(A <- start.A, B <- start.B)
+// start -> sum
+// $sum.Result <- start.A
+// ```
+
+NEWLINE     = _{ "\r\n" | "\n" }
+WHITESPACE  = _{ " " | "\t" | "#" ~ (!NEWLINE ~ ANY)* }
+
+document   =  { SOI ~ (stmt? ~ NEWLINE)* ~ stmt? ~ EOI }
+stmt       = _{ header | entry_node | node | exec_edge | data_wire }
+
+header     =  { "blueprint" ~ string_lit }
+
+node       = { alias ~ ":" ~ kind ~ paren_args? }
+entry_node = { "entry" ~ alias ~ ":" ~ kind ~ paren_args? }
+
+paren_args = { "(" ~ NEWLINE* ~ param_list? ~ NEWLINE* ~ ")" }
+param_list = { param ~ ("," ~ NEWLINE* ~ param)* ~ ","? }
+param      = { pin_name ~ (const_arg | ref_arg) }
+const_arg  = _{ "=" ~ literal }
+ref_arg    = _{ "<-" ~ data_ref }
+
+exec_edge  = { alias ~ ("." ~ pin_name)? ~ "->" ~ alias }
+data_wire  = { "$" ~ pin_ref ~ "<-" ~ pin_ref }
+
+pin_ref    = { alias ~ "." ~ pin_name }
+data_ref   = { alias ~ "." ~ pin_name }
+
+alias     = @{ ident }
+kind      = @{ ident }
+pin_name  = @{ ident }
+ident     = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+
+literal    = { string_lit | bool_lit | number_lit | array_lit | object_lit }
+string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+bool_lit   = @{ "true" | "false" }
+number_lit = @{ ("-" | "+")? ~ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? | "." ~ ASCII_DIGIT+) ~ (("e" | "E") ~ ("-" | "+")? ~ ASCII_DIGIT+)? }
+array_lit  = @{ "[" ~ (literal ~ ("," ~ literal)*)? ~ "]" }
+object_lit = @{ "{" ~ (string_lit ~ ":" ~ literal ~ ("," ~ string_lit ~ ":" ~ literal)*)? ~ "}" }

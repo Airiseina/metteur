@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import type { Component } from 'vue'
 import { computed, ref } from 'vue'
-import { Activity, FileJson, FileText, History, MessageSquare, Settings, Workflow } from '@lucide/vue'
+import { FileCode2, FileJson, FileText, History, MessageSquare, Settings, Workflow } from '@lucide/vue'
 import { projectName } from '@/lib/path'
 import { fileRoute } from '@/lib/file-token'
 import { wurl } from '@/lib/workspace-url'
@@ -25,9 +25,10 @@ export interface TabItem {
   icon: Component
 }
 
-/** App surfaces exposed as closable tabs, reopened from the activity bar. */
+/** App surfaces exposed as closable tabs, reopened from the activity bar.
+ *  Execution is not a surface: it runs inside the blueprint editor. */
 export interface SurfaceDef {
-  key: 'chat' | 'audit' | 'version' | 'settings'
+  key: 'chat' | 'version' | 'settings'
   label: string
   /** Surface route fragment, e.g. `/chat`. */
   path: string
@@ -38,7 +39,6 @@ export interface SurfaceDef {
 
 export const SURFACES: SurfaceDef[] = [
   { key: 'chat', label: 'Chat', path: '/chat', workspace: true, icon: MessageSquare },
-  { key: 'audit', label: 'Execution', path: '/execution', workspace: true, icon: Activity },
   { key: 'version', label: 'Version Flow', path: '/version', workspace: true, icon: History },
   { key: 'settings', label: 'Settings', path: '/settings', workspace: false, icon: Settings },
 ]
@@ -52,6 +52,7 @@ const HOME_ID = 'home'
 
 function fileIcon(path: string): Component {
   if (path.endsWith('.blueprint')) return Workflow
+  if (path.endsWith('.mbp')) return FileCode2
   if (path.endsWith('.json')) return FileJson
   return FileText
 }

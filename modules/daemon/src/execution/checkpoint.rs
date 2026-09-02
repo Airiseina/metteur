@@ -10,7 +10,7 @@ use metteur_shared::{NodeId, PinId, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DaemonError, DaemonResult};
-use crate::persistence::{Db, cf};
+use crate::storage::persistence::{Db, cf};
 
 use super::context::Frame;
 use super::transaction::TransactionEntry;

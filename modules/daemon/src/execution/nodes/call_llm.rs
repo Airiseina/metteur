@@ -45,7 +45,7 @@ impl NodeExecutor for CallLlmExecutor {
                 .unwrap_or("You are a helpful assistant.")
                 .to_string(),
         }];
-        // Addon prompt fragments follow the node-provided ones (doc §6.4.6).
+        // Addon prompt fragments follow the node-provided ones.
         system.extend(ctx.addon_fragments.iter().cloned());
         let context = match input_context(node, inputs) {
             Some(c) => c,

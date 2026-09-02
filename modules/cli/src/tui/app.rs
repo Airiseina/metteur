@@ -115,10 +115,17 @@ impl AppModel {
         }
     }
 
-    /// Scrolls toward older entries.
+    /// Scrolls toward older entries. The upper bound is applied each frame by
+    /// [`AppModel::clamp_scroll`] once the viewport height is known, so the
+    /// backlog is never scrolled past a full screen of the oldest rows.
     pub fn scroll_up(&mut self, amount: usize) {
-        let max = self.log.len().saturating_sub(1);
-        self.scroll = (self.scroll + amount).min(max);
+        self.scroll = self.scroll.saturating_add(amount);
+    }
+
+    /// Caps the scroll offset so the viewport stays full (`max` = maximum
+    /// number of rows that may be skipped while the window still fills it).
+    pub fn clamp_scroll(&mut self, max: usize) {
+        self.scroll = self.scroll.min(max);
     }
 
     /// Scrolls toward newer entries; 0 pins to the bottom.
@@ -224,10 +231,13 @@ mod tests {
             app.push_log(Kind::Info, format!("{index}"));
         }
         app.scroll_up(100);
-        // At most len-1 so at least one line stays visible.
-        assert_eq!(app.scroll, 5);
-        app.scroll_down(4);
+        // The viewport clamps each frame; a 5-row pane can skip at most 5 rows.
+        app.clamp_scroll(app.log.len().saturating_sub(5));
         assert_eq!(app.scroll, 1);
+        app.clamp_scroll(5);
+        assert_eq!(app.scroll, 1);
+        app.scroll_down(4);
+        assert_eq!(app.scroll, 0);
         app.scroll_down(10);
         assert_eq!(app.scroll, 0);
     }

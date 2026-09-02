@@ -7,8 +7,8 @@ use metteur_shared::Value;
 
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
-use crate::fs::WorkspaceFs;
-use crate::lsp::{LspManager, client::LspClient};
+use crate::workspace::fs::WorkspaceFs;
+use crate::integration::lsp::{LspManager, client::LspClient};
 use crate::registry::Tool;
 
 /// One resolved document pushed to its language server.

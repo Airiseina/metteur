@@ -4,32 +4,21 @@
 //! `metteurd` binary and exercised by integration tests.
 
 pub mod addon;
-pub mod anon;
-pub mod audit;
-pub mod autostart;
-pub mod billing;
-pub mod cert;
 pub mod cli;
 pub mod config;
 pub mod depgraph;
 pub mod error;
 pub mod execution;
-pub mod fs;
 pub mod grpc;
+pub mod integration;
 pub mod llm;
-pub mod lsp;
-pub mod mcp;
-pub mod metrics;
-pub mod persistence;
-pub mod process;
+pub mod observability;
 pub mod registry;
 pub mod replan;
 pub mod sandbox;
-pub mod service;
-pub mod signer;
 pub mod startup;
+pub mod storage;
 pub mod tls;
-pub mod versioning;
 pub mod wake;
 pub mod workspace;
 
@@ -37,3 +26,9 @@ pub use error::{DaemonError, DaemonResult};
 pub use grpc::{AppState, DaemonService};
 pub use registry::Registry;
 pub use workspace::WorkspaceManager;
+
+// Compatibility aliases for the pre-refactor top-level module paths
+// (used by the daemon binary and external callers).
+pub use addon::signer;
+pub use startup::{autostart, service};
+pub use tls::cert;

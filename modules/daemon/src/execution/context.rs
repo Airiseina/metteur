@@ -7,9 +7,9 @@ use metteur_shared::config::Config;
 use metteur_shared::{Blueprint, NodeId, PinId, Value};
 use tokio::sync::RwLock;
 
-use crate::audit::AuditWriter;
+use crate::observability::audit::AuditWriter;
 use crate::llm::LlmClientFactory;
-use crate::persistence::Db;
+use crate::storage::persistence::Db;
 use crate::registry::Registry;
 
 use super::interrupt::InterruptBus;
@@ -179,9 +179,9 @@ pub struct ExecutionContext {
     /// SubAgent nesting depth of this context.
     pub depth: u32,
     /// Process-wide metrics, when attached.
-    pub metrics: Option<Arc<crate::metrics::Metrics>>,
+    pub metrics: Option<Arc<crate::observability::metrics::Metrics>>,
     /// Language-server manager for this workspace, when LSP is enabled.
-    pub lsp: Option<Arc<crate::lsp::LspManager>>,
+    pub lsp: Option<Arc<crate::integration::lsp::LspManager>>,
     /// Addon prompt fragments injected into fresh CallLLM contexts.
     pub addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
     /// Shared handle to the executing root blueprint (replan hot-apply).
@@ -223,7 +223,7 @@ impl ExecutionContext {
     }
 
     /// Attaches the workspace language-server manager.
-    pub fn with_lsp(mut self, lsp: Arc<crate::lsp::LspManager>) -> Self {
+    pub fn with_lsp(mut self, lsp: Arc<crate::integration::lsp::LspManager>) -> Self {
         self.lsp = Some(lsp);
         self
     }

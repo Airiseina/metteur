@@ -1,4 +1,4 @@
-//! Addon manifest parsing and validation (doc §6.4.2).
+//! Addon manifest parsing and validation.
 
 use std::path::{Path, PathBuf};
 

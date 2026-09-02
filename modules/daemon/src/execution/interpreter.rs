@@ -9,7 +9,7 @@ use metteur_shared::{Blueprint, Node, NodeId, PinId, PinType, Value};
 use parking_lot::RwLock as PLock;
 use tokio::sync::RwLock;
 
-use crate::audit::AuditWriter;
+use crate::observability::audit::AuditWriter;
 use crate::error::{DaemonError, DaemonResult};
 use crate::llm::LlmClientFactory;
 use crate::registry::Registry;
@@ -82,11 +82,11 @@ pub struct Interpreter {
     /// Live event sink; when set, events stream out instead of buffering.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecutionEvent>>,
     approvals: Option<Arc<crate::sandbox::approval::ApprovalBroker>>,
-    metrics: Option<Arc<crate::metrics::Metrics>>,
+    metrics: Option<Arc<crate::observability::metrics::Metrics>>,
     transaction_log: Option<super::transaction::TransactionLog>,
-    workspace_db: Option<crate::persistence::Db>,
-    global_db: Option<crate::persistence::Db>,
-    lsp: Option<Arc<crate::lsp::LspManager>>,
+    workspace_db: Option<crate::storage::persistence::Db>,
+    global_db: Option<crate::storage::persistence::Db>,
+    lsp: Option<Arc<crate::integration::lsp::LspManager>>,
     addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
     shared_blueprint: Option<SharedBlueprint>,
     circuit_failures: u32,
@@ -166,7 +166,7 @@ impl Interpreter {
     }
 
     /// Attaches process-wide metrics.
-    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::Metrics>) -> Self {
+    pub fn with_metrics(mut self, metrics: Arc<crate::observability::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
         self
     }
@@ -179,19 +179,19 @@ impl Interpreter {
     }
 
     /// Attaches the workspace database for persistent sandbox grants.
-    pub fn with_workspace_db(mut self, db: crate::persistence::Db) -> Self {
+    pub fn with_workspace_db(mut self, db: crate::storage::persistence::Db) -> Self {
         self.workspace_db = Some(db);
         self
     }
 
     /// Attaches the global database for global sandbox grants.
-    pub fn with_global_db(mut self, db: crate::persistence::Db) -> Self {
+    pub fn with_global_db(mut self, db: crate::storage::persistence::Db) -> Self {
         self.global_db = Some(db);
         self
     }
 
     /// Attaches the workspace language-server manager.
-    pub fn with_lsp(mut self, lsp: Arc<crate::lsp::LspManager>) -> Self {
+    pub fn with_lsp(mut self, lsp: Arc<crate::integration::lsp::LspManager>) -> Self {
         self.lsp = Some(lsp);
         self
     }

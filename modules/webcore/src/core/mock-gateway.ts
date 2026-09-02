@@ -14,6 +14,7 @@ import type {
   ExecutionInfo,
   FileContent,
   FileHistoryEntry,
+  FileInfo,
   FileTreeNode,
   McpServerInfo,
   Result,
@@ -429,6 +430,11 @@ export class MockGateway implements DaemonGateway {
     return ok(undefined)
   }
 
+  async revealInExplorer(_ws: string, _path: string): Promise<Result<void>> {
+    await delay(80)
+    return ok(undefined)
+  }
+
   async renameFile(_ws: string, from: string, to: string): Promise<Result<void>> {
     await delay(80)
     const key = from.replace(/^[\\/]+/i, '')
@@ -438,6 +444,13 @@ export class MockGateway implements DaemonGateway {
       DEMO_FILES.set(to.replace(/^[\\/]+/i, ''), content)
     }
     return ok(undefined)
+  }
+
+  async statFile(_ws: string, path: string): Promise<Result<FileInfo>> {
+    await delay(60)
+    const key = path.replace(/^[\\/]+/i, '')
+    const isDir = !key.includes('.')
+    return ok({ path, isDir, len: isDir ? 0 : (DEMO_FILES.get(key)?.length ?? 0) })
   }
 
   async watchWorkspace(

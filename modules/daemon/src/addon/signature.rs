@@ -1,7 +1,7 @@
 //! Package integrity signing and verification for addons.
 //!
 //! A package may carry a `signature.toml` produced over the canonical digest
-//! of every file inside the package (doc §6.4.6). The daemon verifies it at
+//! of every file inside the package. The daemon verifies it at
 //! install time so that an on-disk or in-transit package cannot be tampered
 //! with after a trusted developer published it.
 

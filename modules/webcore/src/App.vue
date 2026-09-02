@@ -2,7 +2,6 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  Activity,
   ChevronDown,
   Folder,
   FolderOpen,
@@ -52,7 +51,7 @@ const { openSurface } = useSurfaceNavigation()
 /* Activity rail                                                        */
 
 interface Activity {
-  key: 'explorer' | 'chat' | 'execution' | 'version'
+  key: 'explorer' | 'chat' | 'version'
   label: string
   icon: Component
 }
@@ -60,7 +59,6 @@ interface Activity {
 const activities: Activity[] = [
   { key: 'explorer', label: 'Explorer', icon: Files },
   { key: 'chat', label: 'Chat', icon: MessageSquare },
-  { key: 'execution', label: 'Execution', icon: Activity },
   { key: 'version', label: 'Version Flow', icon: History },
 ]
 
@@ -68,7 +66,6 @@ const activities: Activity[] = [
  *  owns the sidebar). `route.name` may be undefined before mount. */
 function routeActivity(name: string | symbol | null | undefined): Activity['key'] | null {
   if (name === 'chat') return 'chat'
-  if (name === 'execution') return 'execution'
   if (name === 'version') return 'version'
   if (name === 'explorer' || name === 'file') return 'explorer'
   return null
@@ -89,7 +86,7 @@ function openActivity(a: Activity['key']) {
     toggleExplorer()
     return
   }
-  openSurface(a as 'chat' | 'execution' | 'version' | 'settings')
+  openSurface(a as 'chat' | 'version' | 'settings')
 }
 
 /** Settings lives at the bottom of the rail; it is also a reopenable tab. */
@@ -97,11 +94,11 @@ function openSettings() {
   openSurface('settings')
 }
 
-/** Rail highlight: full-page surfaces (chat / audit) drive it from their
- *  route; otherwise an open panel wins, falling back to the route. */
+/** Rail highlight: full-page surfaces (chat) drive it from their route;
+ *  otherwise an open panel wins, falling back to the route. */
 const activeKey = computed<Activity['key'] | null>(() => {
   const r = routeActivity(route.name)
-  if (r === 'chat' || r === 'execution') return r
+  if (r === 'chat') return r
   const owner = panel.open ? panel.owner : null
   return owner === 'explorer' || owner === 'version' ? owner : r
 })

@@ -2,6 +2,7 @@
 
 pub mod manifest;
 pub mod runtime;
+pub mod signer;
 pub mod signature;
 
 use std::collections::{BTreeMap, HashSet};
@@ -50,7 +51,7 @@ pub struct AddonHost {
     signature: signature::Policy,
     loaded: RwLock<BTreeMap<String, Loaded>>,
     /// Registry names of all addon tools, mirrored for the runtime's
-    /// `call_tool` hidden list (doc §6.4.5).
+    /// `call_tool` hidden list.
     addon_tool_names: Arc<RwLock<HashSet<String>>>,
     /// Serializes installs/uninstalls/rescans.
     maintenance: AsyncMutex<()>,
@@ -147,7 +148,7 @@ impl AddonHost {
             );
         }
         // Mirror every registered addon tool name for the runtime's hidden
-        // list so addons cannot call each other (doc §6.4.5).
+        // list so addons cannot call each other.
         let all_names: HashSet<String> =
             loaded.values().flat_map(|entry| entry.tool_names.iter().cloned()).collect();
         *self.addon_tool_names.write() = all_names;
@@ -400,7 +401,7 @@ impl Tool for AddonTool {
             permissions: self.permissions.clone(),
             addon_tool_names: self.addon_tool_names.read().clone(),
             registry: ctx.registry.clone(),
-            workspace_fs: Some(Arc::new(crate::fs::WorkspaceFs::new(ctx.workspace_root.clone()))),
+            workspace_fs: Some(Arc::new(crate::workspace::fs::WorkspaceFs::new(ctx.workspace_root.clone()))),
             transaction_log: ctx.transaction_log.clone(),
             llm_factory: ctx.llm_factory.clone(),
             config: ctx.config.clone(),

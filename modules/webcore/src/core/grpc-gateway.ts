@@ -15,6 +15,7 @@ import type {
   ExecutionInfo,
   FileContent,
   FileHistoryEntry,
+  FileInfo,
   FileTreeNode,
   FunctionItem,
   McpServerInfo,
@@ -430,6 +431,24 @@ export class GrpcGateway implements DaemonGateway {
   async renameFile(workspacePath: string, from: string, to: string): Promise<Result<void>> {
     try {
       await this.client.renameFile({ workspacePath, from, to })
+      return ok(undefined)
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async statFile(workspacePath: string, path: string): Promise<Result<FileInfo>> {
+    try {
+      const info = await this.client.statFile({ workspacePath, path })
+      return ok({ path: info.path, isDir: info.isDir, len: Number(info.len) })
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async revealInExplorer(workspacePath: string, path: string): Promise<Result<void>> {
+    try {
+      await this.client.revealInExplorer({ workspacePath, path })
       return ok(undefined)
     } catch (e) {
       return toErr(e)

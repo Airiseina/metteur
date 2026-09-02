@@ -35,6 +35,14 @@ export interface FileTreeNode {
   children?: FileTreeNode[]
 }
 
+/** Metadata of one filesystem entry, used by the explorer's Properties. */
+export interface FileInfo {
+  path: string
+  isDir: boolean
+  /** Length in bytes. */
+  len: number
+}
+
 /** A live file-system change pushed from the daemon. */
 export interface WatchEvent {
   /** Workspace-relative path using `/` as the separator. */

@@ -8,6 +8,7 @@ import type {
   ExecutionInfo,
   FileContent,
   FileHistoryEntry,
+  FileInfo,
   FileTreeNode,
   FunctionItem,
   McpServerInfo,
@@ -51,6 +52,9 @@ export interface DaemonGateway {
   createDir(workspacePath: string, dirPath: string): Promise<Result<void>>
   removeFile(workspacePath: string, filePath: string): Promise<Result<void>>
   renameFile(workspacePath: string, from: string, to: string): Promise<Result<void>>
+  statFile(workspacePath: string, path: string): Promise<Result<FileInfo>>
+  /** Opens the system file manager with the entry selected (best effort). */
+  revealInExplorer(workspacePath: string, path: string): Promise<Result<void>>
   /** Subscribes to live file changes; resolves when the stream ends or aborts. */
   watchWorkspace(
     workspacePath: string,

@@ -154,6 +154,12 @@ body {
   stroke-width: 2.5;
 }
 
+/* A just-crossed exec edge glows while the run is live: the `animated` class
+   (from vue-flow) supplies the marching dashes, this adds the halo. */
+.blueprint-flow .vue-flow__edge.metteur-edge--exec.is-traversed .vue-flow__edge-path {
+  filter: drop-shadow(0 0 3px var(--exec-wire));
+}
+
 .blueprint-flow .vue-flow__edge.selected .vue-flow__edge-path {
   stroke: var(--ring);
   stroke-width: 3;

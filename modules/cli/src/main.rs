@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         cli.tls_cert.clone(),
         cli.tls_key.clone(),
     )?;
-    let client = match session::connect(&cli.addr, tls.as_ref()).await {
+    let mut client = match session::connect(&cli.addr, tls.as_ref()).await {
         Ok(client) => client,
         Err(first_error) => {
             if cli.no_spawn {
@@ -94,7 +94,17 @@ async fn main() -> anyhow::Result<()> {
 
     let interactive = !cli.no_tui && std::io::IsTerminal::is_terminal(&std::io::stdout());
     if interactive {
-        tui::run_tui(client, cli.workspace).await
+        // Raw-mode terminals are the only place a TUI is usable. When the
+        // terminal refuses raw mode (e.g. certain embedded/ConPTY shims),
+        // fall back to the line REPL instead of running an echoing canvas
+        // that would double every keystroke.
+        match tui::run_tui(&mut client, cli.workspace.clone()).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                eprintln!("TUI unavailable ({err:#}); falling back to line REPL");
+                repl::run(client, cli.workspace).await
+            }
+        }
     } else {
         repl::run(client, cli.workspace).await
     }

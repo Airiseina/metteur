@@ -31,6 +31,7 @@ export type {
   ExecutionInfo,
   FileContent,
   FileHistoryEntry,
+  FileInfo,
   FileTreeNode,
   FnPinInfo,
   FunctionItem,

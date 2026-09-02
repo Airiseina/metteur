@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { inject } from 'vue'
 import type { Component } from 'vue'
-import { ChevronRight, FileCode, FileJson, FileText, Folder, FolderOpen, Workflow } from '@lucide/vue'
+import { ChevronRight, FileCode, FileCode2, FileJson, FileText, Folder, FolderOpen, Workflow } from '@lucide/vue'
 import type { FileTreeNode } from '@/core'
-import { TREE_API, TREE_CREATE } from '@/lib/tree'
+import { TREE_API, TREE_CREATE, TREE_RENAME } from '@/lib/tree'
 
 defineOptions({ name: 'TreeItem' })
 
 const api = inject(TREE_API)!
 const create = inject(TREE_CREATE, null)
+/** Inline rename state (null when no row is being renamed). */
+const rename = inject(TREE_RENAME, null)
 
 const props = defineProps<{
   node: FileTreeNode
@@ -18,6 +20,7 @@ const props = defineProps<{
 function icon(node: FileTreeNode): Component {
   if (node.kind === 'dir') return api.isOpen(node.path) ? FolderOpen : Folder
   if (node.path.endsWith('.blueprint')) return Workflow
+  if (node.path.endsWith('.mbp')) return FileCode2
   if (node.path.endsWith('.json')) return FileJson
   if (node.path.endsWith('.ts') || node.path.endsWith('.js')) return FileCode
   return FileText
@@ -36,7 +39,25 @@ function selectAll(e: FocusEvent) {
 
 <template>
   <div class="tree-row text-[12.5px]">
+    <!-- Inline rename: the label becomes an input while the row is renamed. -->
+    <div
+      v-if="rename && rename.activePath === node.path"
+      class="flex items-center gap-1 py-0.5 pr-2"
+      :style="{ paddingLeft: 8 + depth * 14 + 3 + 'px' }"
+    >
+      <input
+        :value="rename.name"
+        class="input h-6! w-full text-[12px]"
+        autofocus
+        @input="rename.setName(($event.target as HTMLInputElement).value)"
+        @focus="($event.target as HTMLInputElement).select()"
+        @keydown.enter="rename.confirm()"
+        @keydown.esc="rename.cancel()"
+        @blur="rename.confirm()"
+      />
+    </div>
     <button
+      v-else
       class="relative flex w-full items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors duration-100 hover:bg-hover hover:text-foreground"
       :class="node.kind === 'file' ? api.activeCls(node.path) : ''"
       :style="{ paddingLeft: 8 + depth * 14 + 'px' }"

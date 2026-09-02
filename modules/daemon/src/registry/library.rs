@@ -8,7 +8,7 @@ use metteur_shared::model::function::{FnPin, FunctionEntry, FunctionSignature, F
 use metteur_shared::{Blueprint, DataType, Edge, Node, NodeType, Pin, PinType};
 
 use crate::error::{DaemonError, DaemonResult};
-use crate::persistence::Db;
+use crate::storage::persistence::Db;
 
 /// Builds the built-in `ChainOfThought` function.
 ///
@@ -119,13 +119,13 @@ pub fn builtin_chain_of_thought() -> FunctionEntry {
 pub fn save(db: &Db, entry: &FunctionEntry) -> DaemonResult<()> {
     let data =
         serde_json::to_vec(entry).map_err(|e| DaemonError::Serialization(e.to_string()))?;
-    db.put(crate::persistence::cf::FUNCTIONS, entry.name.as_bytes(), &data)
+    db.put(crate::storage::persistence::cf::FUNCTIONS, entry.name.as_bytes(), &data)
 }
 
 /// Loads all stored functions from a database.
 pub fn load_all(db: &Db) -> DaemonResult<Vec<FunctionEntry>> {
     let mut out = Vec::new();
-    for (_, value) in db.scan(crate::persistence::cf::FUNCTIONS)? {
+    for (_, value) in db.scan(crate::storage::persistence::cf::FUNCTIONS)? {
         let entry: FunctionEntry =
             serde_json::from_slice(&value).map_err(|e| DaemonError::Serialization(e.to_string()))?;
         out.push(entry);
@@ -136,7 +136,7 @@ pub fn load_all(db: &Db) -> DaemonResult<Vec<FunctionEntry>> {
 
 /// Removes a function by name from a database.
 pub fn delete(db: &Db, name: &str) -> DaemonResult<()> {
-    db.delete(crate::persistence::cf::FUNCTIONS, name.as_bytes())
+    db.delete(crate::storage::persistence::cf::FUNCTIONS, name.as_bytes())
 }
 
 /// Returns whether the entry is well-formed enough to execute.

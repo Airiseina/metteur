@@ -108,7 +108,7 @@ impl Registry {
     }
 
     /// Registers all functions stored in `db`, tagged with `source`.
-    pub fn load_functions(&self, db: &crate::persistence::Db, source: FunctionSource) -> DaemonResult<()> {
+    pub fn load_functions(&self, db: &crate::storage::persistence::Db, source: FunctionSource) -> DaemonResult<()> {
         for mut entry in crate::registry::library::load_all(db)? {
             entry.source = source;
             self.register_function(entry);

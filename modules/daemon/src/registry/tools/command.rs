@@ -6,7 +6,7 @@ use tokio::process::Command;
 
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
-use crate::fs::WorkspaceFs;
+use crate::workspace::fs::WorkspaceFs;
 
 use super::Args;
 use crate::registry::tool::Tool;

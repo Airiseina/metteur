@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use super::app::{AppModel, Kind};
 
 /// Renders the whole frame.
-pub fn draw(frame: &mut ratatui::Frame, app: &AppModel) {
+pub fn draw(frame: &mut ratatui::Frame, app: &mut AppModel) {
     let sidebar_width = 26u16;
     let chunks =
         Layout::vertical([Constraint::Min(5), Constraint::Length(3), Constraint::Length(1)])
@@ -16,8 +16,15 @@ pub fn draw(frame: &mut ratatui::Frame, app: &AppModel) {
     let main_split = Layout::horizontal([Constraint::Min(40), Constraint::Length(sidebar_width)])
         .split(chunks[0]);
 
+    // Clamp the scroll so the backlog never ends up with a half-empty log pane:
+    // the oldest rows always fill the visible window.
+    let log_height = main_split[0].height.saturating_sub(2) as usize;
+    if log_height > 0 {
+        app.clamp_scroll(app.log.len().saturating_sub(log_height));
+    }
+
     let visible: Vec<UiLine> = app
-        .visible_tail(main_split[0].height.saturating_sub(2) as usize)
+        .visible_tail(log_height)
         .map(|line| {
             let color = match line.kind {
                 Kind::System => Color::Cyan,

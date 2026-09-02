@@ -69,7 +69,7 @@ pub fn lookup(
     ctx: &crate::execution::context::ExecutionContext,
     path: &str,
 ) -> DaemonResult<DepEntry> {
-    use crate::fs::WorkspaceFs;
+    use crate::workspace::fs::WorkspaceFs;
     let fs = WorkspaceFs::new(ctx.workspace_root.clone());
     let abs = fs.resolve_existing(path)?;
     let rel =

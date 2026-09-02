@@ -1,7 +1,7 @@
 //! Persistent storage for sandbox grants.
 
 use crate::error::DaemonResult;
-use crate::persistence::{Db, cf};
+use crate::storage::persistence::{Db, cf};
 
 use super::approval::{Decision, Scope};
 

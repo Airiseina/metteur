@@ -76,6 +76,8 @@ service Daemon {
   rpc CreateDir(CreateDirRequest) returns (Empty);
   rpc RemoveFile(RemoveFileRequest) returns (Empty);
   rpc RenameFile(RenameFileRequest) returns (Empty);
+  // Opens the system file manager with the entry selected (best effort).
+  rpc RevealInExplorer(RevealInExplorerRequest) returns (Empty);
   // Live file-change events for the workspace (created / modified / removed).
   rpc WatchWorkspace(WatchWorkspaceRequest) returns (stream WatchEvent);
 
@@ -449,6 +451,12 @@ message RenameFileRequest {
   string workspace_path = 1;
   string from = 2;
   string to = 3;
+}
+
+message RevealInExplorerRequest {
+  // Workspace-relative path of the entry to reveal.
+  string workspace_path = 1;
+  string path = 2;
 }
 
 message WatchWorkspaceRequest {

@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import { useThemeStore } from '@/stores/theme'
+import { ensureMbpLanguage, bindMbpDiagnostics } from '@/lib/mbp-language'
 
 /**
  * Code editor backed by Monaco Editor, with a CodeMirror fallback for coarse
@@ -44,6 +45,7 @@ function syncUndoState() {
 }
 
 function monacoLanguage(lang: string): string {
+  if (lang === 'mbp') return 'mbp'
   if (lang === 'json') return 'json'
   if (lang.startsWith('ts')) return 'typescript'
   if (lang === 'js' || lang === 'jsx' || lang === 'mjs' || lang === 'cjs') return 'javascript'
@@ -64,8 +66,17 @@ async function setupMonaco() {
   const mod = (await import('@/lib/monaco')).default
   monacoMod = mod
   applyMonacoTheme()
-  const model = mod.editor.createModel(props.modelValue, monacoLanguage(props.language))
+  const lang = monacoLanguage(props.language)
+  // The DSL language must exist before the model references it, so
+  // tokenization/complete handlers are attached from the start.
+  if (lang === 'mbp') ensureMbpLanguage(mod)
+  const model = mod.editor.createModel(
+    props.modelValue,
+    lang,
+    lang === 'mbp' ? mod.Uri.parse('mbp://local/blueprint.mbp') : undefined,
+  )
   monoModel = model
+  if (lang === 'mbp') bindMbpDiagnostics(mod, model)
   monoEditor = mod.editor.create(container.value!, {
     model,
     automaticLayout: true,

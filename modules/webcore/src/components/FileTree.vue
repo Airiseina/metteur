@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { FilePlus2, FolderPlus, RefreshCw } from '@lucide/vue'
+import {
+  ClipboardPaste,
+  FilePlus2,
+  FolderPlus,
+  RefreshCw,
+} from '@lucide/vue'
 import { gateway } from '@/core'
 import type { FileTreeNode } from '@/core'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -10,11 +15,14 @@ import { useChatStore } from '@/stores/chat'
 import { useBlueprintStore } from '@/stores/blueprint'
 import { useFeedbackStore } from '@/stores/feedback'
 import { useFileWatchStore } from '@/stores/filewatch'
+import { useFileClipboardStore } from '@/stores/fileclip'
 import { fileRoute } from '@/lib/file-token'
 import { useSurfaceNavigation } from '@/lib/surface'
-import { TREE_API, TREE_CREATE } from '@/lib/tree'
+import { TREE_API, TREE_CREATE, TREE_RENAME } from '@/lib/tree'
 import TreeItem from '@/components/TreeItem.vue'
 import ContextMenu, { type MenuGroup, type MenuItem } from '@/components/ContextMenu.vue'
+import FilePropertiesModal from '@/components/FilePropertiesModal.vue'
+import { dirOf } from '@/lib/path'
 
 /**
  * Left-side resource explorer.
@@ -162,6 +170,167 @@ async function exists(wsPath: string, dir: string, path: string): Promise<boolea
   return r.ok ? r.data.some((n) => n.path === path) : false
 }
 
+/* Clipboard (copy / cut / paste) -------------------------------------- */
+
+const clip = useFileClipboardStore()
+
+/** Base file-name of a workspace-relative path. */
+function baseName(path: string): string {
+  const seg = path.split(/[\\/]/).filter(Boolean)
+  return seg[seg.length - 1] ?? path
+}
+
+/** Recursively copies a file or directory tree (daemon has no copy RPC). */
+async function copyPath(ws: string, from: string, to: string): Promise<boolean> {
+  const st = await gateway.statFile(ws, from)
+  if (st.ok && st.data.isDir) {
+    if (!(await gateway.createDir(ws, to)).ok) return false
+    const list = await gateway.listFiles(ws, from)
+    if (!list.ok) return false
+    for (const entry of list.data) {
+      if (!(await copyPath(ws, `${from}/${entry.name}`, `${to}/${entry.name}`))) return false
+    }
+    return true
+  }
+  const r = await gateway.readFile(ws, from)
+  if (!r.ok) return false
+  return (await gateway.writeFile(ws, to, r.data.content)).ok
+}
+
+/** First name inside `dir` that does not collide yet (`name`, `name (1)`, …). */
+async function uniqueDest(ws: string, dir: string, name: string): Promise<string> {
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  let candidate = dir ? `${dir}/${name}` : name
+  let i = 1
+  while (await exists(ws, dir, candidate)) {
+    candidate = dir ? `${dir}/${stem} (${i})${ext}` : `${stem} (${i})${ext}`
+    i++
+  }
+  return candidate
+}
+
+/** Cut = move (rename RPC); copy = recursive copy into the target folder. */
+async function pasteInto(dir: string) {
+  const ws = workspace.active
+  if (!ws || !clip.active) return
+  const op = clip.op
+  const sources = [...clip.sources]
+  clip.clear()
+  for (const src of sources) {
+    const name = baseName(src)
+    if (op === 'cut') {
+      const dest = dir ? `${dir}/${name}` : name
+      if (dest === src) continue
+      const r = await gateway.renameFile(ws.path, src, dest)
+      if (!r.ok) feedback.toast('error', 'Cut failed', r.error)
+    } else {
+      const dest = await uniqueDest(ws.path, dir, name)
+      if (!(await copyPath(ws.path, src, dest))) feedback.toast('error', 'Copy failed', src)
+    }
+  }
+  await refreshTree()
+}
+
+/* Rename (inline row editor) ------------------------------------------- */
+
+const renamingPath = ref<string | null>(null)
+const renameName = ref('')
+function startRename(node: FileTreeNode) {
+  renamingPath.value = node.path
+  renameName.value = baseName(node.path)
+}
+async function commitRename() {
+  const ws = workspace.active
+  const path = renamingPath.value
+  renamingPath.value = null
+  if (!ws || !path) return
+  const name = renameName.value.trim()
+  const dir = dirOf(path)
+  if (!name || /[\\/]/.test(name)) {
+    feedback.toast('error', 'Invalid name', 'Name must be non-empty and contain no path separators')
+    return
+  }
+  const target = dir ? `${dir}/${name}` : name
+  if (target === path) return
+  if (await exists(ws.path, dir, target)) {
+    feedback.toast('error', `${name} already exists`)
+    return
+  }
+  const r = await gateway.renameFile(ws.path, path, target)
+  if (!r.ok) {
+    feedback.toast('error', 'Rename failed', r.error)
+    return
+  }
+  const tabId = `file:${path}`
+  if (tabs.items.some((t) => t.id === tabId)) {
+    tabs.close(tabId)
+    tabs.openFile(target)
+  }
+  await refreshTree()
+}
+
+/* Delete / properties / reveal ----------------------------------------- */
+
+async function deleteNode(node: FileTreeNode) {
+  const ws = workspace.active
+  if (!ws) return
+  const ok = await feedback.confirm({
+    header: `Delete ${node.kind}`,
+    message: `Delete "${baseName(node.path)}"? This cannot be undone.`,
+    acceptLabel: 'Delete',
+    rejectLabel: 'Cancel',
+    danger: true,
+  })
+  if (!ok) return
+  const r = await gateway.removeFile(ws.path, node.path)
+  if (!r.ok) {
+    feedback.toast('error', 'Delete failed', r.error)
+    return
+  }
+  if (node.kind === 'file') {
+    const tabId = `file:${node.path}`
+    if (tabs.items.some((t) => t.id === tabId)) tabs.close(tabId)
+  }
+  await refreshTree()
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** Shows a modal with stat-derived metadata for the selected entry. */
+const properties = ref<{ title: string; rows: { label: string; value: string }[] } | null>(null)
+const propertiesName = ref('')
+async function showProperties(node: FileTreeNode) {
+  const ws = workspace.active
+  if (!ws) return
+  const r = await gateway.statFile(ws.path, node.path)
+  const kind = node.kind === 'dir' ? 'Folder' : (node.path.split('.').pop()?.toUpperCase() || 'File')
+  const size = r.ok ? formatBytes(r.data.len) : '—'
+  propertiesName.value = baseName(node.path)
+  properties.value = {
+    title: `${propertiesName.value} properties`,
+    rows: [
+      { label: 'Name', value: propertiesName.value },
+      { label: 'Kind', value: kind },
+      { label: 'Path', value: node.path },
+      { label: 'Location', value: dirOf(node.path) || 'Workspace root' },
+      { label: 'Size', value: size },
+    ],
+  }
+}
+
+async function revealNode(node: FileTreeNode) {
+  const ws = workspace.active
+  if (!ws) return
+  const r = await gateway.revealInExplorer(ws.path, node.path)
+  if (!r.ok) feedback.toast('error', 'Reveal failed', r.error)
+}
+
 function openMenu(x: number, y: number, node: FileTreeNode | null) {
   menu.value = { x, y, node }
 }
@@ -178,25 +347,43 @@ function onRowContextMenu(node: FileTreeNode, event: MouseEvent) {
 }
 
 function menuGroupsOf(node: FileTreeNode | null): MenuGroup[] {
-  const items: MenuItem[] = []
-  if (node?.kind === 'file') {
-    items.push({ id: 'open', label: 'Open' })
-    items.push({ id: 'add-to-chat', label: 'Add to Conversation' })
-    items.push({ id: 'add-to-blueprint', label: 'Add to Blueprint' })
+  const onNode = node !== null
+  const isFile = node?.kind === 'file'
+  const main: MenuItem[] = []
+  if (isFile) {
+    main.push({ id: 'open', label: 'Open' })
+    main.push({ id: 'add-to-chat', label: 'Add to Conversation' })
+    main.push({ id: 'add-to-blueprint', label: 'Add to Blueprint' })
   } else {
-    items.push({ id: 'new-file', label: 'New File…' })
-    items.push({ id: 'new-folder', label: 'New Folder…' })
-    items.push({ id: 'refresh', label: 'Refresh' })
+    main.push({ id: 'new-file', label: 'New File…' })
+    main.push({ id: 'new-folder', label: 'New Folder…' })
+    main.push({ id: 'refresh', label: 'Refresh' })
   }
+  const clipboard: MenuItem[] = []
+  if (onNode) {
+    clipboard.push({ id: 'copy', label: 'Copy', hint: '' })
+    clipboard.push({ id: 'cut', label: 'Cut' })
+  }
+  clipboard.push({ id: 'paste', label: 'Paste', hint: '' })
+  const actions: MenuItem[] = []
+  if (onNode) {
+    actions.push({ id: 'rename', label: 'Rename' })
+    actions.push({ id: 'delete', label: 'Delete' })
+    actions.push({ id: 'reveal', label: 'Reveal in File Explorer' })
+  }
+  actions.push({ id: 'properties', label: 'Properties' })
+  actions.push({ id: 'copy-path', label: 'Copy Path' })
   return [
-    { label: node?.kind === 'file' ? 'File' : 'Create', items },
-    { label: 'Actions', items: [{ id: 'copy-path', label: 'Copy Path' }] },
+    { label: isFile ? 'File' : 'Actions', items: main },
+    { label: 'Clipboard', items: clipboard },
+    { label: 'Actions', items: actions },
   ]
 }
 
 async function onMenuSelect(id: string) {
   const node = menu.value?.node ?? null
   menu.value = null
+  const ws = workspace.active
   switch (id) {
     case 'copy-path':
       if (node) await navigator.clipboard.writeText(node.path)
@@ -210,6 +397,17 @@ async function onMenuSelect(id: string) {
     case 'refresh':
       void refreshTree()
       return
+    case 'copy':
+      if (ws && node) clip.set('copy', [node.path])
+      return
+    case 'cut':
+      if (ws && node) clip.set('cut', [node.path])
+      return
+    case 'paste':
+      // Paste lands in the clicked folder, the parent of a clicked file, or
+      // the root for blank areas.
+      void pasteInto(node ? (node.kind === 'dir' ? node.path : dirOf(node.path)) : '')
+      return
   }
   if (!node) return
   switch (id) {
@@ -222,6 +420,18 @@ async function onMenuSelect(id: string) {
       break
     case 'add-to-blueprint':
       blueprint.requestAddReference(node.path)
+      break
+    case 'rename':
+      startRename(node)
+      break
+    case 'delete':
+      void deleteNode(node)
+      break
+    case 'properties':
+      void showProperties(node)
+      break
+    case 'reveal':
+      void revealNode(node)
       break
   }
 }
@@ -241,6 +451,18 @@ const createState = reactive({
   cancel: cancelCreate,
 })
 provide(TREE_CREATE, createState)
+
+/** In-line rename state consumed by TreeItem to edit a row's name. */
+const renameState = reactive({
+  activePath: renamingPath,
+  name: renameName,
+  setName: (v: string) => (renameName.value = v),
+  confirm: () => void commitRename(),
+  cancel: () => {
+    renamingPath.value = null
+  },
+})
+provide(TREE_RENAME, renameState)
 
 onMounted(() => {
   void loadRoot()
@@ -284,6 +506,16 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined
       <button class="btn-icon h-6! w-6!" type="button" title="New Folder" :aria-label="'New Folder'" @click="startCreate('folder', '')">
         <FolderPlus class="h-3.5 w-3.5" />
       </button>
+      <button
+        v-if="clip.active"
+        class="btn-icon h-6! w-6! text-primary!"
+        type="button"
+        title="Paste into workspace root"
+        :aria-label="'Paste'"
+        @click="pasteInto('')"
+      >
+        <ClipboardPaste class="h-3.5 w-3.5" />
+      </button>
       <button class="btn-icon h-6! w-6!" type="button" title="Refresh" :aria-label="'Refresh'" @click="refreshTree">
         <RefreshCw class="h-3.5 w-3.5" />
       </button>
@@ -315,6 +547,12 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined
       :groups="menuGroupsOf(menu.node)"
       @select="onMenuSelect"
       @close="menu = null"
+    />
+    <FilePropertiesModal
+      v-if="properties"
+      :title="properties.title"
+      :rows="properties.rows"
+      @close="properties = null"
     />
   </div>
 </template>

@@ -1,4 +1,4 @@
-//! Shared ReAct loop kernel (doc §6.4).
+//! Shared ReAct loop kernel.
 //!
 //! [`run_react`] owns the iteration loop previously embedded in the Call LLM
 //! node: cancellation/pause handling, interrupt injection, emergency racing,
@@ -17,7 +17,7 @@ use metteur_shared::llm::{
     ToolCall, ToolDefinition, ToolResult, ToolResultLifetime,
 };
 
-use crate::anon::Anonymizer;
+use crate::observability::anon::Anonymizer;
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
 use crate::execution::interrupt::InterruptPriority;
@@ -427,8 +427,8 @@ async fn record_usage(
     });
     if let Some((currency, models)) = billing.as_ref()
         && let Some(model_cfg) = models.get(client.model())
-        && let Some(cost) = crate::billing::cost(
-            crate::billing::effective_pricing(model_cfg).as_ref(),
+        && let Some(cost) = crate::llm::billing::cost(
+            crate::llm::billing::effective_pricing(model_cfg).as_ref(),
             currency,
             usage,
         )

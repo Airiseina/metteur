@@ -34,7 +34,7 @@ function activate(tab: TabItem) {
   // panel must be re-asserted — a plain route push loses the rail after the
   // panel was handed to another owner (Explorer).
   if (tabs.isSurface(tab.id)) {
-    openSurface(tab.id as 'chat' | 'audit' | 'version' | 'settings')
+    openSurface(tab.id as 'chat' | 'version' | 'settings')
     return
   }
   tabs.activate(tab.id)
@@ -61,7 +61,7 @@ function onMiddleClick(tab: TabItem, e: MouseEvent) {
 function onContext(e: MouseEvent, tab: TabItem) {
   e.preventDefault()
   if (tabs.isSurface(tab.id)) {
-    openSurface(tab.id as 'chat' | 'audit' | 'version' | 'settings')
+    openSurface(tab.id as 'chat' | 'version' | 'settings')
   } else {
     tabs.activate(tab.id)
     router.push(tab.route)

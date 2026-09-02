@@ -10,8 +10,8 @@ use tokio::sync::RwLock;
 use super::lock::SessionLock;
 use crate::config;
 use crate::error::{DaemonError, DaemonResult};
-use crate::persistence::Db;
-use crate::versioning::{VersionManager, WorkspaceWatcher};
+use crate::storage::persistence::Db;
+use crate::storage::versioning::{VersionManager, WorkspaceWatcher};
 
 /// The name of the workspace metadata directory.
 pub const METADATA_DIR: &str = ".metteur";
@@ -30,7 +30,7 @@ pub struct Workspace {
     /// The workspace version manager (snapshots, file history).
     pub version_manager: Arc<VersionManager>,
     /// Language-server manager, when LSP is enabled for this workspace.
-    pub lsp_manager: Option<Arc<crate::lsp::LspManager>>,
+    pub lsp_manager: Option<Arc<crate::integration::lsp::LspManager>>,
     /// The held session lock.
     _lock: SessionLock,
     /// The fs watcher feeding auto snapshots and live change events.
@@ -103,7 +103,7 @@ impl WorkspaceManager {
         let global_config_path = self.global_config_path()?;
         let config = config::load_merged_config(&global_config_path, &root)?;
         let version_manager = Arc::new(VersionManager::new(db.clone(), root.clone()));
-        let lsp_manager = crate::lsp::LspManager::new(&config.lsp, &root);
+        let lsp_manager = crate::integration::lsp::LspManager::new(&config.lsp, &root);
         let watcher = match WorkspaceWatcher::start(
             root.clone(),
             version_manager.clone(),

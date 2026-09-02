@@ -22,29 +22,77 @@ enum UiEvent {
     RunDone(String),
 }
 
+/// One decoded reader event: a key press, or a mouse wheel scroll request.
+enum ReaderEvent {
+    Key(crossterm::event::KeyEvent),
+    ScrollUp,
+    ScrollDown,
+}
+
 /// Runs the interactive TUI until the user exits.
 pub async fn run_tui(
-    mut client: DaemonClient<Channel>,
+    client: &mut DaemonClient<Channel>,
     initial_workspace: Option<String>,
 ) -> anyhow::Result<()> {
     let mut terminal = init_terminal().context("failed to enter TUI mode")?;
-    let result = event_loop(&mut terminal, &mut client, initial_workspace).await;
+    let result = event_loop(&mut terminal, client, initial_workspace).await;
     restore_terminal(&mut terminal);
     result
 }
 
 fn init_terminal() -> anyhow::Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     crossterm::terminal::enable_raw_mode()?;
+    // When raw mode failed to disable input echoing the terminal will echo
+    // every key back on top of the canvas, doubling each keystroke. Such
+    // terminals cannot host the TUI, so leave raw mode and let main.rs fall
+    // back to the line REPL.
+    if raw_mode_echo_still_active() {
+        crossterm::terminal::disable_raw_mode()?;
+        anyhow::bail!("terminal still echoes input after raw mode (unsupported host)");
+    }
     let mut stdout = stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).map_err(Into::into)
+}
+
+/// Whether the console still echoes typed characters after raw mode.
+///
+/// On Unix disabling `ECHO` is authoritative, so this is always `false` there.
+#[cfg(windows)]
+fn raw_mode_echo_still_active() -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE,
+    };
+    unsafe {
+        let handle = GetStdHandle(STD_INPUT_HANDLE);
+        if handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return false;
+        }
+        mode & ENABLE_ECHO_INPUT != 0
+    }
+}
+
+/// Non-Windows hosts honour the termios `ECHO` switch via raw mode.
+#[cfg(not(windows))]
+fn raw_mode_echo_still_active() -> bool {
+    false
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
     let _ = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
         crossterm::cursor::Show
     );
     let _ = crossterm::terminal::disable_raw_mode();
@@ -70,22 +118,29 @@ async fn event_loop(
             apply_event(&mut app, event);
         }
 
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut app))?;
 
-        // Handle the next key press or UI event.
-        let key = tokio::select! {
-            key = key_rx.recv() => key,
+        // Handle the next reader event or UI event.
+        let event = tokio::select! {
+            event = key_rx.recv() => event,
             Some(event) = rx.recv() => {
                 apply_event(&mut app, event);
                 continue;
             }
         };
-        let Some(key) = key else {
+        let Some(event) = event else {
             break;
         };
-
-        if handle_key(client, &mut app, key, &tx).await? {
-            break;
+        match event {
+            // The wheel and PageUp/PageDown both scroll the Events backlog.
+            // Positive offsets move back (older) chronologically.
+            ReaderEvent::ScrollDown => app.scroll_down(3),
+            ReaderEvent::ScrollUp => app.scroll_up(3),
+            ReaderEvent::Key(key) => {
+                if handle_key(client, &mut app, key, &tx).await? {
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -136,16 +191,36 @@ async fn open_workspace(
     app.workspace = Some(path.to_string());
 }
 
-/// Returns a channel of decoded key events from a blocking reader task.
-fn spawn_key_reader() -> mpsc::Receiver<crossterm::event::KeyEvent> {
+/// Returns a channel of decoded reader events (key presses + wheel scrolls).
+///
+/// The Windows console reports both a `Press` and a `Release` event for every
+/// key (the gap between them varies), so only `KeyEventKind::Press` events are
+/// forwarded — otherwise a single keystroke would type twice and Backspace
+/// would erase two characters. Wheel events are forwarded as scroll requests.
+fn spawn_key_reader() -> mpsc::Receiver<ReaderEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event};
+        use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
         while let Ok(event) = event::read() {
-            if let Event::Key(key) = event
-                && tx.blocking_send(key).is_err()
-            {
-                break;
+            match event {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if tx.blocking_send(ReaderEvent::Key(key)).is_err() {
+                        break;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    let scroll = match mouse.kind {
+                        MouseEventKind::ScrollDown => Some(ReaderEvent::ScrollDown),
+                        MouseEventKind::ScrollUp => Some(ReaderEvent::ScrollUp),
+                        _ => None,
+                    };
+                    if let Some(scroll) = scroll
+                        && tx.blocking_send(scroll).is_err()
+                    {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     });

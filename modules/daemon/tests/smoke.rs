@@ -7,11 +7,12 @@ use std::time::Duration;
 use metteur_daemon::grpc::acl::AclLayer;
 use metteur_daemon::grpc::proto::daemon_client::DaemonClient;
 use metteur_daemon::grpc::proto::{
-    self, AbortChatRequest, CancelRequest, ContinueExecutionRequest, CreateDirRequest,
-    CreateSnapshotRequest, DeleteFunctionRequest, ExecuteBlueprintRequest, FnPin, FunctionInfo,
-    GetConfigRequest, GetFileHistoryRequest, ListAuditLogRequest, ListExecutionsRequest,
-    ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest, LoadFunctionRequest,
-    OpenWorkspaceRequest, ReadFileRequest, RemoveFileRequest, RenameFileRequest,
+    self, AbortChatRequest, CancelRequest, CloseWorkspaceRequest, CompileDslRequest,
+    ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest, DeleteFunctionRequest,
+    ExecuteBlueprintRequest, FnPin, FunctionInfo, GetConfigRequest, GetExecutionUsageRequest,
+    GetFileHistoryRequest, ListAuditLogRequest, ListExecutionsRequest, ListFilesRequest,
+    ListFunctionsRequest, ListSnapshotsRequest, LoadFunctionRequest, OpenWorkspaceRequest,
+    ReadFileRequest, RemoveFileRequest, RenameFileRequest, RollbackRequest,
     SaveBlueprintRequest, SaveFunctionRequest, SendChatRequest, SetConfigRequest, StatFileRequest,
     WriteFileRequest,
 };
@@ -2099,6 +2100,170 @@ async fn smoke_function_library_save_execute() {
         .delete_function(DeleteFunctionRequest {
             workspace_path: ws_path,
             name: "SmokeAdd".to_string(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn smoke_full_pipeline() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+
+    // Open the workspace.
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    // Compile a DSL source straight into a blueprint and save it.
+    let compiled = client
+        .compile_dsl(CompileDslRequest {
+            source: "\
+blueprint \"FullFlow\"
+entry start: Start(A = 4, B = 3)
+sum: Add(A <- start.A, B <- start.B)
+check: Judge(Score <- sum.Result)
+start -> sum
+sum -> check
+"
+            .to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(compiled.nodes.len(), 3);
+    client
+        .save_blueprint(SaveBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint: Some(compiled.clone()),
+        })
+        .await
+        .unwrap();
+
+    // Execute and drain the live event stream.
+    let mut stream = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: compiled.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await.unwrap() {
+        events.push(event);
+    }
+    // Start, Add and Judge each emit started + finished + node_data.
+    assert_eq!(events.len(), 9);
+
+    let runs = client
+        .list_executions(ListExecutionsRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(runs.executions[0].status, "Completed");
+    let run_id = runs.executions[0].run_id.clone();
+
+    // Write a file, snapshot it under an alias, mutate, then roll back.
+    client
+        .write_file(WriteFileRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+            content: "v1".to_string(),
+        })
+        .await
+        .unwrap();
+    client
+        .create_snapshot(CreateSnapshotRequest {
+            workspace_path: ws_path.clone(),
+            description: "pre-rollback".to_string(),
+            alias: "fp-checkpoint".to_string(),
+        })
+        .await
+        .unwrap();
+    client
+        .write_file(WriteFileRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+            content: "v2".to_string(),
+        })
+        .await
+        .unwrap();
+    let read = client
+        .read_file(ReadFileRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.content, "v2");
+    client
+        .rollback(RollbackRequest {
+            workspace_path: ws_path.clone(),
+            snapshot_id: String::new(),
+            alias: "fp-checkpoint".to_string(),
+        })
+        .await
+        .unwrap();
+    let read = client
+        .read_file(ReadFileRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.content, "v1");
+
+    // The file timeline records the rollback history.
+    let history = client
+        .get_file_history(GetFileHistoryRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        !history.entries.is_empty(),
+        "file history should record the mutation and rollback"
+    );
+    for entry in &history.entries {
+        assert!(
+            matches!(entry.status.as_str(), "Added" | "Modified" | "Deleted" | "Unchanged"),
+            "unexpected history status {}",
+            entry.status
+        );
+    }
+
+    // Usage, audit and cleanup.
+    client
+        .get_execution_usage(GetExecutionUsageRequest {
+            workspace_path: ws_path.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    let audit = client
+        .list_audit_log(ListAuditLogRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        !audit.entries.is_empty(),
+        "workspace audit must record the execution lifecycle"
+    );
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
         })
         .await
         .unwrap();
