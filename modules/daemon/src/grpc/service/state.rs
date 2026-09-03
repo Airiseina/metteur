@@ -44,6 +44,10 @@ pub(crate) struct ChatRun {
     pub(crate) cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Sandbox approval channel shared with the chat task.
     pub(crate) approvals: Option<Arc<ApprovalBroker>>,
+    /// Whether the task may persist the session on completion. Cleared by
+    /// `delete_chat_session` so a late finalize cannot resurrect a cleared
+    /// session.
+    pub(crate) persist: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Shared application state passed to the gRPC service.

@@ -292,12 +292,7 @@ mod tests {
     }
 
     fn pin(id: Uuid, name: &str, pin_type: PinType, data_type: DataType) -> Pin {
-        Pin {
-            id,
-            name: name.to_string(),
-            pin_type,
-            data_type,
-        }
+        Pin::data(name.to_string(), pin_type, data_type, id)
     }
 
     /// Builds a nested blueprint: Start(Path) -> CallLLM(mock) ->

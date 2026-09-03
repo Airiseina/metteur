@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { gateway } from '@/core'
-import type { Blueprint, BlueprintEdge, BlueprintNode, FunctionItem } from '@/core'
+import { NODE_PRESETS, pinsFor } from '@/lib/blueprint'
+import type { Blueprint, BlueprintEdge, BlueprintNode, BlueprintPin, FunctionItem } from '@/core'
 
 /**
  * Blueprint graph state shared across the editor.
@@ -46,14 +47,14 @@ function keyFor(nodes: BlueprintNode[], edges: KeyEdge[]): string {
   })
 }
 
-/** A fresh Start → End graph used to seed a brand-new blueprint file. */
+/** A fresh Start → End graph used to seed a brand-new blueprint file.
+ *  Pins come from the presets so the seed stays in sync with the palette. */
 function seedGraph(): GraphData {
   const nodeId = () => crypto.randomUUID()
-  const pinId = () => crypto.randomUUID()
   const start = nodeId()
   const end = nodeId()
-  const startOut = pinId()
-  const endIn = pinId()
+  const startPins = pinsFor(NODE_PRESETS['Start'])
+  const endPins = pinsFor(NODE_PRESETS['End'])
   return {
     id: crypto.randomUUID(),
     nodes: [
@@ -63,8 +64,8 @@ function seedGraph(): GraphData {
         category: 'event',
         title: 'Start',
         position: { x: 40, y: 220 },
-        inputs: [],
-        outputs: [{ id: startOut, key: 'x-out', name: '', kind: 'exec-out' }],
+        inputs: startPins.inputs,
+        outputs: startPins.outputs,
       },
       {
         id: end,
@@ -72,12 +73,19 @@ function seedGraph(): GraphData {
         category: 'event',
         title: 'End',
         position: { x: 320, y: 220 },
-        inputs: [{ id: endIn, key: 'x-in', name: '', kind: 'exec-in' }],
-        outputs: [],
+        inputs: endPins.inputs,
+        outputs: endPins.outputs,
       },
     ],
     edges: [
-      { id: crypto.randomUUID(), source: start, sourceHandle: startOut, target: end, targetHandle: endIn },
+      {
+        id: crypto.randomUUID(),
+        source: start,
+        // The first output pin of Start is its exec outlet, driving the wire.
+        sourceHandle: startPins.outputs[0]?.id,
+        target: end,
+        targetHandle: endPins.inputs[0]?.id,
+      },
     ],
   }
 }
@@ -85,6 +93,106 @@ function seedGraph(): GraphData {
 /** The on-disk name of a blueprint derived from its file path. */
 function fileNameOf(filePath: string): string {
   return filePath.split(/[\\/]/).pop()?.replace(/\.blueprint$/i, '') || 'blueprint'
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Pin ids used by older canvases, mapped to their current canonical names.
+ *  Presets renamed pins over time (`out` → `Result`, `a` → `A`, …); graphs
+ *  saved with the old keys still need name alignment to round-trip through the
+ *  DSL, whose parser also cannot express whitespace in pin names. */
+const LEGACY_PIN_NAMES: Record<string, string> = {
+  a: 'A',
+  b: 'B',
+  in: 'In',
+  out: 'Result',
+  input: 'Input',
+  find: 'Find',
+  replaceWith: 'ReplaceWith',
+  start: 'Start',
+  length: 'Length',
+  list: 'List',
+  item: 'Item',
+  index: 'Index',
+  object: 'Object',
+  path: 'Path',
+  value: 'Value',
+  itemA: 'ItemA',
+  itemB: 'ItemB',
+  itemC: 'ItemC',
+  system: 'System',
+  prompt: 'Prompt',
+  context: 'Context',
+  keep: 'Keep',
+  ms: 'Ms',
+  message: 'Message',
+  allowed: 'Allowed',
+  tool_name: 'ToolName',
+  command: 'Command',
+  result: 'Result',
+}
+
+/** Renamed node kinds: older canvases used a single `Arithmetic` entry where
+ *  the daemon knows the real `Add` kind. */
+const KIND_ALIASES: Record<string, string> = { Arithmetic: 'Add' }
+
+/**
+ * Renames a node's data pins to the preset labels for its kind (older
+ * canvases stored lowercase/`out` names that no longer match the daemon's
+ * executor lookups or the DSL templates). Whitespace is stripped so exported
+ * data wires never break the DSL parser.
+ */
+function canonicalizePinNames(n: BlueprintNode): BlueprintNode {
+  const kind = KIND_ALIASES[n.type] ?? n.type
+  const preset = NODE_PRESETS[kind]
+  const labelOf = new Map<string, string>()
+  if (preset) {
+    for (const d of preset.inputs) labelOf.set(d.id, d.label)
+    for (const d of preset.outputs) labelOf.set(d.id, d.label)
+  }
+  const byName = (p: BlueprintPin): BlueprintPin => {
+    const label = p.key ? (labelOf.get(p.key) ?? LEGACY_PIN_NAMES[p.key]) : undefined
+    const name = (label ?? p.name ?? '').replace(/\s+/g, '')
+    return name !== p.name ? { ...p, name } : p
+  }
+  return { ...n, type: n.type === kind ? n.type : kind, inputs: (n.inputs ?? []).map(byName), outputs: (n.outputs ?? []).map(byName) }
+}
+
+/**
+ * Rewrites ids that are not UUIDs (older canvases used `n-…` node ids) so the
+ * graph satisfies the daemon model, which keys nodes/edges/pins by `Uuid`, and
+ * renames pins to the current preset labels. Idempotent; works for cached
+ * graphs too, since name canonicalization never depends on id migration.
+ */
+function migrateIds(g: GraphData): GraphData {
+  const nodeIds = new Map<string, string>()
+  const pinIds = new Map<string, string>()
+  for (const n of g.nodes) {
+    if (!UUID_RE.test(n.id)) nodeIds.set(n.id, crypto.randomUUID())
+    for (const p of [...(n.inputs ?? []), ...(n.outputs ?? [])]) {
+      if (!UUID_RE.test(p.id)) pinIds.set(p.id, crypto.randomUUID())
+    }
+  }
+  return {
+    id: UUID_RE.test(g.id) ? g.id : crypto.randomUUID(),
+    nodes: g.nodes.map((n) => {
+      const remapped = {
+        ...n,
+        id: nodeIds.get(n.id) ?? n.id,
+        inputs: (n.inputs ?? []).map((p) => ({ ...p, id: pinIds.get(p.id) ?? p.id })),
+        outputs: (n.outputs ?? []).map((p) => ({ ...p, id: pinIds.get(p.id) ?? p.id })),
+      }
+      return canonicalizePinNames(remapped as BlueprintNode)
+    }),
+    edges: g.edges.map((e) => ({
+      ...e,
+      id: UUID_RE.test(e.id) ? e.id : crypto.randomUUID(),
+      source: nodeIds.get(e.source) ?? e.source,
+      target: nodeIds.get(e.target) ?? e.target,
+      sourceHandle: e.sourceHandle ? (pinIds.get(e.sourceHandle) ?? e.sourceHandle) : e.sourceHandle,
+      targetHandle: e.targetHandle ? (pinIds.get(e.targetHandle) ?? e.targetHandle) : e.targetHandle,
+    })),
+  }
 }
 
 export const useBlueprintStore = defineStore('blueprint', () => {
@@ -144,9 +252,11 @@ export const useBlueprintStore = defineStore('blueprint', () => {
     currentFile.value = filePath
     const cached = graphs.value[filePath]
     if (cached) {
-      nodes.value = cached.nodes
-      edges.value = cached.edges
-      ids.value[filePath] = cached.id
+      const graph = migrateIds(cached)
+      graphs.value[filePath] = graph
+      nodes.value = graph.nodes
+      edges.value = graph.edges
+      ids.value[filePath] = graph.id
     } else {
       const [file, _] = await Promise.all([gateway.readFile(path, filePath), listKinds()])
       let graph = seedGraph()
@@ -160,6 +270,7 @@ export const useBlueprintStore = defineStore('blueprint', () => {
           // Corrupt files fall back to a fresh graph.
         }
       }
+      graph = migrateIds(graph)
       graphs.value[filePath] = graph
       ids.value[filePath] = graph.id
       // The freshly loaded graph is, by definition, the on-disk baseline.

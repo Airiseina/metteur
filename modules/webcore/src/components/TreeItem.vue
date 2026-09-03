@@ -59,10 +59,10 @@ function selectAll(e: FocusEvent) {
     <button
       v-else
       class="relative flex w-full items-center gap-1 rounded-md py-1 pr-2 text-left text-muted-foreground transition-colors duration-100 hover:bg-hover hover:text-foreground"
-      :class="node.kind === 'file' ? api.activeCls(node.path) : ''"
+      :class="api.rowCls(node.path)"
       :style="{ paddingLeft: 8 + depth * 14 + 'px' }"
       type="button"
-      @click="node.kind === 'dir' ? api.toggle(node) : api.openFile(node)"
+      @click="api.select(node, $event)"
       @contextmenu.prevent="api.onRowContextMenu(node, $event)"
     >
       <!-- Fixed chevron column: a dir shows a caret, a file leaves it empty so

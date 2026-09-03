@@ -81,6 +81,25 @@ export interface ChatOptions {
   reasoning_effort?: 'none' | 'low' | 'medium' | 'high'
 }
 
+/** Metadata of a persisted chat session, mirroring the daemon's record. */
+export interface ChatSessionInfo {
+  sessionId: string
+  createdAt: number
+  updatedAt: number
+  turns: number
+  /** First user message, truncated, for list display. */
+  title: string
+  messageCount: number
+}
+
+/** A persisted session's messages, loaded to restore the conversation UI. */
+export interface ChatSessionSnapshot {
+  sessionId: string
+  createdAt: number
+  /** User/assistant messages reconstructed from the daemon history. */
+  history: ChatMessage[]
+}
+
 /** Categories of blueprint nodes, mirroring the daemon node model. */
 export type NodeCategory = 'event' | 'module' | 'flow' | 'action'
 
@@ -113,10 +132,17 @@ export interface BlueprintPin {
   key?: string
   name: string
   kind: PinKind
-  /** Value type for data pins, e.g. `string`, `int`, `bool`. */
+  /** Pin type using the shared vocabulary: string/number/int/bool/json/object/
+   *  context/choice/any plus structured forms (`list<int>`, `object{...}`). */
   type?: string
   /** Allowed values when the pin is a choice editor (e.g. reasoning effort). */
   choices?: string[]
+  /** Default value used when the input has no wire. */
+  default?: unknown
+  /** Whether the input may stay unwired (resolves to null). */
+  optional?: boolean
+  /** Short human-readable description shown in the inspector. */
+  description?: string
 }
 
 /** A directed connection between two node pins. */

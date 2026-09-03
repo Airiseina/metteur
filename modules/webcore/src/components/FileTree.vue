@@ -46,6 +46,10 @@ const root = ref<FileTreeNode[]>([])
 const expanded = ref<Set<string>>(new Set())
 const loading = ref(false)
 const menu = ref<{ x: number; y: number; node: FileTreeNode | null } | null>(null)
+/** Multi-selection (Ctrl/Shift): paths of the currently highlighted rows. */
+const selected = ref<Set<string>>(new Set())
+/** Anchor for Shift-range selection, in visible row order. */
+let lastSelectedPath: string | null = null
 /** New-file/folder name input, anchored to the toolbar. */
 const creating = ref<{ kind: 'file' | 'folder'; dir: string } | null>(null)
 const newName = ref('')
@@ -87,9 +91,56 @@ function openFile(node: FileTreeNode) {
   router.push(fileRoute(node.path))
 }
 
-/** Row highlight classset for the file currently being edited. */
-function activeCls(path: string): string {
-  return tabs.activeFilePath === path ? 'bg-accent text-foreground' : ''
+/** Row highlight for selection (multi-select) or the open file. */
+function rowCls(path: string): string {
+  return selected.value.has(path) || tabs.activeFilePath === path ? 'bg-accent text-foreground' : ''
+}
+
+/** Visible rows in render order, for Shift-range selection. */
+function visibleOrder(): string[] {
+  const out: string[] = []
+  const walk = (nodes: FileTreeNode[]) => {
+    for (const n of nodes) {
+      out.push(n.path)
+      if (n.kind === 'dir' && expanded.value.has(n.path) && n.children) walk(n.children)
+    }
+  }
+  walk(root.value)
+  return out
+}
+
+/** Row click: plain selects-and-acts, Ctrl toggles, Shift spans the range. */
+function onRowSelect(node: FileTreeNode, e: MouseEvent) {
+  const path = node.path
+  if (e.shiftKey && lastSelectedPath && lastSelectedPath !== path) {
+    const order = visibleOrder()
+    const a = order.indexOf(lastSelectedPath)
+    const b = order.indexOf(path)
+    if (a !== -1 && b !== -1) {
+      const next = new Set(selected.value)
+      const [lo, hi] = a < b ? [a, b] : [b, a]
+      for (let i = lo; i <= hi; i++) next.add(order[i])
+      selected.value = next
+    }
+  } else if (e.ctrlKey || e.metaKey) {
+    const next = new Set(selected.value)
+    if (next.has(path)) next.delete(path)
+    else next.add(path)
+    selected.value = next
+  } else {
+    selected.value = new Set([path])
+    if (node.kind === 'dir') toggle(node)
+    else openFile(node)
+  }
+  lastSelectedPath = path
+}
+
+/** Targets of a context action: the whole selection when the clicked row is
+ *  part of a multi-selection, otherwise that row alone. */
+function menuTargets(): string[] {
+  const node = menu.value?.node
+  if (node && selected.value.has(node.path) && selected.value.size > 1) return [...selected.value]
+  return node ? [node.path] : []
 }
 
 /** Refresh listing for the root and every expanded folder. */
@@ -273,27 +324,12 @@ async function commitRename() {
 
 /* Delete / properties / reveal ----------------------------------------- */
 
-async function deleteNode(node: FileTreeNode) {
+/** Whether a workspace-relative path names a directory (multi-delete aid). */
+async function isDirectory(path: string): Promise<boolean> {
   const ws = workspace.active
-  if (!ws) return
-  const ok = await feedback.confirm({
-    header: `Delete ${node.kind}`,
-    message: `Delete "${baseName(node.path)}"? This cannot be undone.`,
-    acceptLabel: 'Delete',
-    rejectLabel: 'Cancel',
-    danger: true,
-  })
-  if (!ok) return
-  const r = await gateway.removeFile(ws.path, node.path)
-  if (!r.ok) {
-    feedback.toast('error', 'Delete failed', r.error)
-    return
-  }
-  if (node.kind === 'file') {
-    const tabId = `file:${node.path}`
-    if (tabs.items.some((t) => t.id === tabId)) tabs.close(tabId)
-  }
-  await refreshTree()
+  if (!ws) return false
+  const r = await gateway.statFile(ws.path, path)
+  return r.ok && r.data.isDir
 }
 
 function formatBytes(n: number): string {
@@ -341,8 +377,13 @@ function onBlankContext(e: MouseEvent) {
   openMenu(e.clientX, e.clientY, null)
 }
 
-/** Row right-click forwarded by TreeItem. */
+/** Row right-click forwarded by TreeItem. Right-clicking outside the current
+ *  selection collapses it to that row so single-node actions stay predictable. */
 function onRowContextMenu(node: FileTreeNode, event: MouseEvent) {
+  if (!selected.value.has(node.path) || selected.value.size < 2) {
+    selected.value = new Set([node.path])
+    lastSelectedPath = node.path
+  }
   openMenu(event.clientX, event.clientY, node)
 }
 
@@ -382,6 +423,7 @@ function menuGroupsOf(node: FileTreeNode | null): MenuGroup[] {
 
 async function onMenuSelect(id: string) {
   const node = menu.value?.node ?? null
+  const targets = menuTargets()
   menu.value = null
   const ws = workspace.active
   switch (id) {
@@ -398,9 +440,17 @@ async function onMenuSelect(id: string) {
       void refreshTree()
       return
     case 'copy':
+      if (ws && targets.length > 1) {
+        clip.set('copy', targets)
+        return
+      }
       if (ws && node) clip.set('copy', [node.path])
       return
     case 'cut':
+      if (ws && targets.length > 1) {
+        clip.set('cut', targets)
+        return
+      }
       if (ws && node) clip.set('cut', [node.path])
       return
     case 'paste':
@@ -425,7 +475,31 @@ async function onMenuSelect(id: string) {
       startRename(node)
       break
     case 'delete':
-      void deleteNode(node)
+      void (async () => {
+        const ok = await feedback.confirm({
+          header: targets.length > 1 ? `Delete ${targets.length} items` : `Delete ${node?.kind}`,
+          message:
+            targets.length > 1
+              ? `Delete ${targets.length} selected items? This cannot be undone.`
+              : `Delete "${baseName(node.path)}"? This cannot be undone.`,
+          acceptLabel: 'Delete',
+          rejectLabel: 'Cancel',
+          danger: true,
+        })
+        if (!ok || !ws) return
+        for (const path of targets) {
+          const entry = targets.length === 1 ? node : null
+          const isDir = entry ? entry.kind === 'dir' : await isDirectory(path)
+          if (!isDir) {
+            const tabId = `file:${path}`
+            if (tabs.items.some((t) => t.id === tabId)) tabs.close(tabId)
+          }
+          const r = await gateway.removeFile(ws.path, path)
+          if (!r.ok) feedback.toast('error', 'Delete failed', r.error)
+        }
+        selected.value = new Set()
+        await refreshTree()
+      })()
       break
     case 'properties':
       void showProperties(node)
@@ -440,7 +514,8 @@ provide(TREE_API, {
   isOpen: (path) => expanded.value.has(path),
   toggle,
   openFile,
-  activeCls,
+  rowCls,
+  select: onRowSelect,
   onRowContextMenu,
 })
 /** In-tree creation state, consumed by TreeItem to host the inline input. */

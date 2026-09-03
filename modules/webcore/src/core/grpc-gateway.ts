@@ -1,5 +1,6 @@
 import { createClient, type Client } from '@connectrpc/connect'
 import { createGrpcWebTransport } from '@connectrpc/connect-web'
+import { ref, type Ref } from 'vue'
 import type { NodeCategory, PinKind } from './types'
 import type { DaemonGateway } from './gateway'
 import type {
@@ -10,6 +11,8 @@ import type {
   BlueprintPin,
   ChatMessage,
   ChatOptions,
+  ChatSessionInfo,
+  ChatSessionSnapshot,
   DaemonConfig,
   ExecutionEvent,
   ExecutionInfo,
@@ -27,33 +30,13 @@ import type {
 } from './types'
 import { err, ok } from './types'
 import { Daemon } from '@/gen/metteur_pb'
+import { NODE_PRESETS } from '@/lib/blueprint'
 import { configScopeOf, configToToml, isConfigDoc, tryParseToml } from '@/lib/toml'
 
 /** Maps a thrown connect error into a readable failure result. */
 function toErr(e: unknown): Result<never> {
   if (e instanceof Error) return err(e.message)
   return err(String(e))
-}
-
-/** Coerce a daemon node type string to the UI category. */
-function categoryOf(kind: string): NodeCategory {
-  switch (kind) {
-    case 'Start':
-    case 'End':
-      return 'event'
-    case 'Tool':
-      return 'action'
-    case 'Validator':
-    case 'Judge':
-    case 'Branch':
-    case 'Add':
-    case 'Subtract':
-    case 'Multiply':
-    case 'Divide':
-      return 'flow'
-    default:
-      return 'module'
-  }
 }
 
 /** Map a UI node type to the daemon kind (`Arithmetic` wraps `Add`). */
@@ -163,10 +146,14 @@ function nodeData(node: BlueprintNode): Record<string, unknown> {
 function toProtoBlueprint(bp: Blueprint): object {
   const kept = bp.nodes.filter((n) => n.type !== 'FileReference')
   const keptIds = new Set(kept.map((n) => n.id))
+  // The daemon resolves the entry against the (FileReference-filtered) node
+  // list, so fall back to the first kept node when the canvas entry was dropped.
+  const entryNodeId =
+    bp.entryNodeId && keptIds.has(bp.entryNodeId) ? bp.entryNodeId : kept[0]?.id ?? ''
   return {
     id: bp.id,
     name: bp.name,
-    entryNodeId: bp.entryNodeId ?? kept[0]?.id ?? '',
+    entryNodeId,
     nodes: kept.map((n) => {
       const kind = daemonKindOf(n.type)
       return {
@@ -177,6 +164,7 @@ function toProtoBlueprint(bp: Blueprint): object {
         posY: n.position.y,
         pins: [...n.inputs, ...n.outputs].map((p) => ({
           id: p.id,
+          key: p.key ?? '',
           name: p.name || (p.kind === 'data-out' ? p.key ?? 'Result' : p.key ?? ''),
           pinType: pinTypeOf(p.kind),
           dataType: dataTypeOf(p.type),
@@ -196,6 +184,24 @@ function toProtoBlueprint(bp: Blueprint): object {
   }
 }
 
+/** Map a daemon `DataType` display string to the canvas pin type. Daemon
+ *  serializes types lowercase (`float`, `list<int>`…); scalar aliases collapse
+ *  onto the canvas vocabulary while structural types pass through verbatim. */
+function protoTypeOf(dt: string): string {
+  switch (dt) {
+    case 'float':
+      return 'number'
+    case 'json':
+      return 'json'
+    case 'context':
+      return 'context'
+    case 'any':
+      return 'any'
+    default:
+      return dt // int / bool / string / list<…> / object{…} pass through
+  }
+}
+
 /** Convert a protobuf blueprint into its domain form. */
 function fromProtoBlueprint(pb: {
   id: string
@@ -207,7 +213,14 @@ function fromProtoBlueprint(pb: {
     kind: string
     posX: number
     posY: number
-    pins: Array<{ id: string; name: string; pinType: string; dataType: string }>
+    pins: Array<{
+      id: string
+      key: string
+      name: string
+      pinType: string
+      dataType: string
+      choices?: string[]
+    }>
     dataJson: string
   }>
   edges: Array<{
@@ -237,17 +250,38 @@ function fromProtoBlueprint(pb: {
             : p.pinType === 'DataInput'
               ? 'data-in'
               : 'data-out'
-      const type = p.dataType === 'Float' ? 'number' : p.dataType === 'Int' ? 'int' : p.dataType === 'Bool' ? 'bool' : p.dataType === 'Json' ? 'object' : 'string'
-      const pin: BlueprintPin = { id: p.id, key: p.name || undefined, name: p.name, kind, type }
+      // Default exec outlets carry no on-canvas label (matching hand-drawn
+      // nodes); the key keeps the semantic name for DSL round-trips.
+      const exec = kind === 'exec-in' || kind === 'exec-out'
+      const name = exec && (p.name === 'x-in' || p.name === 'x-out') ? '' : p.name
+      // Enum candidates are registry metadata: when the wire omits them (e.g.
+      // a DSL-compiled `choice` pin), the preset fills them in by key/label.
+      const presetPin = NODE_PRESETS[n.kind]
+        ? [...NODE_PRESETS[n.kind].inputs, ...NODE_PRESETS[n.kind].outputs].find(
+            (d) => (p.key && d.id === p.key) || (p.name && d.label === p.name),
+          )
+        : undefined
+      const pin: BlueprintPin = {
+        id: p.id,
+        key: p.key || p.name || undefined,
+        name,
+        kind,
+        type: p.choices?.length || presetPin?.choices?.length ? 'choice' : protoTypeOf(p.dataType),
+        choices: p.choices?.length ? p.choices : presetPin?.choices,
+      }
       if (kind === 'data-in') {
-        const raw = data[p.name]
+        const raw = data[p.key || p.name]
         if (raw !== undefined) values[p.id] = String(raw)
+        inputs.push(pin)
+      } else if (kind === 'exec-in') {
         inputs.push(pin)
       } else {
         outputs.push(pin)
       }
     }
-    const category = categoryOf(n.kind)
+    // Category, colour and signature are registry metadata: the blueprint only
+    // carries the kind, so import derives them from the preset table by kind.
+    const category: NodeCategory = NODE_PRESETS[n.kind]?.category ?? 'module'
     return {
       id: n.id,
       type: n.kind,
@@ -295,12 +329,27 @@ function fromProtoEvent(ev: {
  * never depend on generated code.
  */
 export class GrpcGateway implements DaemonGateway {
-  readonly connected = true
+  /** Live connection state, driven by a heartbeat ping; reactive so the UI
+   *  flips to offline when the daemon (or the proxy) goes away. */
+  readonly connected: Ref<boolean> = ref(true)
+  readonly demo = false
   private client: Client<typeof Daemon>
 
   constructor(baseUrl: string) {
     const transport = createGrpcWebTransport({ baseUrl })
     this.client = createClient(Daemon, transport)
+    // Probe the daemon periodically; a network failure marks the app offline.
+    setInterval(() => void this.ping(), 5000)
+    void this.ping()
+  }
+
+  private async ping(): Promise<void> {
+    try {
+      await this.client.listWorkspaces({})
+      this.connected.value = true
+    } catch {
+      this.connected.value = false
+    }
   }
 
   // Workspaces ----------------------------------------------------------------
@@ -481,9 +530,12 @@ export class GrpcGateway implements DaemonGateway {
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
+    onSession?: (sessionId: string) => void,
+    sessionId?: string,
   ): Promise<Result<void>> {
     try {
       let seq = 0
+      let turnId: string | null = null
       const historyJson = JSON.stringify(
         history
           .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -495,10 +547,31 @@ export class GrpcGateway implements DaemonGateway {
         message: content,
         historyJson,
         optionsJson,
+        sessionId: sessionId ?? '',
       })) {
-        if (ev.kind === 'assistant') {
+        if (ev.kind === 'session') {
+          let reported = ''
+          if (ev.detailJson) {
+            try {
+              reported = String(JSON.parse(ev.detailJson).session_id ?? '')
+            } catch {
+              reported = ''
+            }
+          }
+          if (reported) onSession?.(reported)
+        } else if (ev.kind === 'assistant_delta') {
+          if (!turnId) turnId = `a-${Date.now()}-${seq++}`
           onMessage({
-            id: `a-${Date.now()}-${seq++}`,
+            id: turnId,
+            role: 'assistant',
+            content: ev.content,
+            createdAt: Date.now(),
+            pending: true,
+          })
+        } else if (ev.kind === 'assistant') {
+          if (!turnId) turnId = `a-${Date.now()}-${seq++}`
+          onMessage({
+            id: turnId,
             role: 'assistant',
             content: ev.content,
             createdAt: Date.now(),
@@ -532,6 +605,54 @@ export class GrpcGateway implements DaemonGateway {
   async abortChat(workspacePath: string): Promise<Result<void>> {
     try {
       await this.client.abortChat({ workspacePath })
+      return ok(undefined)
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async listChatSessions(workspacePath: string): Promise<Result<ChatSessionInfo[]>> {
+    try {
+      const res = await this.client.listChatSessions({ workspacePath })
+      return ok(
+        res.sessions.map((s) => ({
+          sessionId: s.sessionId,
+          createdAt: Number(s.createdAt),
+          updatedAt: Number(s.updatedAt),
+          turns: Number(s.turns),
+          title: s.title,
+          messageCount: Number(s.messageCount),
+        })),
+      )
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async getChatSession(workspacePath: string): Promise<Result<ChatSessionSnapshot>> {
+    try {
+      const res = await this.client.getChatSession({ workspacePath })
+      let history: ChatMessage[] = []
+      try {
+        const entries: Array<{ role: string; content: string }> = JSON.parse(res.historyJson)
+        history = entries.map((e, i) => ({
+          id: `${e.role === 'user' ? 'u' : 'a'}-${i}`,
+          role: e.role === 'user' ? 'user' : 'assistant',
+          content: e.content,
+          createdAt: Number(res.createdAt),
+        }))
+      } catch {
+        history = []
+      }
+      return ok({ sessionId: res.sessionId, createdAt: Number(res.createdAt), history })
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async deleteChatSession(workspacePath: string): Promise<Result<void>> {
+    try {
+      await this.client.deleteChatSession({ workspacePath })
       return ok(undefined)
     } catch (e) {
       return toErr(e)
@@ -574,9 +695,19 @@ export class GrpcGateway implements DaemonGateway {
     }
   }
 
-  async decompileBlueprint(workspacePath: string, blueprintId: string): Promise<Result<string>> {
+  async decompileBlueprint(
+    workspacePath: string,
+    blueprintOrId: Blueprint | string,
+  ): Promise<Result<string>> {
     try {
-      const resp = await this.client.decompileBlueprint({ workspacePath, blueprintId })
+      const resp =
+        typeof blueprintOrId === 'string'
+          ? await this.client.decompileBlueprint({ workspacePath, blueprintId: blueprintOrId })
+          : await this.client.decompileBlueprint({
+              workspacePath,
+              blueprintId: '',
+              blueprint: toProtoBlueprint(blueprintOrId),
+            })
       return ok(resp.source)
     } catch (e) {
       return toErr(e)

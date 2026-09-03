@@ -885,6 +885,10 @@ impl Interpreter {
     }
 
     /// Gathers the data input values for a node from its incoming data edges.
+    ///
+    /// Inputs without an incoming edge fall back to the pin's default value,
+    /// or to null when the pin is optional; genuinely missing inputs stay
+    /// absent so the executor reports them.
     fn gather_inputs(
         &self,
         blueprint: &Blueprint,
@@ -905,6 +909,18 @@ impl Interpreter {
                 ))
             })?;
             inputs.insert(edge.target_pin, value);
+        }
+        if let Some(node) = blueprint.node(node_id) {
+            for pin in node.pins.iter().filter(|p| p.pin_type == PinType::DataInput) {
+                if inputs.contains_key(&pin.id) {
+                    continue;
+                }
+                if let Some(default) = &pin.default {
+                    inputs.insert(pin.id, crate::execution::nodes::json_to_value(default));
+                } else if pin.optional {
+                    inputs.insert(pin.id, Value::Null);
+                }
+            }
         }
         Ok(inputs)
     }
@@ -1068,24 +1084,18 @@ mod tests {
                 kind: "Start".to_string(),
                 position: (0.0, 0.0),
                 pins: vec![
-                    Pin {
-                        id: start_exec_out,
+                    Pin { id: start_exec_out,
                         name: "Exec".to_string(),
                         pin_type: PinType::ExecOutput,
-                        data_type: DataType::Void,
-                    },
-                    Pin {
-                        id: start_a,
+                        data_type: DataType::Void, ..Default::default() },
+                    Pin { id: start_a,
                         name: "A".to_string(),
                         pin_type: PinType::DataOutput,
-                        data_type: DataType::Float,
-                    },
-                    Pin {
-                        id: start_b,
+                        data_type: DataType::Float, ..Default::default() },
+                    Pin { id: start_b,
                         name: "B".to_string(),
                         pin_type: PinType::DataOutput,
-                        data_type: DataType::Float,
-                    },
+                        data_type: DataType::Float, ..Default::default() },
                 ],
                 data: serde_json::json!({ "A": 2, "B": 3 }),
             },
@@ -1095,36 +1105,26 @@ mod tests {
                 kind: "Add".to_string(),
                 position: (0.0, 0.0),
                 pins: vec![
-                    Pin {
-                        id: add_exec_in,
+                    Pin { id: add_exec_in,
                         name: "Exec".to_string(),
                         pin_type: PinType::ExecInput,
-                        data_type: DataType::Void,
-                    },
-                    Pin {
-                        id: add_exec_out,
+                        data_type: DataType::Void, ..Default::default() },
+                    Pin { id: add_exec_out,
                         name: "Exec".to_string(),
                         pin_type: PinType::ExecOutput,
-                        data_type: DataType::Void,
-                    },
-                    Pin {
-                        id: add_a,
+                        data_type: DataType::Void, ..Default::default() },
+                    Pin { id: add_a,
                         name: "A".to_string(),
                         pin_type: PinType::DataInput,
-                        data_type: DataType::Float,
-                    },
-                    Pin {
-                        id: add_b,
+                        data_type: DataType::Float, ..Default::default() },
+                    Pin { id: add_b,
                         name: "B".to_string(),
                         pin_type: PinType::DataInput,
-                        data_type: DataType::Float,
-                    },
-                    Pin {
-                        id: add_result,
+                        data_type: DataType::Float, ..Default::default() },
+                    Pin { id: add_result,
                         name: "Result".to_string(),
                         pin_type: PinType::DataOutput,
-                        data_type: DataType::Float,
-                    },
+                        data_type: DataType::Float, ..Default::default() },
                 ],
                 data: serde_json::Value::Null,
             },
@@ -1134,24 +1134,18 @@ mod tests {
                 kind: "Judge".to_string(),
                 position: (0.0, 0.0),
                 pins: vec![
-                    Pin {
-                        id: judge_exec_in,
+                    Pin { id: judge_exec_in,
                         name: "Exec".to_string(),
                         pin_type: PinType::ExecInput,
-                        data_type: DataType::Void,
-                    },
-                    Pin {
-                        id: judge_score,
+                        data_type: DataType::Void, ..Default::default() },
+                    Pin { id: judge_score,
                         name: "Score".to_string(),
                         pin_type: PinType::DataInput,
-                        data_type: DataType::Float,
-                    },
-                    Pin {
-                        id: judge_success,
+                        data_type: DataType::Float, ..Default::default() },
+                    Pin { id: judge_success,
                         name: "Success".to_string(),
                         pin_type: PinType::DataOutput,
-                        data_type: DataType::Bool,
-                    },
+                        data_type: DataType::Bool, ..Default::default() },
                 ],
                 data: serde_json::Value::Null,
             },
@@ -1235,23 +1229,21 @@ mod tests {
         );
         let (entry_exec, entry_a, entry_b, add_exin, add_exout, add_a, add_b, add_res, exit_exin, exit_res) =
             (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let pin = |p_id: Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin {
-            id: p_id,
+        let pin = |p_id: Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin { id: p_id,
             name: name.to_string(),
             pin_type,
-            data_type,
-        };
+            data_type, ..Default::default() };
         FunctionEntry {
             id,
             name: "AddFunc".to_string(),
             description: "Adds two numbers".to_string(),
             signature: FunctionSignature {
                 inputs: vec![
-                    FnPin { name: "A".to_string(), data_type: DataType::Float, description: None },
-                    FnPin { name: "B".to_string(), data_type: DataType::Float, description: None },
+                    FnPin { name: "A".to_string(), data_type: DataType::Float, description: None, ..Default::default() },
+                    FnPin { name: "B".to_string(), data_type: DataType::Float, description: None, ..Default::default() },
                 ],
                 outputs: vec![
-                    FnPin { name: "Result".to_string(), data_type: DataType::Float, description: None },
+                    FnPin { name: "Result".to_string(), data_type: DataType::Float, description: None, ..Default::default() },
                 ],
             },
             body: Blueprint {
@@ -1314,12 +1306,10 @@ mod tests {
         let (start, caller) = (Uuid::new_v4(), Uuid::new_v4());
         let (start_ex, start_a, start_b, caller_exin, caller_exout, caller_a, caller_b, caller_res) =
             (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let pin = |p_id: Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin {
-             id: p_id,
+        let pin = |p_id: Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin { id: p_id,
              name: name.to_string(),
              pin_type,
-             data_type,
-         };
+             data_type, ..Default::default() };
          Blueprint {
              id: Uuid::new_v4(),
              name: "call-fn".to_string(),
@@ -1404,7 +1394,7 @@ mod tests {
         let (id, entry_node, caller, exit_node) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let (entry_exec, caller_exin, caller_exout, exit_exin) =
             (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let pin = |p_id: Uuid, name: &str, pin_type: PinType| Pin { id: p_id, name: name.to_string(), pin_type, data_type: DataType::Void };
+        let pin = |p_id: Uuid, name: &str, pin_type: PinType| Pin { id: p_id, name: name.to_string(), pin_type, data_type: DataType::Void, ..Default::default() };
         let func = FunctionEntry {
             id,
             name: "Selfish".to_string(),
@@ -1510,12 +1500,10 @@ mod tests {
             Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(),
             Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(),
         );
-        let pin = |p_id: Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin {
-            id: p_id,
+        let pin = |p_id: Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin { id: p_id,
             name: name.to_string(),
             pin_type,
-            data_type,
-        };
+            data_type, ..Default::default() };
         let blueprint = Blueprint {
             id: Uuid::new_v4(),
             name: "breaker".to_string(),
@@ -1598,18 +1586,14 @@ mod tests {
                     kind: "CallLLM".to_string(),
                     position: (0.0, 0.0),
                     pins: vec![
-                        Pin {
-                            id: a_exec_in,
+                        Pin { id: a_exec_in,
                             name: "Exec".to_string(),
                             pin_type: PinType::ExecInput,
-                            data_type: DataType::Void,
-                        },
-                        Pin {
-                            id: a_exec_out,
+                            data_type: DataType::Void, ..Default::default() },
+                        Pin { id: a_exec_out,
                             name: "Exec".to_string(),
                             pin_type: PinType::ExecOutput,
-                            data_type: DataType::Void,
-                        },
+                            data_type: DataType::Void, ..Default::default() },
                     ],
                     data: serde_json::Value::Null,
                 },
@@ -1619,18 +1603,14 @@ mod tests {
                     kind: "CallLLM".to_string(),
                     position: (0.0, 0.0),
                     pins: vec![
-                        Pin {
-                            id: b_exec_in,
+                        Pin { id: b_exec_in,
                             name: "Exec".to_string(),
                             pin_type: PinType::ExecInput,
-                            data_type: DataType::Void,
-                        },
-                        Pin {
-                            id: b_exec_out,
+                            data_type: DataType::Void, ..Default::default() },
+                        Pin { id: b_exec_out,
                             name: "Exec".to_string(),
                             pin_type: PinType::ExecOutput,
-                            data_type: DataType::Void,
-                        },
+                            data_type: DataType::Void, ..Default::default() },
                     ],
                     data: serde_json::Value::Null,
                 },
@@ -1697,36 +1677,26 @@ mod tests {
                 kind: "Add".to_string(),
                 position: (0.0, 0.0),
                 pins: vec![
-                    Pin {
-                        id: exec_in,
+                    Pin { id: exec_in,
                         name: "Exec".to_string(),
                         pin_type: PinType::ExecInput,
-                        data_type: DataType::Void,
-                    },
-                    Pin {
-                        id: exec_out,
+                        data_type: DataType::Void, ..Default::default() },
+                    Pin { id: exec_out,
                         name: "Exec".to_string(),
                         pin_type: PinType::ExecOutput,
-                        data_type: DataType::Void,
-                    },
-                    Pin {
-                        id: a,
+                        data_type: DataType::Void, ..Default::default() },
+                    Pin { id: a,
                         name: "A".to_string(),
                         pin_type: PinType::DataInput,
-                        data_type: DataType::Float,
-                    },
-                    Pin {
-                        id: b,
+                        data_type: DataType::Float, ..Default::default() },
+                    Pin { id: b,
                         name: "B".to_string(),
                         pin_type: PinType::DataInput,
-                        data_type: DataType::Float,
-                    },
-                    Pin {
-                        id: result,
+                        data_type: DataType::Float, ..Default::default() },
+                    Pin { id: result,
                         name: "Result".to_string(),
                         pin_type: PinType::DataOutput,
-                        data_type: DataType::Float,
-                    },
+                        data_type: DataType::Float, ..Default::default() },
                 ],
                 data: serde_json::Value::Null,
             };
@@ -1741,24 +1711,18 @@ mod tests {
                     kind: "Start".to_string(),
                     position: (0.0, 0.0),
                     pins: vec![
-                        Pin {
-                            id: start_exec,
+                        Pin { id: start_exec,
                             name: "Exec".to_string(),
                             pin_type: PinType::ExecOutput,
-                            data_type: DataType::Void,
-                        },
-                        Pin {
-                            id: start_a,
+                            data_type: DataType::Void, ..Default::default() },
+                        Pin { id: start_a,
                             name: "A".to_string(),
                             pin_type: PinType::DataOutput,
-                            data_type: DataType::Float,
-                        },
-                        Pin {
-                            id: start_b,
+                            data_type: DataType::Float, ..Default::default() },
+                        Pin { id: start_b,
                             name: "B".to_string(),
                             pin_type: PinType::DataOutput,
-                            data_type: DataType::Float,
-                        },
+                            data_type: DataType::Float, ..Default::default() },
                     ],
                     data: serde_json::json!({ "A": 2, "B": 3 }),
                 },

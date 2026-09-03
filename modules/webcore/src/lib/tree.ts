@@ -15,8 +15,10 @@ export interface TreeApi {
   toggle(node: FileTreeNode): void
   /** Open a file row in the editor. */
   openFile(node: FileTreeNode): void
-  /** Row highlight classset for the file currently being edited. */
-  activeCls(path: string): string
+  /** Row highlight classset for selection or the file currently being edited. */
+  rowCls(path: string): string
+  /** Row click: plain selects-and-acts, Ctrl toggles, Shift spans a range. */
+  select(node: FileTreeNode, event: MouseEvent): void
   /** Populate the explorer row context menu at the event position. */
   onRowContextMenu(node: FileTreeNode, event: MouseEvent): void
 }

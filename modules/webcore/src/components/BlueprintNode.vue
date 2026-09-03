@@ -164,7 +164,7 @@ function onValue(pin: BlueprintPin, e: Event) {
           <template v-if="editsValue(p)">
             <select
               v-if="p.type === 'choice'"
-              class="metteur-value"
+              class="metteur-value nodrag"
               :value="valueOf(p)"
               @change="onValue(p, $event)"
             >
@@ -173,7 +173,7 @@ function onValue(pin: BlueprintPin, e: Event) {
             <input
               v-else
               :type="INPUT_TYPE[p.type ?? 'string'] ?? 'text'"
-              class="metteur-value"
+              class="metteur-value nodrag"
               :placeholder="p.name"
               :value="valueOf(p)"
               :checked="p.type === 'bool' ? valueOf(p) === 'true' : undefined"

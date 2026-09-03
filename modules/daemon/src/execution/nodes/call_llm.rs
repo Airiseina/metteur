@@ -143,18 +143,14 @@ mod tests {
             kind: "CallLLM".to_string(),
             position: (0.0, 0.0),
             pins: vec![
-                Pin {
-                    id: uuid::Uuid::new_v4(),
+                Pin { id: uuid::Uuid::new_v4(),
                     name: "Result".to_string(),
                     pin_type: PinType::DataOutput,
-                    data_type: DataType::String,
-                },
-                Pin {
-                    id: uuid::Uuid::new_v4(),
+                    data_type: DataType::String, ..Default::default() },
+                Pin { id: uuid::Uuid::new_v4(),
                     name: "Context".to_string(),
                     pin_type: PinType::DataOutput,
-                    data_type: DataType::Json,
-                },
+                    data_type: DataType::Json, ..Default::default() },
             ],
             data,
         }

@@ -257,6 +257,7 @@ pub(crate) async fn handle_bp_decompile(
         .decompile_blueprint(DecompileBlueprintRequest {
             workspace_path: ws,
             blueprint_id: id.clone(),
+            blueprint: None,
         })
         .await
         .map_err(status)?
@@ -364,12 +365,10 @@ fn parse_node(node: &Value) -> anyhow::Result<Node> {
 }
 
 fn parse_pin(pin: &Value) -> anyhow::Result<Pin> {
-    Ok(Pin {
-        id: uuid_field(pin, "id")?,
+    Ok(Pin { id: uuid_field(pin, "id")?,
         name: str_field(pin, "name"),
         pin_type: str_field(pin, "pin_type"),
-        data_type: str_field(pin, "data_type"),
-    })
+        data_type: str_field(pin, "data_type"), ..Default::default() })
 }
 
 fn parse_edge(edge: &Value) -> anyhow::Result<Edge> {

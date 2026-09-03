@@ -97,3 +97,21 @@ impl From<f64> for Value {
         Value::Float(f)
     }
 }
+
+/// Converts a JSON value into a shared [`Value`].
+pub fn json_to_value(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else {
+                Value::Float(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(items) => Value::List(items.iter().map(json_to_value).collect()),
+        serde_json::Value::Object(_) => Value::Json(json.clone()),
+    }
+}

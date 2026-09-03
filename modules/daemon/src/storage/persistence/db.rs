@@ -23,6 +23,8 @@ pub mod cf {
     pub const GRANTS: &str = "grants";
     /// Stores blueprint functions keyed by function name.
     pub const FUNCTIONS: &str = "functions";
+    /// Stores the workspace's active chat session.
+    pub const CHAT_SESSIONS: &str = "chat_sessions";
 }
 
 /// A thin wrapper around a RocksDB instance with typed column families.
@@ -48,6 +50,7 @@ impl Db {
             ColumnFamilyDescriptor::new(cf::EXECUTION_STATE, rocksdb::Options::default()),
             ColumnFamilyDescriptor::new(cf::GRANTS, rocksdb::Options::default()),
             ColumnFamilyDescriptor::new(cf::FUNCTIONS, rocksdb::Options::default()),
+            ColumnFamilyDescriptor::new(cf::CHAT_SESSIONS, rocksdb::Options::default()),
         ];
 
         // RocksDB on Windows rejects the `\\?\` extended-length path prefix

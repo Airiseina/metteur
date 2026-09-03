@@ -62,12 +62,10 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
             }
             let pins: Vec<Pin> = pins_of(k)
                 .into_iter()
-                .map(|(name, pin_type)| Pin {
-                    id: Uuid::new_v4(),
+                .map(|(name, pin_type)| Pin { id: Uuid::new_v4(),
                     name,
                     pin_type,
-                    data_type: DataType::Json,
-                })
+                    data_type: DataType::Json, ..Default::default() })
                 .collect();
             nodes.push(Node {
                 id: node_id,

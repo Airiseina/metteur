@@ -28,7 +28,7 @@ import type {
 } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
-import type { BlueprintEdge, BlueprintNode, BlueprintPin, NodeCategory } from '@/core'
+import type { Blueprint, BlueprintEdge, BlueprintNode, BlueprintPin, NodeCategory } from '@/core'
 import { gateway } from '@/core'
 import { useFeedbackStore } from '@/stores/feedback'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -40,7 +40,9 @@ import BlueprintNodeComp from '@/components/BlueprintNode.vue'
 import BlueprintAuditDrawer from '@/components/BlueprintAuditDrawer.vue'
 import ContextMenu, { type MenuGroup } from '@/components/ContextMenu.vue'
 import FileVersionPanel from '@/components/FileVersionPanel.vue'
-import { CATEGORIES, execInOf, makeCallFunctionNode, makeFlowNode, NODE_PRESETS, uuid } from '@/lib/blueprint'
+import NodeInspector from '@/components/NodeInspector.vue'
+import FilePickerDialog, { type FilePick } from '@/components/FilePickerDialog.vue'
+import { CATEGORIES, execInOf, isPinCompatible, makeCallFunctionNode, makeFlowNode, NODE_PRESETS, uuid } from '@/lib/blueprint'
 
 const workspace = useWorkspaceStore()
 const store = useBlueprintStore()
@@ -49,7 +51,10 @@ const tabs = useTabsStore()
 const rightPanel = useRightPanelStore()
 const feedback = useFeedbackStore()
 const props = defineProps<{ filePath?: string }>()
-const { screenToFlowCoordinate, viewport } = useVueFlow()
+const { screenToFlowCoordinate, viewport, getNodes } = useVueFlow()
+
+/** Palette categories start folded so a long node list stays navigable. */
+const PALETTE_COLLAPSED = ['Events', 'Module', 'Actions', 'Flow', 'Functions']
 
 /** Whether the docked audit drawer is open. */
 const auditOpen = ref(false)
@@ -107,13 +112,6 @@ const BLUEPRINT_TITLE = 'build-feature.blueprint'
 
 /** Editor cache key for the open file; the graph store is keyed by path. */
 const fileKey = computed(() => props.filePath ?? `blueprints/${BLUEPRINT_ID}.blueprint`)
-
-/** Blueprint identity is derived from the file being edited, so switching tabs
- *  loads a different graph rather than always showing the same one (item 9). */
-const blueprintId = computed(() => {
-  const seg = props.filePath?.split(/[\\/]/).pop() ?? ''
-  return seg.replace(/\.blueprint$/i, '') || BLUEPRINT_ID
-})
 const blueprintTitle = computed(() => props.filePath?.split(/[\\/]/).pop() ?? BLUEPRINT_TITLE)
 
 interface SelectableFlowNode {
@@ -187,6 +185,15 @@ function graphKey(): string {
 
 /** Selected node id, driving Delete and the node context menu. */
 const selectedId = ref<string | null>(null)
+/** The selected flow node, if any (drives the inspector side panel). */
+const selectedNode = computed(() => flowNodes.value.find((n) => n.id === selectedId.value))
+/** The selected node's pin payload, fed to the inspector. */
+const selectedNodeData = computed(() => {
+  const data = selectedNode.value?.data as
+    | { title?: string; category?: string; inputs?: BlueprintPin[]; outputs?: BlueprintPin[]; values?: Record<string, string> }
+    | undefined
+  return data ?? null
+})
 /** Selected edge id, deletable with Delete. */
 const selectedEdgeId = ref<string | null>(null)
 /** Floating context menu payload, positioned in screen coordinates. */
@@ -320,7 +327,6 @@ const ACCENT: Record<NodeCategory, string> = {
   flow: '#2fbf8f',
 }
 
-let seed = 1
 const kindList = Object.keys(NODE_PRESETS)
 
 /** Load the graph for the currently open blueprint file and reset editor state. */
@@ -501,21 +507,8 @@ function pinOf(nodeId: string, handleId?: string) {
   )
 }
 
-/** Data types are compatible if equal, or either side is untyped (`any`). */
-function dataCompatible(a?: string, b?: string): boolean {
-  if (!a || !b) return true
-  if (a === 'any' || b === 'any') return true
-  return a === b
-}
-
-/**
- * Validate a proposed connection, mirroring Unreal's wiring rules:
- * - a wire always runs from an output pin to an input pin;
- * - control flow links exec-out → exec-in;
- * - data links data-out → data-in with compatible types.
- * Self-links are rejected. Any mismatch makes VueFlow preview the temp wire
- * red and the link is rejected on drop.
- */
+/** Validate a proposed connection: output→input, exec-out→exec-in for flow,
+ *  data-out→data-in with compatible types (self-links rejected). */
 function isValidConnection(c: Connection): boolean {
   if (!c.sourceHandle || !c.targetHandle) return false
   if (c.source === c.target) return false
@@ -524,7 +517,7 @@ function isValidConnection(c: Connection): boolean {
   if (!src || !tgt) return false
   const exec = src.kind === 'exec-out' && tgt.kind === 'exec-in'
   const data = src.kind === 'data-out' && tgt.kind === 'data-in'
-  return exec || (data && dataCompatible(src.type, tgt.type))
+  return exec || (data && isPinCompatible(src.type, tgt.type))
 }
 
 /* Unreal-style wire creation                                           */
@@ -723,7 +716,7 @@ const paletteMenuGroups = computed<MenuGroup[]>(() => {
     const preset = NODE_PRESETS[kind]
     if (!preset) return false
     if (srcPin.kind === 'exec-out') return preset.hasExecIn
-    if (srcPin.kind === 'data-out') return preset.inputs.some((d) => dataCompatible(srcPin.type, d.type))
+    if (srcPin.kind === 'data-out') return preset.inputs.some((d) => isPinCompatible(srcPin.type, d.type))
     return false
   }
   return CATEGORIES.map((cat) => ({
@@ -751,6 +744,7 @@ const nodeMenuGroups = computed<MenuGroup[]>(() => {
     {
       label: 'Node',
       items: [
+        { id: 'inspect', label: 'Inspect' },
         { id: 'duplicate', label: 'Duplicate', hint: '⌃D' },
         { id: 'copy', label: 'Copy', hint: '⌃C' },
         { id: 'delete', label: 'Delete', hint: '⌫' },
@@ -815,7 +809,7 @@ function wirePaletteTo(source: string, sourceHandle: string, newId: string) {
   }
   if (srcPin.kind === 'data-out') {
     const node = flowNodes.value.find((n) => n.id === newId)
-    const target = node?.data?.inputs?.find((p: BlueprintPin) => p.kind === 'data-in' && dataCompatible(srcPin.type, p.type))
+    const target = node?.data?.inputs?.find((p: BlueprintPin) => p.kind === 'data-in' && isPinCompatible(srcPin.type, p.type))
     if (target) {
       const eid = uuid()
       const visual = edgeVisual(sourceHandle, source)
@@ -858,6 +852,8 @@ function onMenuSelect(id: string) {
     if (id === 'delete') deleteNode(nid)
     else if (id === 'duplicate') duplicateNode(nid)
     else if (id === 'copy') copyNode(nid)
+    // 'inspect' needs no extra action: the inspector follows the selection,
+    // which is already set on the node the menu was opened for.
     else if (id === 'add-exec-out') addExecOutput(nid)
     else if (id === 'remove-exec-out') removeExecOutput(nid)
   } else if (menu.value.kind === 'edge') {
@@ -903,7 +899,8 @@ function addNodeAt(pos: { x: number; y: number }, kind: string): string | null {
   const entry = kind.startsWith('fn::')
     ? store.functions.find((f) => `fn::${f.name}` === kind)
     : undefined
-  const id = entry ? `n-call-${seed++}` : `n-${kind.toLowerCase()}-${seed++}`
+  // Node ids must be UUIDs: the daemon model keys nodes/edges/pins by `Uuid`.
+  const id = uuid()
   const node = entry ? makeCallFunctionNode(entry, pos, id) : makeFlowNode(kind, pos, id)
   flowNodes.value = [...flowNodes.value, node]
   selectedId.value = id
@@ -924,7 +921,7 @@ function deleteNode(id: string) {
  *  canvas, pre-filled with the workspace-relative path of the chosen file. */
 function addReferenceNode(filePath: string) {
   commit()
-  const id = `n-ref-${seed++}`
+  const id = uuid()
   const node = makeFlowNode('FileReference', { x: 120, y: 120 }, id)
   node.data!.values = { ...(node.data!.values ?? {}), 'path-in': filePath }
   node.data!.title = filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath
@@ -945,7 +942,7 @@ function duplicateNode(id: string, offset = 32) {
 }
 
 function cloneNode(src: SelectableFlowNode, offset: number): SelectableFlowNode {
-  const id = src.id.startsWith('n-copy-') ? `n-copy-${seed++}` : `${src.id}-copy`
+  const id = uuid()
   return {
     ...src,
     id,
@@ -1160,28 +1157,39 @@ function startMarquee(e: MouseEvent) {
   window.addEventListener('mouseup', up, { once: true })
 }
 
-/** Convert window (client) coordinates to coordinates relative to the flow
- *  canvas, which `screenToFlowCoordinate` expects. Using raw client coords
- *  mislocates the marquee whenever the canvas is not at the window origin. */
-function flowCoords(c: { x: number; y: number }): { x: number; y: number } {
-  const rect = flowWrap.value?.getBoundingClientRect()
-  return { x: c.x - (rect?.left ?? 0), y: c.y - (rect?.top ?? 0) }
-}
-
 /** Convert a client-space rect to flow space, select the contained nodes, and
- *  remember the region (client space) for later box-select menu decisions. */
+ *  remember the region (client space) for later box-select menu decisions.
+ *  `screenToFlowCoordinate` expects window coordinates and subtracts the flow
+ *  element's own origin, so raw client points are passed through unchanged.
+ *  A node is selected when its box overlaps the marquee at all, not only when
+ *  its origin point falls inside. */
 function applyMarquee(m: { x1: number; y1: number; x2: number; y2: number }) {
-  const a = screenToFlowCoordinate(flowCoords({ x: m.x1, y: m.y1 }))
-  const b = screenToFlowCoordinate(flowCoords({ x: m.x2, y: m.y2 }))
+  const a = screenToFlowCoordinate({ x: m.x1, y: m.y1 })
+  const b = screenToFlowCoordinate({ x: m.x2, y: m.y2 })
   const box = {
     minX: Math.min(a.x, b.x),
     minY: Math.min(a.y, b.y),
     maxX: Math.max(a.x, b.x),
     maxY: Math.max(a.y, b.y),
   }
+  /** Node size as measured by vue-flow, falling back to an estimate. */
+  const nodeRect = (id: string): { width: number; height: number } => {
+    const n = getNodes.value.find((x) => x.id === id)
+    if (n?.dimensions?.width && n?.dimensions?.height) {
+      return { width: n.dimensions.width, height: n.dimensions.height }
+    }
+    const node = flowNodes.value.find((x) => x.id === id)
+    const rows = Math.max(node?.data?.inputs?.length ?? 0, node?.data?.outputs?.length ?? 0)
+    return { width: 208, height: 24 + 12 + rows * 22 }
+  }
   for (const n of flowNodes.value) {
-    n.selected =
-      n.position.x >= box.minX && n.position.x <= box.maxX && n.position.y >= box.minY && n.position.y <= box.maxY
+    const { width, height } = nodeRect(n.id)
+    n.selected = !(
+      box.maxX < n.position.x ||
+      box.minX > n.position.x + width ||
+      box.maxY < n.position.y ||
+      box.minY > n.position.y + height
+    )
   }
   selectedId.value = null
   selectedEdgeId.value = null
@@ -1244,7 +1252,7 @@ async function handleRun() {
   // Persist the canvas first so the executed blueprint matches what the user
   // sees, then run it in place with the audit drawer open.
   await handleSave()
-  const id = store.uuidFor(fileKey.value) ?? blueprintId.value
+  const id = store.uuidFor(fileKey.value) ?? uuid()
   auditOpen.value = true
   try {
     await execution.run(id)
@@ -1253,35 +1261,101 @@ async function handleRun() {
   }
 }
 
-/** Import a blueprint from DSL text, replacing the current canvas. */
-async function importDsl() {
-  const text = window.prompt('Paste Metteur DSL')
-  if (!text) return
-  const r = await gateway.compileDsl(text)
+/** DSL export/import pickers (workspace file dialogs). */
+const dslSaveOpen = ref(false)
+const dslPickOpen = ref(false)
+
+/** Pick the graph entry for export: a `Start` node when present, else the
+ *  first node without an incoming exec wire (the exec-flow root). Falling back
+ *  to `flowNodes[0]` can wrongly mark `End` as entry when the list order
+ *  drifts, which the DSL compiler would then treat as the start of the graph. */
+function entryNodeIdOf(): string {
+  const hasIncomingExec = new Set<string>()
+  for (const e of flowEdges.value) {
+    const srcPin = pinOf(e.source, e.sourceHandle ?? '')
+    if (srcPin?.kind === 'exec-out') hasIncomingExec.add(e.target)
+  }
+  return (
+    flowNodes.value.find((n) => n.data?.title === 'Start')?.id ??
+    flowNodes.value.find((n) => !hasIncomingExec.has(n.id))?.id ??
+    flowNodes.value[0]?.id ??
+    ''
+  )
+}
+
+/** Render the current canvas to DSL text by sending it to the daemon inline
+ *  (no dependency on the archived copy, which may be stale or from an older
+ *  storage format). */
+async function dslExportText(): Promise<string | null> {
+  const ws = workspace.active
+  if (!ws) return null
+  if (flowNodes.value.length === 0) {
+    feedback.toast('error', 'DSL export failed', 'The canvas is empty')
+    return null
+  }
+  const bp: Blueprint = {
+    id: store.uuidFor(fileKey.value) ?? uuid(),
+    name: fileKey.value.split(/[\\/]/).pop() ?? 'blueprint',
+    entryNodeId: entryNodeIdOf(),
+    nodes: flowNodes.value.map(toBpNode),
+    edges: flowEdges.value.map((e) => ({
+      id: e.id,
+      source: e.source,
+      sourceHandle: e.sourceHandle ?? undefined,
+      target: e.target,
+      targetHandle: e.targetHandle ?? undefined,
+      label: typeof e.label === 'string' ? e.label : undefined,
+    })),
+  }
+  const r = await gateway.decompileBlueprint(ws.path, bp)
   if (!r.ok) {
-    feedback.toast('error', 'DSL compile failed', r.error)
+    feedback.toast('error', 'DSL export failed', r.error)
+    return null
+  }
+  return r.data
+}
+
+/** Rebuild the canvas from a `.mbp` file picked in the workspace. */
+async function importDslFrom(filePath: string) {
+  const ws = workspace.active
+  if (!ws) return
+  const file = await gateway.readFile(ws.path, filePath)
+  if (!file.ok) {
+    feedback.toast('error', 'DSL read failed', file.error)
+    return
+  }
+  const compiled = await gateway.compileDsl(file.data.content)
+  if (!compiled.ok) {
+    feedback.toast('error', 'DSL compile failed', compiled.error)
     return
   }
   commit()
-  flowNodes.value = r.data.nodes.map((n) => toFlowNode(n) as unknown as SelectableFlowNode)
-  flowEdges.value = r.data.edges.map(toFlowEdge)
+  flowNodes.value = compiled.data.nodes.map((n) => toFlowNode(n) as unknown as SelectableFlowNode)
+  flowEdges.value = compiled.data.edges.map(toFlowEdge)
   selectedId.value = null
   selectedEdgeId.value = null
   dirty.value = true
 }
 
-/** Export the stored blueprint (keyed by the open file's UUID) as DSL. */
-async function exportDsl() {
+/** Save-mode confirm: write the exported DSL into the picked directory. */
+async function onDslExportConfirm(p: FilePick) {
+  dslSaveOpen.value = false
   const ws = workspace.active
-  if (!ws) return
-  const id = store.uuidFor(fileKey.value) ?? blueprintId.value
-  const r = await gateway.decompileBlueprint(ws.path, id)
-  if (!r.ok) {
-    feedback.toast('error', 'DSL export failed', r.error)
-    return
-  }
-  await navigator.clipboard?.writeText(r.data).catch(() => undefined)
-  feedback.toast('success', 'DSL copied to clipboard')
+  if (!ws || !p.name) return
+  const dsl = await dslExportText()
+  if (dsl === null) return
+  const base = p.name.toLowerCase().endsWith('.mbp') ? p.name : `${p.name}.mbp`
+  const rel = p.dir ? `${p.dir}/${base}` : base
+  const r = await gateway.writeFile(ws.path, rel, dsl)
+  if (r.ok) feedback.toast('success', 'DSL exported', rel)
+  else feedback.toast('error', 'DSL export failed', r.error)
+}
+
+/** Open-mode confirm: import the picked `.mbp` file. */
+async function onDslImportConfirm(p: FilePick) {
+  if (!p.filePath) return
+  dslPickOpen.value = false
+  await importDslFrom(p.filePath)
 }
 
 /** Open the per-file version history in the closable right-hand panel. */
@@ -1377,18 +1451,18 @@ function openVersionPanel() {
         <button
           class="editor-tool-icon"
           type="button"
-          title="Export blueprint as DSL"
+          title="Export blueprint as DSL file"
           aria-label="Export DSL"
-          @click="exportDsl"
+          @click="dslSaveOpen = true"
         >
           <FileDown class="h-4 w-4" />
         </button>
         <button
           class="editor-tool-icon"
           type="button"
-          title="Import blueprint from DSL"
+          title="Import blueprint from .mbp file"
           aria-label="Import DSL"
-          @click="importDsl"
+          @click="dslPickOpen = true"
         >
           <FileUp class="h-4 w-4" />
         </button>
@@ -1484,7 +1558,37 @@ function openVersionPanel() {
 
       <!-- Docked execution audit (Unreal-style debug trail). -->
       <BlueprintAuditDrawer v-if="auditOpen" v-model:open="auditOpen" :node-id="selectedId" />
+
+      <!-- Selected-node inspector (pin defaults / types). -->
+      <NodeInspector
+        v-if="selectedNodeData && !auditOpen"
+        :node="selectedNodeData"
+        @close="selectedId = null"
+        @change="dirty = true"
+      />
     </div>
+
+    <!-- DSL file dialogs (workspace file picker). -->
+    <FilePickerDialog
+      v-if="workspace.active && dslSaveOpen"
+      :open="dslSaveOpen"
+      mode="save"
+      title="Export blueprint as DSL"
+      :workspace-path="workspace.active.path"
+      :extensions="['.mbp']"
+      @close="dslSaveOpen = false"
+      @confirm="onDslExportConfirm"
+    />
+    <FilePickerDialog
+      v-if="workspace.active && dslPickOpen"
+      :open="dslPickOpen"
+      mode="open"
+      title="Import blueprint from DSL"
+      :workspace-path="workspace.active.path"
+      :extensions="['.mbp']"
+      @close="dslPickOpen = false"
+      @confirm="onDslImportConfirm"
+    />
 
     <!-- Floating context menus -->
     <ContextMenu
@@ -1492,6 +1596,7 @@ function openVersionPanel() {
       :x="menu.x"
       :y="menu.y"
       :groups="paletteMenuGroups"
+      :default-collapsed="PALETTE_COLLAPSED"
       searchable
       @select="onMenuSelect"
       @close="onPaletteClose"

@@ -48,11 +48,13 @@ function loadLastWorkspace(): string | null {
 /**
  * Active workspace management (single-workspace shell).
  *
- * Only one workspace is open at a time, like a native IDE window. `recents`
+ * Each window shows one workspace at a time, like a native IDE window, while
+ * the shared daemon may keep several open (one per window). `recents`
  * remembers every workspace opened so the user can jump back without retyping
  * the path; the recent list survives reloads via `localStorage`, while the
- * last-active path is kept per-tab in `sessionStorage` so a new window cannot
- * hijack the workspace of an existing tab.
+ * last-active path is kept per-tab in `sessionStorage`. New windows inherit
+ * the opener's `sessionStorage` via `window.open`, so a restored workspace is
+ * never closed on the daemon by another window's first switch (`autoRestored`).
  */
 export const useWorkspaceStore = defineStore('workspace', () => {
   /** Workspaces opened earlier, for the switcher / welcome-page list. */
@@ -62,6 +64,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const busy = ref(false)
   /** Explorer directory listings keyed by `workspacePath|dir`. */
   const dirCache = ref<Map<string, FileTreeNode[]>>(new Map())
+  /**
+   * True while `active` came from an automatic sessionStorage restore. A new
+   * window copies its opener's sessionStorage, so that workspace may still be
+   * in use by the originating window: the first user-driven switch must detach
+   * locally instead of closing it on the shared daemon.
+   */
+  let autoRestored = false
 
   const hasActive = computed(() => active.value !== null)
 
@@ -102,6 +111,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   /** Reopen the most recently used workspace (called on app boot). */
   async function restore() {
     if (active.value) return
+    // A deep link (`?open=<path>`, emitted by "Open in new window") already
+    // names the boot workspace; ignore the sessionStorage copy inherited from
+    // the opener tab (window.open duplicates sessionStorage in browsers).
+    if (typeof window !== 'undefined' && window.location.search.includes('open=')) return
     const path = loadLastWorkspace()
     if (!path) return
     const r = await gateway.openWorkspace(path)
@@ -109,6 +122,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       dirCache.value = new Map()
       active.value = r.data
       remember(r.data)
+      autoRestored = true
     }
   }
 
@@ -118,9 +132,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (!target) return { ok: false, message: 'Path is empty' }
     busy.value = true
     try {
-      // Single-workspace shell: opening a new one closes the current first.
+      // Single-workspace shell: opening a new one closes the current first —
+      // unless it was auto-restored, in which case another window may still be
+      // using it on the shared daemon (detach locally instead).
       const prev = active.value
-      if (prev && prev.path !== target) await gateway.closeWorkspace(prev.path)
+      if (prev && prev.path !== target && !autoRestored) await gateway.closeWorkspace(prev.path)
+      autoRestored = false
       const r = await gateway.openWorkspace(target)
       if (!r.ok) return { ok: false, message: r.error }
       dirCache.value = new Map()
@@ -137,7 +154,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function switchTo(path: string): Promise<void> {
     if (active.value?.path === path) return
     const prev = active.value
-    if (prev) await gateway.closeWorkspace(prev.path)
+    if (prev && !autoRestored) await gateway.closeWorkspace(prev.path)
+    autoRestored = false
     const r = await gateway.openWorkspace(path)
     if (r.ok) {
       active.value = r.data
@@ -167,6 +185,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function select(path: string) {
+    autoRestored = false
     active.value = recents.value.find((w) => w.path === path) ?? null
     if (active.value) remember(active.value)
   }

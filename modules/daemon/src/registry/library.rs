@@ -28,12 +28,13 @@ pub fn builtin_chain_of_thought() -> FunctionEntry {
     let llm_result = uuid::Uuid::new_v4();
     let exit_result = uuid::Uuid::new_v4();
 
-    let entry_pin = |id: uuid::Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin {
-        id,
-        name: name.to_string(),
-        pin_type,
-        data_type,
-    };
+    let entry_pin =
+        |id: uuid::Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin::data(
+            name.to_string(),
+            pin_type,
+            data_type,
+            id,
+        );
 
     FunctionEntry {
         id: fn_id,
@@ -45,6 +46,8 @@ pub fn builtin_chain_of_thought() -> FunctionEntry {
                 name: "Result".to_string(),
                 data_type: DataType::String,
                 description: None,
+                default: None,
+                optional: false,
             }],
         },
         body: Blueprint {

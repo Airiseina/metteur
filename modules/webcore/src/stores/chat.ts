@@ -8,16 +8,23 @@ import { useWorkspaceStore } from './workspace'
  * ReAct conversation for the current workspace.
  *
  * Holds the message list and the sending state so the chat surface stays a thin
- * view. Messages are upserted by id so streamed deltas fill a bubble in place
- * instead of appending duplicates. Agent helpers (workspace files for the
- * attach/@-menu and the installed addons) live here so the composer stays
- * stateless and the context survives tab switches.
+ * view. Messages are upserted by id; streamed deltas fill a bubble in place
+ * (append while `pending`, replace on the final event) instead of appending
+ * duplicates. Agent helpers (workspace files for the attach/@-menu and the
+ * installed addons) live here so the composer stays stateless and the context
+ * survives tab switches.
+ *
+ * The conversation is persisted daemon-side per workspace: the store restores
+ * it when the workspace opens (surviving daemon restarts) and tracks the
+ * session id so later turns resume the same session.
  */
 export const useChatStore = defineStore('chat', () => {
   const workspace = useWorkspaceStore()
   const messages = ref<ChatMessage[]>([])
   const streaming = ref(false)
   const busy = ref(false)
+  /** id of the persisted session, passed back on every turn. */
+  const sessionId = ref('')
 
   // Files / addons driving the composer's attach, @-mention and plugin toggles.
   const files = ref<FileTreeNode[]>([])
@@ -27,16 +34,33 @@ export const useChatStore = defineStore('chat', () => {
   /** Files queued in the composer (chips) but not yet sent as a turn. */
   const pendingFiles = ref<FileTreeNode[]>([])
 
-  // Holding on to a message from a previous workspace pollutes the next one.
+  // Switching workspaces resets the surface and restores the new session.
   watch(
     () => workspace.active?.path,
-    () => {
+    async () => {
       messages.value = []
       streaming.value = false
       busy.value = false
       pendingFiles.value = []
+      sessionId.value = ''
+      if (workspace.active?.path) await restore()
     },
   )
+
+  /** Reload the persisted conversation of the active workspace, if any. */
+  async function restore(): Promise<void> {
+    const ws = workspace.active
+    if (!ws) return
+    const target = ws.path
+    const sessions = await gateway.listChatSessions(target)
+    if (!sessions.ok || sessions.data.length === 0) return
+    const snap = await gateway.getChatSession(target)
+    if (!snap.ok) return
+    // The user may have switched workspaces while loading; discard stale data.
+    if (workspace.active?.path !== target) return
+    sessionId.value = snap.data.sessionId
+    messages.value = snap.data.history
+  }
 
   /** Load the workspace file list into the attach / @-mention menu. */
   async function loadFiles(): Promise<void> {
@@ -98,7 +122,17 @@ export const useChatStore = defineStore('chat', () => {
     streaming.value = true
     busy.value = true
     try {
-      const r = await gateway.sendChat(ws.path, text, messages.value, (m) => upsert(m), options)
+      const r = await gateway.sendChat(
+        ws.path,
+        text,
+        messages.value,
+        (m) => upsert(m),
+        options,
+        (id) => {
+          sessionId.value = id
+        },
+        sessionId.value,
+      )
       return r.ok
     } finally {
       if (streaming.value) {
@@ -118,17 +152,26 @@ export const useChatStore = defineStore('chat', () => {
     busy.value = false
   }
 
-  /** Insert or replace a streamed message (matched by id). */
+  /** Insert a message, appending deltas to an open bubble of the same id. */
   function upsert(m: ChatMessage) {
     const idx = messages.value.findIndex((x) => x.id === m.id)
-    if (idx >= 0) messages.value[idx] = m
-    else messages.value.push(m)
+    if (idx < 0) {
+      messages.value.push(m)
+      return
+    }
+    const existing = messages.value[idx]
+    // Deltas append into the pending bubble; final events replace it.
+    if (existing.pending && m.pending) existing.content += m.content
+    else messages.value[idx] = m
   }
 
   /** Drop the conversation (used by the "New chat" action). */
   async function clear() {
     if (streaming.value) await abort()
+    const ws = workspace.active
+    if (ws) await gateway.deleteChatSession(ws.path)
     messages.value = []
+    sessionId.value = ''
   }
 
   /** Attach a file reference to the conversation without sending a turn
@@ -146,6 +189,7 @@ export const useChatStore = defineStore('chat', () => {
     messages,
     streaming,
     busy,
+    sessionId,
     files,
     filesLoading,
     addons,
@@ -154,6 +198,7 @@ export const useChatStore = defineStore('chat', () => {
     send,
     abort,
     clear,
+    restore,
     attach,
     loadFiles,
     loadAddons,

@@ -8,13 +8,14 @@ use metteur_daemon::grpc::acl::AclLayer;
 use metteur_daemon::grpc::proto::daemon_client::DaemonClient;
 use metteur_daemon::grpc::proto::{
     self, AbortChatRequest, CancelRequest, CloseWorkspaceRequest, CompileDslRequest,
-    ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest, DeleteFunctionRequest,
-    ExecuteBlueprintRequest, FnPin, FunctionInfo, GetConfigRequest, GetExecutionUsageRequest,
-    GetFileHistoryRequest, ListAuditLogRequest, ListExecutionsRequest, ListFilesRequest,
-    ListFunctionsRequest, ListSnapshotsRequest, LoadFunctionRequest, OpenWorkspaceRequest,
-    ReadFileRequest, RemoveFileRequest, RenameFileRequest, RollbackRequest,
-    SaveBlueprintRequest, SaveFunctionRequest, SendChatRequest, SetConfigRequest, StatFileRequest,
-    WriteFileRequest,
+    ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest, DecompileBlueprintRequest,
+    DeleteChatSessionRequest, DeleteFunctionRequest, ExecuteBlueprintRequest, FnPin, FunctionInfo,
+    GetChatSessionRequest,
+    GetConfigRequest, GetExecutionUsageRequest, GetFileHistoryRequest, ListAuditLogRequest,
+    ListChatSessionsRequest, ListExecutionsRequest, ListFilesRequest, ListFunctionsRequest,
+    ListSnapshotsRequest, LoadFunctionRequest, OpenWorkspaceRequest, ReadFileRequest,
+    RemoveFileRequest, RenameFileRequest, RollbackRequest, SaveBlueprintRequest,
+    SaveFunctionRequest, SendChatRequest, SetConfigRequest, StatFileRequest, WriteFileRequest,
 };
 use metteur_daemon::grpc::{AppState, DaemonService};
 use metteur_daemon::registry::Registry;
@@ -230,24 +231,18 @@ fn build_blueprint() -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: start_exec.to_string(),
+                    proto::Pin { id: start_exec.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: start_a.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: start_a.to_string(),
                         name: "A".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: start_b.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: start_b.to_string(),
                         name: "B".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
+                        data_type: "Float".to_string(), ..Default::default() },
                 ],
                 data_json: r#"{"A":2,"B":3}"#.to_string(),
             },
@@ -258,36 +253,26 @@ fn build_blueprint() -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: add_exec_in.to_string(),
+                    proto::Pin { id: add_exec_in.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecInput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_exec_out.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: add_exec_out.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_a.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: add_a.to_string(),
                         name: "A".to_string(),
                         pin_type: "DataInput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_b.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: add_b.to_string(),
                         name: "B".to_string(),
                         pin_type: "DataInput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_result.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: add_result.to_string(),
                         name: "Result".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
+                        data_type: "Float".to_string(), ..Default::default() },
                 ],
                 data_json: "{}".to_string(),
             },
@@ -298,24 +283,18 @@ fn build_blueprint() -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: judge_exec_in.to_string(),
+                    proto::Pin { id: judge_exec_in.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecInput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: judge_score.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: judge_score.to_string(),
                         name: "Score".to_string(),
                         pin_type: "DataInput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: judge_success.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: judge_success.to_string(),
                         name: "Success".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Bool".to_string(),
-                    },
+                        data_type: "Bool".to_string(), ..Default::default() },
                 ],
                 data_json: "{}".to_string(),
             },
@@ -395,24 +374,18 @@ fn build_cancel_blueprint(delay_ms: u64) -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: start_exec.to_string(),
+                    proto::Pin { id: start_exec.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: start_a.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: start_a.to_string(),
                         name: "A".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: start_b.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: start_b.to_string(),
                         name: "B".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
+                        data_type: "Float".to_string(), ..Default::default() },
                 ],
                 data_json: r#"{"A":2,"B":3}"#.to_string(),
             },
@@ -423,30 +396,22 @@ fn build_cancel_blueprint(delay_ms: u64) -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: llm_exec_in.to_string(),
+                    proto::Pin { id: llm_exec_in.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecInput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: llm_exec_out.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: llm_exec_out.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: llm_result.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: llm_result.to_string(),
                         name: "Result".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "String".to_string(),
-                    },
-                    proto::Pin {
-                        id: llm_context.to_string(),
+                        data_type: "String".to_string(), ..Default::default() },
+                    proto::Pin { id: llm_context.to_string(),
                         name: "Context".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Json".to_string(),
-                    },
+                        data_type: "Json".to_string(), ..Default::default() },
                 ],
                 data_json: format!(
                     r#"{{"provider":"mock","mock_text":"ok","mock_delay_ms":{delay_ms}}}"#
@@ -459,36 +424,26 @@ fn build_cancel_blueprint(delay_ms: u64) -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: add_exec_in.to_string(),
+                    proto::Pin { id: add_exec_in.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecInput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_exec_out.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: add_exec_out.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_a.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: add_a.to_string(),
                         name: "A".to_string(),
                         pin_type: "DataInput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_b.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: add_b.to_string(),
                         name: "B".to_string(),
                         pin_type: "DataInput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
-                    proto::Pin {
-                        id: add_result.to_string(),
+                        data_type: "Float".to_string(), ..Default::default() },
+                    proto::Pin { id: add_result.to_string(),
                         name: "Result".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "Float".to_string(),
-                    },
+                        data_type: "Float".to_string(), ..Default::default() },
                 ],
                 data_json: "{}".to_string(),
             },
@@ -1015,18 +970,14 @@ fn build_command_blueprint(command: &str) -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: start_exec.to_string(),
+                    proto::Pin { id: start_exec.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: start_command.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: start_command.to_string(),
                         name: "command".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "String".to_string(),
-                    },
+                        data_type: "String".to_string(), ..Default::default() },
                 ],
                 data_json: format!(r#"{{"command":"{command}"}}"#),
             },
@@ -1037,30 +988,22 @@ fn build_command_blueprint(command: &str) -> proto::Blueprint {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: tool_exec_in.to_string(),
+                    proto::Pin { id: tool_exec_in.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecInput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: tool_exec_out.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: tool_exec_out.to_string(),
                         name: "Exec".to_string(),
                         pin_type: "ExecOutput".to_string(),
-                        data_type: "Void".to_string(),
-                    },
-                    proto::Pin {
-                        id: tool_command_in.to_string(),
+                        data_type: "Void".to_string(), ..Default::default() },
+                    proto::Pin { id: tool_command_in.to_string(),
                         name: "command".to_string(),
                         pin_type: "DataInput".to_string(),
-                        data_type: "String".to_string(),
-                    },
-                    proto::Pin {
-                        id: tool_result.to_string(),
+                        data_type: "String".to_string(), ..Default::default() },
+                    proto::Pin { id: tool_result.to_string(),
                         name: "Result".to_string(),
                         pin_type: "DataOutput".to_string(),
-                        data_type: "String".to_string(),
-                    },
+                        data_type: "String".to_string(), ..Default::default() },
                 ],
                 data_json: r#"{"tool_name":"ExecuteCommand"}"#.to_string(),
             },
@@ -1328,12 +1271,10 @@ async fn smoke_abstract_node_expands_and_runs() {
                 kind: "Start".to_string(),
                 pos_x: 0.0,
                 pos_y: 0.0,
-                pins: vec![proto::Pin {
-                    id: start_exec.to_string(),
+                pins: vec![proto::Pin { id: start_exec.to_string(),
                     name: "Exec".to_string(),
                     pin_type: "ExecOutput".to_string(),
-                    data_type: "Void".to_string(),
-                }],
+                    data_type: "Void".to_string(), ..Default::default() }],
                 data_json: "{}".to_string(),
             },
             proto::Node {
@@ -1342,12 +1283,10 @@ async fn smoke_abstract_node_expands_and_runs() {
                 kind: "Abstract".to_string(),
                 pos_x: 10.0,
                 pos_y: 0.0,
-                pins: vec![proto::Pin {
-                    id: abstract_exec_in.to_string(),
+                pins: vec![proto::Pin { id: abstract_exec_in.to_string(),
                     name: "Exec".to_string(),
                     pin_type: "ExecInput".to_string(),
-                    data_type: "Void".to_string(),
-                }],
+                    data_type: "Void".to_string(), ..Default::default() }],
                 data_json: serde_json::json!({
                     "description": "write a file",
                     "provider": "mock",
@@ -1501,18 +1440,14 @@ async fn smoke_addon_install_call_uninstall() {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: start_exec.to_string(),
+                    proto::Pin { id: start_exec.to_string(),
                         name: "Exec".into(),
                         pin_type: "ExecOutput".into(),
-                        data_type: "Void".into(),
-                    },
-                    proto::Pin {
-                        id: text_pin.to_string(),
+                        data_type: "Void".into(), ..Default::default() },
+                    proto::Pin { id: text_pin.to_string(),
                         name: "text".into(),
                         pin_type: "DataOutput".into(),
-                        data_type: "String".into(),
-                    },
+                        data_type: "String".into(), ..Default::default() },
                 ],
                 data_json: r#"{"text":"make me loud"}"#.into(),
             },
@@ -1523,24 +1458,18 @@ async fn smoke_addon_install_call_uninstall() {
                 pos_x: 10.0,
                 pos_y: 0.0,
                 pins: vec![
-                    proto::Pin {
-                        id: exec_in.to_string(),
+                    proto::Pin { id: exec_in.to_string(),
                         name: "Exec".into(),
                         pin_type: "ExecInput".into(),
-                        data_type: "Void".into(),
-                    },
-                    proto::Pin {
-                        id: text_pin.to_string(),
+                        data_type: "Void".into(), ..Default::default() },
+                    proto::Pin { id: text_pin.to_string(),
                         name: "text".into(),
                         pin_type: "DataInput".into(),
-                        data_type: "String".into(),
-                    },
-                    proto::Pin {
-                        id: result_pin.to_string(),
+                        data_type: "String".into(), ..Default::default() },
+                    proto::Pin { id: result_pin.to_string(),
                         name: "Result".into(),
                         pin_type: "DataOutput".into(),
-                        data_type: "String".into(),
-                    },
+                        data_type: "String".into(), ..Default::default() },
                 ],
                 data_json: r#"{"tool_name":"ComSmokeAddonShout"}"#.into(),
             },
@@ -1723,6 +1652,7 @@ async fn smoke_chat_streams_mock_reply() {
             history_json: String::new(),
             options_json: r#"{"provider":"mock","mock_text":"hi there","mock_delay_ms":30}"#
                 .to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -1731,10 +1661,18 @@ async fn smoke_chat_streams_mock_reply() {
     let mut kinds = Vec::new();
     while let Some(event) = stream.message().await.unwrap() {
         kinds.push(event.kind.clone());
-        if event.kind == "assistant" {
-            assert_eq!(event.content, "hi there");
+        match event.kind.as_str() {
+            "assistant" => assert_eq!(event.content, "hi there"),
+            "session" => {
+                let detail: serde_json::Value = serde_json::from_str(&event.detail_json).unwrap();
+                assert!(detail["session_id"].as_str().is_some());
+            }
+            "assistant_delta" => assert_eq!(event.content, "hi there"),
+            _ => {}
         }
     }
+    assert!(kinds.contains(&"session".to_string()));
+    assert!(kinds.contains(&"assistant_delta".to_string()));
     assert!(kinds.contains(&"assistant".to_string()));
     assert!(kinds.contains(&"done".to_string()));
 }
@@ -1757,6 +1695,7 @@ async fn smoke_chat_single_slot_per_workspace() {
             history_json: String::new(),
             options_json: r#"{"provider":"mock","mock_text":"slow","mock_delay_ms":300}"#
                 .to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -1769,6 +1708,7 @@ async fn smoke_chat_single_slot_per_workspace() {
             message: "again".to_string(),
             history_json: String::new(),
             options_json: r#"{"provider":"mock","mock_text":"x"}"#.to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap_err();
@@ -1802,6 +1742,7 @@ async fn smoke_chat_abort_interrupts_and_releases_slot() {
             history_json: String::new(),
             options_json: r#"{"provider":"mock","mock_text":"x","mock_delay_ms":1000}"#
                 .to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -1831,19 +1772,221 @@ async fn smoke_chat_abort_interrupts_and_releases_slot() {
             message: "after".to_string(),
             history_json: String::new(),
             options_json: r#"{"provider":"mock","mock_text":"ok"}"#.to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap();
 }
 
+#[tokio::test]
+async fn smoke_chat_persistence_resumes_and_clears_session() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    // First turn creates a session and streams the reply.
+    let mut session_id = String::new();
+    let mut kinds = Vec::new();
+    let mut stream = client
+        .send_chat(SendChatRequest {
+            workspace_path: ws_path.clone(),
+            message: "first turn".to_string(),
+            history_json: String::new(),
+            options_json: r#"{"provider":"mock","mock_text":"answer one"}"#.to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    while let Some(event) = stream.message().await.unwrap() {
+        kinds.push(event.kind.clone());
+        if event.kind == "session" {
+            let detail: serde_json::Value = serde_json::from_str(&event.detail_json).unwrap();
+            session_id = detail["session_id"].as_str().unwrap_or_default().to_string();
+        }
+    }
+    assert!(!session_id.is_empty());
+    assert!(kinds.contains(&"assistant_delta".to_string()));
+    assert!(kinds.contains(&"done".to_string()));
+
+    // The session is listed with a title from the first user message.
+    let list = client
+        .list_chat_sessions(ListChatSessionsRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(list.sessions.len(), 1);
+    assert_eq!(list.sessions[0].session_id, session_id);
+    assert_eq!(list.sessions[0].title, "first turn");
+    assert_eq!(list.sessions[0].turns, 1);
+
+    // A second turn resumes the persisted session.
+    let mut stream = client
+        .send_chat(SendChatRequest {
+            workspace_path: ws_path.clone(),
+            message: "second turn".to_string(),
+            history_json: String::new(),
+            options_json: r#"{"provider":"mock","mock_text":"answer two"}"#.to_string(),
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    while stream.message().await.unwrap().is_some() {}
+
+    let session = client
+        .get_chat_session(GetChatSessionRequest {
+            workspace_path: ws_path.clone(),
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let history: Vec<serde_json::Value> = serde_json::from_str(&session.history_json).unwrap();
+    assert_eq!(history.len(), 4); // user/assistant x two turns
+
+    // An unknown session is rejected.
+    let err = client
+        .get_chat_session(GetChatSessionRequest {
+            workspace_path: ws_path.clone(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    // Clearing removes the session.
+    client
+        .delete_chat_session(DeleteChatSessionRequest {
+            workspace_path: ws_path.clone(),
+            session_id: String::new(),
+        })
+        .await
+        .unwrap();
+    let list = client
+        .list_chat_sessions(ListChatSessionsRequest {
+            workspace_path: ws_path,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(list.sessions.is_empty());
+}
+
+#[tokio::test]
+async fn smoke_chat_delete_while_running_blocks_persistence() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    let _stream = client
+        .send_chat(SendChatRequest {
+            workspace_path: ws_path.clone(),
+            message: "slow".to_string(),
+            history_json: String::new(),
+            options_json: r#"{"provider":"mock","mock_text":"x","mock_delay_ms":1000}"#
+                .to_string(),
+            session_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Deleting while the chat is running aborts it and forbids the finalize
+    // from re-persisting the session.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client
+        .delete_chat_session(DeleteChatSessionRequest {
+            workspace_path: ws_path.clone(),
+            session_id: String::new(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let err = client
+        .get_chat_session(GetChatSessionRequest {
+            workspace_path: ws_path,
+            session_id: String::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn smoke_extended_pure_nodes_run_via_dsl() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    let compiled = client
+        .compile_dsl(CompileDslRequest {
+            source: "\
+blueprint \"ExtendedNodes\"
+entry start: Start(A = 8, B = 3)
+mod: Modulo(A <- start.A, B <- start.B)
+res: Concat(A <- mod.Result, B = \"!\")
+check: Contains(A <- res.Result, B = \"!\")
+start -> mod
+mod -> res
+res -> check
+"
+            .to_string(),
+        })
+        .await
+        .expect("dsl compile failed")
+        .into_inner();
+    assert_eq!(compiled.nodes.len(), 4);
+    client
+        .save_blueprint(SaveBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint: Some(compiled.clone()),
+        })
+        .await
+        .unwrap();
+
+    // Start, Modulo, Concat and Contains each emit started + finished + node_data.
+    let mut stream = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: compiled.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await.unwrap() {
+        events.push(event);
+    }
+    // Start, Modulo, Concat and Contains each emit started + finished + node_data.
+    assert_eq!(events.len(), 12);
+    assert!(events.iter().any(|e| e.kind == "node_data"));
+}
+
 /// Builds a `SmokeAdd` function body: FunctionEntry(A, B) -> Add -> FunctionExit.
 fn smoke_add_function() -> proto::Blueprint {
-    let pin = |id: uuid::Uuid, name: &str, pin_type: &str, data_type: &str| proto::Pin {
-        id: id.to_string(),
+    let pin = |id: uuid::Uuid, name: &str, pin_type: &str, data_type: &str| proto::Pin { id: id.to_string(),
         name: name.to_string(),
         pin_type: pin_type.to_string(),
-        data_type: data_type.to_string(),
-    };
+        data_type: data_type.to_string(), ..Default::default() };
     let (fn_id, entry, add, exit) =
         (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     let (entry_ex, entry_a, entry_b, add_exin, add_exout, add_a, add_b, add_res, exit_ex, exit_res) = (
@@ -1958,10 +2101,10 @@ async fn smoke_function_library_save_execute() {
                 name: "SmokeAdd".to_string(),
                 description: "adds numbers".to_string(),
                 inputs: vec![
-                    FnPin { name: "A".to_string(), data_type: "Float".to_string(), description: String::new() },
-                    FnPin { name: "B".to_string(), data_type: "Float".to_string(), description: String::new() },
+                    FnPin { name: "A".to_string(), data_type: "Float".to_string(), description: String::new(), ..Default::default() },
+                    FnPin { name: "B".to_string(), data_type: "Float".to_string(), description: String::new(), ..Default::default() },
                 ],
-                outputs: vec![FnPin { name: "Result".to_string(), data_type: "Float".to_string(), description: String::new() }],
+                outputs: vec![FnPin { name: "Result".to_string(), data_type: "Float".to_string(), description: String::new(), ..Default::default() }],
                 source: String::new(),
                 updated_at: 0,
             }),
@@ -1990,12 +2133,10 @@ async fn smoke_function_library_save_execute() {
         uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(),
     );
-    let pin = |id: uuid::Uuid, name: &str, pin_type: &str, data_type: &str| proto::Pin {
-        id: id.to_string(),
+    let pin = |id: uuid::Uuid, name: &str, pin_type: &str, data_type: &str| proto::Pin { id: id.to_string(),
         name: name.to_string(),
         pin_type: pin_type.to_string(),
-        data_type: data_type.to_string(),
-    };
+        data_type: data_type.to_string(), ..Default::default() };
     let root = proto::Blueprint {
         id: uuid::Uuid::new_v4().to_string(),
         name: "call-smoke".to_string(),
@@ -2103,6 +2244,66 @@ async fn smoke_function_library_save_execute() {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn smoke_save_blueprint_roundtrip_decompile() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest { path: ws_path.clone() })
+        .await
+        .unwrap();
+
+    let compiled = client
+        .compile_dsl(CompileDslRequest {
+            source: "\
+blueprint \"Roundtrip\"
+entry start: Start
+add: Add(A = 8, B = 3)
+mod: Modulo(A <- add.Result, B = \"2\")
+e: End
+start -> add
+add -> mod
+mod -> e
+"
+            .to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Persist, then decompile from the DB to mirror the webcore export path.
+    client
+        .save_blueprint(SaveBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint: Some(compiled.clone()),
+        })
+        .await
+        .unwrap();
+    let dsl = client
+        .decompile_blueprint(DecompileBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: compiled.id.to_string(),
+            blueprint: None,
+        })
+        .await
+        .expect("decompile of a freshly saved blueprint must succeed")
+        .into_inner();
+    assert!(!dsl.source.is_empty());
+    assert!(dsl.source.contains("Modulo"));
+
+    // The inline-blueprint variant must work without the archive too.
+    let inline = client
+        .decompile_blueprint(DecompileBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: String::new(),
+            blueprint: Some(compiled),
+        })
+        .await
+        .expect("inline decompile must succeed")
+        .into_inner();
+    assert!(inline.source.contains("Modulo"));
 }
 
 #[tokio::test]

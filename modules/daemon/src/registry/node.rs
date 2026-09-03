@@ -36,22 +36,74 @@ pub struct NodeRegistry {
 impl NodeRegistry {
     /// Creates a registry pre-populated with the built-in executors.
     pub fn with_builtins() -> Self {
+        use crate::execution::nodes as n;
         let mut registry = Self::default();
-        registry.register(Box::new(crate::execution::nodes::StartExecutor));
-        registry.register(Box::new(crate::execution::nodes::EndExecutor));
-        registry.register(Box::new(crate::execution::nodes::AddExecutor));
-        registry.register(Box::new(crate::execution::nodes::SubtractExecutor));
-        registry.register(Box::new(crate::execution::nodes::MultiplyExecutor));
-        registry.register(Box::new(crate::execution::nodes::DivideExecutor));
-        registry.register(Box::new(crate::execution::nodes::BranchExecutor));
-        registry.register(Box::new(crate::execution::nodes::CallLlmExecutor));
-        registry.register(Box::new(crate::execution::nodes::ToolExecutor));
-        registry.register(Box::new(crate::execution::nodes::ValidatorExecutor));
-        registry.register(Box::new(crate::execution::nodes::JudgeExecutor));
-        registry.register(Box::new(crate::execution::nodes::abstract_node::AbstractExecutor));
-        registry.register(Box::new(crate::execution::nodes::CallFunctionExecutor));
-        registry.register(Box::new(crate::execution::nodes::FunctionEntryExecutor));
-        registry.register(Box::new(crate::execution::nodes::FunctionExitExecutor));
+        registry.register(Box::new(n::StartExecutor));
+        registry.register(Box::new(n::EndExecutor));
+        registry.register(Box::new(n::AddExecutor));
+        registry.register(Box::new(n::SubtractExecutor));
+        registry.register(Box::new(n::MultiplyExecutor));
+        registry.register(Box::new(n::DivideExecutor));
+        registry.register(Box::new(n::BranchExecutor));
+        registry.register(Box::new(n::CallLlmExecutor));
+        registry.register(Box::new(n::ToolExecutor));
+        registry.register(Box::new(n::ValidatorExecutor));
+        registry.register(Box::new(n::JudgeExecutor));
+        registry.register(Box::new(n::AbstractExecutor));
+        registry.register(Box::new(n::CallFunctionExecutor));
+        registry.register(Box::new(n::FunctionEntryExecutor));
+        registry.register(Box::new(n::FunctionExitExecutor));
+        // Extended math.
+        registry.register(Box::new(n::ModuloExecutor));
+        registry.register(Box::new(n::PowerExecutor));
+        registry.register(Box::new(n::MinExecutor));
+        registry.register(Box::new(n::MaxExecutor));
+        registry.register(Box::new(n::AbsExecutor));
+        registry.register(Box::new(n::RoundExecutor));
+        // Comparison and logic.
+        registry.register(Box::new(n::EqualExecutor));
+        registry.register(Box::new(n::NotEqualExecutor));
+        registry.register(Box::new(n::GreaterExecutor));
+        registry.register(Box::new(n::LessExecutor));
+        registry.register(Box::new(n::GreaterEqualExecutor));
+        registry.register(Box::new(n::LessEqualExecutor));
+        registry.register(Box::new(n::AndExecutor));
+        registry.register(Box::new(n::OrExecutor));
+        registry.register(Box::new(n::XorExecutor));
+        registry.register(Box::new(n::NotExecutor));
+        // Strings and conversion.
+        registry.register(Box::new(n::ConcatExecutor));
+        registry.register(Box::new(n::LengthExecutor));
+        registry.register(Box::new(n::UpperExecutor));
+        registry.register(Box::new(n::LowerExecutor));
+        registry.register(Box::new(n::TrimExecutor));
+        registry.register(Box::new(n::ContainsExecutor));
+        registry.register(Box::new(n::ReplaceExecutor));
+        registry.register(Box::new(n::SubstringExecutor));
+        registry.register(Box::new(n::ToStringExecutor));
+        registry.register(Box::new(n::ToIntExecutor));
+        registry.register(Box::new(n::ToFloatExecutor));
+        registry.register(Box::new(n::ToBoolExecutor));
+        registry.register(Box::new(n::ToJsonExecutor));
+        registry.register(Box::new(n::ParseJsonExecutor));
+        // Collections.
+        registry.register(Box::new(n::ListCreateExecutor));
+        registry.register(Box::new(n::ListAppendExecutor));
+        registry.register(Box::new(n::ListGetExecutor));
+        registry.register(Box::new(n::ListLengthExecutor));
+        registry.register(Box::new(n::ListContainsExecutor));
+        registry.register(Box::new(n::JsonGetExecutor));
+        registry.register(Box::new(n::JsonSetExecutor));
+        // Context manager nodes.
+        registry.register(Box::new(n::ContextCreateExecutor));
+        registry.register(Box::new(n::ContextCloneExecutor));
+        registry.register(Box::new(n::ContextMergeExecutor));
+        registry.register(Box::new(n::ContextFilterExecutor));
+        registry.register(Box::new(n::ContextTrimExecutor));
+        registry.register(Box::new(n::ContextToTextExecutor));
+        // Flow support.
+        registry.register(Box::new(n::DelayExecutor));
+        registry.register(Box::new(n::RequestApprovalExecutor));
         registry
     }
 

@@ -16,7 +16,7 @@ pub const FUNCTION_EXIT_KIND: &str = "FunctionExit";
 pub const CALL_FUNCTION_KIND: &str = "CallFunction";
 
 /// A single input or output pin of a function signature.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FnPin {
     /// Pin name, matched against the body's entry/exit pin name.
     pub name: String,
@@ -25,6 +25,12 @@ pub struct FnPin {
     /// Optional human-readable description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Default value used when the caller leaves the argument unconnected.
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Whether the argument may stay unconnected (resolves to null).
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// Function signature derived from the body's entry/exit nodes.
@@ -86,8 +92,10 @@ impl FunctionEntry {
                 .filter(|p| p.pin_type == pin_type)
                 .map(|p| FnPin {
                     name: p.name.clone(),
-                    data_type: p.data_type,
-                    description: None,
+                    data_type: p.data_type.clone(),
+                    description: p.description.clone(),
+                    default: p.default.clone(),
+                    optional: p.optional,
                 })
                 .collect()
         };

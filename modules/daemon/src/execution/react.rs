@@ -20,8 +20,9 @@ use metteur_shared::llm::{
 use crate::observability::anon::Anonymizer;
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
+use crate::execution::interrupt::InterruptBus;
 use crate::execution::interrupt::InterruptPriority;
-use crate::llm::{LlmClient, LlmProviderConfig, MockClient, MockStep, ProviderKind};
+use crate::llm::{LlmClient, LlmProviderConfig, LlmResponse, MockClient, MockStep, ProviderKind};
 
 /// The default maximum number of ReAct iterations.
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
@@ -121,30 +122,42 @@ pub async fn run_react(
     context: ContextManager,
     opts: &ReactOptions,
 ) -> DaemonResult<ReactOutcome> {
-    react_loop(ctx, context, opts, None).await
+    react_loop(ctx, context, opts, None, None).await.map_err(|(err, _)| err)
 }
 
-/// Streaming variant of [`run_react`] that emits one event per assistant turn
-/// and tool call, used by the ReAct chat RPC.
+/// Streaming variant of [`run_react`] used by the ReAct chat RPC.
+///
+/// Emits one [`ReactEvent`] per assistant turn and tool call. When `on_delta`
+/// is provided the LLM call is streamed and each text delta is forwarded,
+/// allowing token-level output. On error the partially mutated context is
+/// returned so callers can persist an interrupted session.
 pub async fn run_react_streaming(
     ctx: &mut ExecutionContext,
     context: ContextManager,
     opts: &ReactOptions,
+    on_delta: Option<&mut (dyn FnMut(String) + Send)>,
     on_event: &mut (dyn FnMut(ReactEvent) + Send),
-) -> DaemonResult<ReactOutcome> {
-    react_loop(ctx, context, opts, Some(on_event)).await
+) -> Result<ReactOutcome, (DaemonError, ContextManager)> {
+    react_loop(ctx, context, opts, on_delta, Some(on_event)).await
 }
 
 /// The shared ReAct iteration loop behind [`run_react`] and
 /// [`run_react_streaming`].
+///
+/// Errors carry the context mutated so far so streaming callers can persist a
+/// partial session; [`run_react`] discards it to keep the plain signature.
 async fn react_loop(
     ctx: &mut ExecutionContext,
     mut context: ContextManager,
     opts: &ReactOptions,
+    mut on_delta: Option<&mut (dyn FnMut(String) + Send)>,
     mut on_event: Option<&mut (dyn FnMut(ReactEvent) + Send)>,
-) -> DaemonResult<ReactOutcome> {
+) -> Result<ReactOutcome, (DaemonError, ContextManager)> {
     let llm_defaults = llm_default_config(ctx).await;
-    let client = build_client(ctx, opts, &llm_defaults)?;
+    let client = match build_client(ctx, opts, &llm_defaults) {
+        Ok(client) => client,
+        Err(err) => return Err((err, context)),
+    };
     let params = build_params(opts, &llm_defaults);
     let tools = tool_definitions(&ctx.registry, opts.allowed_tools.as_ref());
     let anonymizer = build_anonymizer(ctx).await;
@@ -156,7 +169,7 @@ async fn react_loop(
     for _ in 0..opts.max_iterations {
         // Honor cancellation and pause requests.
         if ctx.cancel_requested.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(DaemonError::Interrupted("cancelled by user".to_string()));
+            return Err((DaemonError::Interrupted("cancelled by user".to_string()), context));
         }
         while ctx.pause_requested.load(std::sync::atomic::Ordering::SeqCst) {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -189,26 +202,32 @@ async fn react_loop(
         .await;
 
         // Race the LLM call against an emergency interrupt so that an
-        // emergency message can abort an in-flight request.
-        let response = match &ctx.interrupts {
-            Some(bus) => {
-                let bus = bus.clone();
-                tokio::select! {
-                    resp = client.complete(&context, &params, &tools) => {
-                        resp.map_err(|e| DaemonError::Llm(e.to_string()))?
-                    }
-                    msg = bus.wait_emergency() => {
-                        if let Some(msg) = msg {
-                            context.push_message(Message::text(Role::User, msg));
-                        }
-                        continue;
-                    }
+        // emergency message can abort an in-flight request. The streamed
+        // variant forwards text deltas through `on_delta` as they arrive.
+        let response = {
+            let raced = match &mut on_delta {
+                Some(delta) => {
+                    race_stream(
+                        client.as_ref(),
+                        &context,
+                        &params,
+                        &tools,
+                        &ctx.interrupts,
+                        &mut **delta,
+                    )
+                    .await
                 }
+                None => race_complete(client.as_ref(), &context, &params, &tools, &ctx.interrupts)
+                    .await,
+            };
+            match raced {
+                Ok(LlmRace::Response(resp)) => resp,
+                Ok(LlmRace::Emergency(msg)) => {
+                    context.push_message(Message::text(Role::User, msg));
+                    continue;
+                }
+                Err(err) => return Err((err, context)),
             }
-            None => client
-                .complete(&context, &params, &tools)
-                .await
-                .map_err(|e| DaemonError::Llm(e.to_string()))?,
         };
 
         record_usage(ctx, client.as_ref(), &response.usage, &billing).await;
@@ -235,7 +254,17 @@ async fn react_loop(
 
         // Execute each tool call and mix the results into the context.
         for call in &response.tool_calls {
-            let result = invoke_tool(ctx, call, opts.allowed_tools.as_ref(), &anonymizer).await?;
+            let result = match invoke_tool(
+                ctx,
+                call,
+                opts.allowed_tools.as_ref(),
+                &anonymizer,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => return Err((err, context)),
+            };
             if let Some(cb) = on_event.as_deref_mut() {
                 cb(ReactEvent::Tool { name: call.name.clone(), content: result.clone() });
             }
@@ -254,6 +283,67 @@ async fn react_loop(
         context,
         usage: total_usage,
     })
+}
+
+/// The outcome of the raced LLM call.
+enum LlmRace {
+    /// The model responded before any emergency interrupt arrived.
+    Response(LlmResponse),
+    /// An emergency interrupt cancelled the call; its message must be injected.
+    Emergency(String),
+}
+
+/// Calls the model (streamed through `on_delta`), racing the request against
+/// an emergency interrupt so the interrupt can abort an in-flight call. The
+/// race is isolated here to keep the loop's borrows simple.
+async fn race_stream(
+    client: &dyn LlmClient,
+    context: &ContextManager,
+    params: &GenerationParams,
+    tools: &[ToolDefinition],
+    bus: &Option<InterruptBus>,
+    on_delta: &mut (dyn FnMut(String) + Send),
+) -> DaemonResult<LlmRace> {
+    match bus {
+        Some(bus) => {
+            let bus = bus.clone();
+            tokio::select! {
+                resp = client.stream(context, params, tools, on_delta) => {
+                    resp.map(LlmRace::Response).map_err(|e| DaemonError::Llm(e.to_string()))
+                }
+                msg = bus.wait_emergency() => Ok(LlmRace::Emergency(msg.unwrap_or_default())),
+            }
+        }
+        None => {
+            let resp = client.stream(context, params, tools, on_delta).await?;
+            Ok(LlmRace::Response(resp))
+        }
+    }
+}
+
+/// Non-streamed variant of [`race_stream`].
+async fn race_complete(
+    client: &dyn LlmClient,
+    context: &ContextManager,
+    params: &GenerationParams,
+    tools: &[ToolDefinition],
+    bus: &Option<InterruptBus>,
+) -> DaemonResult<LlmRace> {
+    match bus {
+        Some(bus) => {
+            let bus = bus.clone();
+            tokio::select! {
+                resp = client.complete(context, params, tools) => {
+                    resp.map(LlmRace::Response).map_err(|e| DaemonError::Llm(e.to_string()))
+                }
+                msg = bus.wait_emergency() => Ok(LlmRace::Emergency(msg.unwrap_or_default())),
+            }
+        }
+        None => {
+            let resp = client.complete(context, params, tools).await?;
+            Ok(LlmRace::Response(resp))
+        }
+    }
 }
 
 /// Returns the LLM defaults from the merged workspace configuration.
@@ -620,5 +710,50 @@ mod tests {
         assert_eq!(restricted.len(), 1);
         assert_eq!(restricted[0].name, "ReadFile");
         assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_forwards_deltas_then_final_assistant() {
+        let mut ctx = new_ctx();
+        let context = ContextManager::new_from_prompt(vec![], "hi");
+        let opts = ReactOptions {
+            provider: "mock".to_string(),
+            mock_text: Some("streamed".to_string()),
+            ..Default::default()
+        };
+        let mut deltas = Vec::new();
+        let mut events = Vec::new();
+        let mut on_delta = |text: String| deltas.push(text);
+        let mut on_event = |ev: ReactEvent| events.push(ev);
+        let outcome = run_react_streaming(&mut ctx, context, &opts, Some(&mut on_delta), &mut on_event)
+            .await
+            .unwrap();
+        // The mock provider delivers the whole text as a single delta.
+        assert_eq!(deltas, vec!["streamed"]);
+        assert!(matches!(&events[0], ReactEvent::Assistant { text } if text == "streamed"));
+        assert_eq!(outcome.text, "streamed");
+        // The loop keeps the initial user message; the final text is appended
+        // by the caller when persisting.
+        assert_eq!(outcome.context.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_returns_partial_context() {
+        let mut ctx = new_ctx();
+        let context = ContextManager::new_from_prompt(vec![], "question");
+        ctx.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        let opts = ReactOptions {
+            provider: "mock".to_string(),
+            ..Default::default()
+        };
+        let result =
+            run_react_streaming(&mut ctx, context, &opts, None, &mut |_| {}).await;
+        let Err((err, partial)) = result else {
+            panic!("expected cancellation error");
+        };
+        assert!(err.to_string().contains("cancelled"));
+        // The pre-run context survived the interrupted loop.
+        assert_eq!(partial.messages.len(), 1);
+        assert_eq!(partial.messages[0].text_content(), "question");
     }
 }

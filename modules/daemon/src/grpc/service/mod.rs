@@ -25,19 +25,21 @@ use crate::sandbox::approval::ApprovalBroker;
 use super::proto::daemon_server::Daemon;
 use super::proto::{
     AbortChatRequest, AddonInfo, AddonList, ApprovalDecisionRequest, AuditLogList,
-    Blueprint, CancelRequest, ChatEvent, CloseWorkspaceRequest, CompileDslRequest,
-    ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest, DecompileBlueprintRequest,
-    DecompileDslResponse, DeleteFunctionRequest, Empty, ExecuteBlueprintRequest, ExecutionEvent,
-    ExecutionList, FileHistory, FileInfo, FileList, FunctionList, GetConfigRequest,
+    Blueprint, CancelRequest, ChatEvent, ChatSessionList, CloseWorkspaceRequest,
+    CompileDslRequest, ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest,
+    DecompileBlueprintRequest, DecompileDslResponse, DeleteChatSessionRequest, DeleteFunctionRequest,
+    Empty, ExecuteBlueprintRequest, ExecutionEvent, ExecutionList, FileHistory, FileInfo, FileList,
+    FunctionList, GetChatSessionRequest, GetChatSessionResponse, GetConfigRequest,
     GetExecutionUsageRequest, GetFileHistoryRequest, InstallAddonRequest, InterruptRequest,
-    ListAddonsRequest, ListAuditLogRequest, ListExecutionsRequest, ListFilesRequest,
-    ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest, LoadFunctionRequest,
-    LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
-    Config as ProtoConfig, ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest,
-    ResumeRequest, RollbackRequest, RevealInExplorerRequest, SaveBlueprintRequest,
-    SaveFunctionRequest, SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest,
-    SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest,
-    UsageSummary, WatchEvent, WatchWorkspaceRequest, WriteFileRequest, WorkspaceInfo, WorkspaceList,
+    ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest,
+    ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest,
+    LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest,
+    PauseRequest, Config as ProtoConfig, ReadFileRequest, ReadFileResponse, RemoveFileRequest,
+    RenameFileRequest, ResumeRequest, RollbackRequest, RevealInExplorerRequest,
+    SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse, SendChatRequest,
+    SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest,
+    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest,
+    WriteFileRequest, WorkspaceInfo, WorkspaceList,
 };
 
 pub use state::AppState;
@@ -390,5 +392,26 @@ impl Daemon for DaemonService {
         request: Request<AbortChatRequest>,
     ) -> Result<Response<Empty>, Status> {
         self.abort_chat(request).await
+    }
+
+    async fn list_chat_sessions(
+        &self,
+        request: Request<ListChatSessionsRequest>,
+    ) -> Result<Response<ChatSessionList>, Status> {
+        self.list_chat_sessions(request).await
+    }
+
+    async fn get_chat_session(
+        &self,
+        request: Request<GetChatSessionRequest>,
+    ) -> Result<Response<GetChatSessionResponse>, Status> {
+        self.get_chat_session(request).await
+    }
+
+    async fn delete_chat_session(
+        &self,
+        request: Request<DeleteChatSessionRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.delete_chat_session(request).await
     }
 }

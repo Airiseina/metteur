@@ -5,18 +5,20 @@ use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::daemon_server::Daemon;
 use metteur_proto::proto::{
     AbortChatRequest, AddonInfo, AddonList, ApprovalDecisionRequest, AuditLogList, Blueprint,
-    CancelRequest, ChatEvent, CloseWorkspaceRequest, CompileDslRequest, Config,
+    CancelRequest, ChatEvent, ChatSessionList, CloseWorkspaceRequest, CompileDslRequest, Config,
     ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest, DecompileBlueprintRequest,
-    DecompileDslResponse, DeleteFunctionRequest, Empty, ExecuteBlueprintRequest, ExecutionEvent,
-    ExecutionList, FileHistory, FileInfo, FileList, FunctionList, GetConfigRequest,
+    DecompileDslResponse, DeleteChatSessionRequest, DeleteFunctionRequest, Empty,
+    ExecuteBlueprintRequest, ExecutionEvent, ExecutionList, FileHistory, FileInfo, FileList,
+    FunctionList, GetChatSessionRequest, GetChatSessionResponse, GetConfigRequest,
     GetExecutionUsageRequest, GetFileHistoryRequest, InstallAddonRequest, InterruptRequest,
-    ListAddonsRequest, ListAuditLogRequest, ListExecutionsRequest, ListFilesRequest,
-    ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest, LoadFunctionRequest,
-    LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
-    ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest, ResumeRequest,
-    RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest,
-    SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo,
-    SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList,
+    ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest,
+    ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest,
+    LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest,
+    PauseRequest, ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest,
+    ResumeRequest, RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest,
+    SaveFunctionRequest, SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest,
+    SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest,
+    UsageSummary, WatchEvent, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList,
     WriteFileRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -395,12 +397,34 @@ impl Daemon for ForwardService {
     ) -> Result<Response<Empty>, Status> {
         self.client.clone().abort_chat(request).await
     }
+
+    async fn list_chat_sessions(
+        &self,
+        request: Request<ListChatSessionsRequest>,
+    ) -> Result<Response<ChatSessionList>, Status> {
+        self.client.clone().list_chat_sessions(request).await
+    }
+
+    async fn get_chat_session(
+        &self,
+        request: Request<GetChatSessionRequest>,
+    ) -> Result<Response<GetChatSessionResponse>, Status> {
+        self.client.clone().get_chat_session(request).await
+    }
+
+    async fn delete_chat_session(
+        &self,
+        request: Request<DeleteChatSessionRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        self.client.clone().delete_chat_session(request).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use metteur_proto::proto::daemon_server::DaemonServer;
+    use metteur_proto::proto::ChatSessionInfo;
     use std::convert::Infallible;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::transport::Server;
@@ -706,6 +730,38 @@ mod tests {
         ) -> Result<Response<Empty>, Status> {
             Err(Status::unimplemented("abort_chat"))
         }
+        async fn list_chat_sessions(
+            &self,
+            _: Request<ListChatSessionsRequest>,
+        ) -> Result<Response<ChatSessionList>, Status> {
+            Ok(Response::new(ChatSessionList {
+                sessions: vec![ChatSessionInfo {
+                    session_id: "s1".to_string(),
+                    created_at: 1,
+                    updated_at: 2,
+                    turns: 3,
+                    title: "demo".to_string(),
+                    message_count: 4,
+                }],
+            }))
+        }
+        async fn get_chat_session(
+            &self,
+            request: Request<GetChatSessionRequest>,
+        ) -> Result<Response<GetChatSessionResponse>, Status> {
+            let req = request.into_inner();
+            Ok(Response::new(GetChatSessionResponse {
+                session_id: req.session_id,
+                created_at: 1,
+                history_json: "[]".to_string(),
+            }))
+        }
+        async fn delete_chat_session(
+            &self,
+            _: Request<DeleteChatSessionRequest>,
+        ) -> Result<Response<Empty>, Status> {
+            Err(Status::unimplemented("delete_chat_session"))
+        }
     }
 
     /// Serves `svc` on an ephemeral port and returns the connected client.
@@ -754,5 +810,43 @@ mod tests {
             kinds.push(event.kind);
         }
         assert_eq!(kinds, vec!["started".to_string(), "finished".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn proxy_forwards_chat_session_rpcs() {
+        let backend = serve_client(DaemonServer::new(TestBackend)).await;
+        let proxy = serve_client(DaemonServer::new(ForwardService::new(backend))).await;
+        let mut proxy = proxy;
+
+        let list = proxy
+            .list_chat_sessions(ListChatSessionsRequest {
+                workspace_path: "C:/ws".to_string(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(list.sessions.len(), 1);
+        assert_eq!(list.sessions[0].session_id, "s1");
+        assert_eq!(list.sessions[0].title, "demo");
+
+        let session = proxy
+            .get_chat_session(GetChatSessionRequest {
+                workspace_path: "C:/ws".to_string(),
+                session_id: "s1".to_string(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(session.session_id, "s1");
+        assert_eq!(session.history_json, "[]");
+
+        let err = proxy
+            .delete_chat_session(DeleteChatSessionRequest {
+                workspace_path: "C:/ws".to_string(),
+                session_id: String::new(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
     }
 }

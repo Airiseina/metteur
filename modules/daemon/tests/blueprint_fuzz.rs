@@ -67,12 +67,10 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
             }
             let pins: Vec<Pin> = pins_of(k)
                 .into_iter()
-                .map(|(name, pin_type)| Pin {
-                    id: Uuid::new_v4(),
+                .map(|(name, pin_type)| Pin { id: Uuid::new_v4(),
                     name,
                     pin_type,
-                    data_type: DataType::Json,
-                })
+                    data_type: DataType::Json, ..Default::default() })
                 .collect();
             nodes.push(Node {
                 id: node_id,
@@ -151,14 +149,13 @@ fn interpreter_terminates_on_random_blueprints() {
             let result = interp.run(&shared, None).await;
             // Termination is the invariant: Ok yields a finished run, Err is a
             // graceful failure (e.g. validation). Neither may hang or panic.
-            match result {
-                Ok(events) => prop_assert!(
+            if let Ok(events) = result {
+                prop_assert!(
                     events
                         .iter()
                         .any(|e| matches!(e, ExecutionEvent::NodeStarted { .. })),
                     "a completed run must have started nodes"
-                ),
-                Err(_) => {}
+                );
             }
             Ok(())
         })

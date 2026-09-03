@@ -4,6 +4,7 @@
 //! `metteurd` binary and exercised by integration tests.
 
 pub mod addon;
+pub mod chat;
 pub mod cli;
 pub mod config;
 pub mod depgraph;

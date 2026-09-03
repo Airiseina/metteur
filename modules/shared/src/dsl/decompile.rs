@@ -16,28 +16,39 @@ pub fn decompile(blueprint: &Blueprint) -> String {
     let node_of = |id: Uuid| blueprint.nodes.iter().find(|n| n.id == id).unwrap();
     let entry = node_of(blueprint.entry_node_id);
     for (i, node) in blueprint.nodes.iter().enumerate() {
+        // Inline constants ride on the pin key (the same key the canvas uses
+        // for node data), so literals survive a compile round trip.
         let lit = |pin: &Pin| -> Option<String> {
+            let key = pin.key.as_deref().unwrap_or(&pin.name);
             node.data
-                .get(&pin.name)
+                .get(key)
                 .and_then(|v| if v.is_null() { None } else { Some(v.to_string()) })
         };
         let args: Vec<String> = node
             .pins
             .iter()
             .filter(|p| p.pin_type == PinType::DataInput)
-            .filter_map(|p| lit(p).map(|v| format!("{} = {v}", p.name)))
+            .filter_map(|p| {
+                let key = p.key.as_deref().unwrap_or(&p.name);
+                lit(p).map(|v| format!("{key}: {v}"))
+            })
             .collect();
         let head = if node.id == entry.id {
             format!("entry n{i}: {}", node.kind)
         } else {
             format!("n{i}: {}", node.kind)
         };
+        out.push_str(&head);
         if args.is_empty() {
-            out.push_str(&head);
+            out.push('\n');
         } else {
-            out.push_str(&format!("{head}({})", args.join(", ")));
+            // Constants render as an init block, one keyed value per line.
+            out.push_str(" {\n");
+            for arg in args {
+                out.push_str(&format!("  {arg}\n"));
+            }
+            out.push_str("}\n");
         }
-        out.push('\n');
     }
     for edge in &blueprint.edges {
         let src = node_of(edge.source_node);

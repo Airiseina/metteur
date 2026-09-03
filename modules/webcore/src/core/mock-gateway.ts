@@ -1,3 +1,4 @@
+import { ref } from 'vue'
 import type { DaemonGateway } from './gateway'
 import type {
   AddonInfo,
@@ -8,6 +9,8 @@ import type {
   BlueprintPin,
   ChatMessage,
   ChatOptions,
+  ChatSessionInfo,
+  ChatSessionSnapshot,
   DaemonConfig,
   ExecStatus,
   ExecutionEvent,
@@ -332,7 +335,8 @@ const msgId = () => `m-${Date.now()}-${msgSeq++}`
  * built and validated before the real Connect transport lands.
  */
 export class MockGateway implements DaemonGateway {
-  readonly connected = false
+  readonly connected = ref(false)
+  readonly demo = true
   private runs = new Map<string, RunState>()
   private approved = new Map<string, boolean>()
   /** Workspaces with an abort requested for an in-flight chat response. */
@@ -472,8 +476,11 @@ export class MockGateway implements DaemonGateway {
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
+    onSession?: (sessionId: string) => void,
+    _sessionId?: string,
   ): Promise<Result<void>> {
     this.chatAbort.delete(ws)
+    onSession?.(`mock-${ws}`)
     const model = options?.model ?? 'claude-4'
     const wantBlueprint = /blueprint|agent|graph|自动化|蓝图/i.test(content)
     const steps: Array<{
@@ -520,9 +527,9 @@ export class MockGateway implements DaemonGateway {
           id,
           role: step.role,
           ...base,
-          content: step.text.slice(0, j + 1),
+          content: step.text[j],
           createdAt: Date.now(),
-          pending: j < step.text.length - 1,
+          pending: true,
         })
         await delay(12)
       }
@@ -533,6 +540,18 @@ export class MockGateway implements DaemonGateway {
 
   async abortChat(ws: string): Promise<Result<void>> {
     this.chatAbort.add(ws)
+    return ok(undefined)
+  }
+
+  async listChatSessions(_ws: string): Promise<Result<ChatSessionInfo[]>> {
+    return ok([])
+  }
+
+  async getChatSession(_ws: string): Promise<Result<ChatSessionSnapshot>> {
+    return err('no chat session')
+  }
+
+  async deleteChatSession(_ws: string): Promise<Result<void>> {
     return ok(undefined)
   }
 
@@ -560,8 +579,18 @@ export class MockGateway implements DaemonGateway {
     return ok(bp)
   }
 
-  async decompileBlueprint(_ws: string, blueprintId: string): Promise<Result<string>> {
-    return ok(`blueprint "${blueprintId}"\nentry start: Start(A = 4, B = 3)`)
+  async decompileBlueprint(_ws: string, blueprintOrId: Blueprint | string): Promise<Result<string>> {
+    // When given the live canvas, produce a compact textual skeleton so the
+    // export flow stays usable without a real DSL compiler.
+    const bp = typeof blueprintOrId === 'string' ? undefined : blueprintOrId
+    if (bp) {
+      const body = bp.nodes
+        .filter((n) => n.type !== 'FileReference')
+        .map((n) => `  ${n.id.slice(0, 8)}: ${n.type}`)
+        .join('\n')
+      return ok(`blueprint "${bp.name}"\n${body}`)
+    }
+    return ok(`blueprint "${blueprintOrId}"\nentry start: Start(A = 4, B = 3)`)
   }
 
   async saveBlueprint(_ws: string, bp: Blueprint): Promise<Result<void>> {

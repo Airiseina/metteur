@@ -84,6 +84,9 @@ service Daemon {
   // ReAct chat (one chat run per workspace at a time).
   rpc SendChat(SendChatRequest) returns (stream ChatEvent);
   rpc AbortChat(AbortChatRequest) returns (Empty);
+  rpc ListChatSessions(ListChatSessionsRequest) returns (ChatSessionList);
+  rpc GetChatSession(GetChatSessionRequest) returns (GetChatSessionResponse);
+  rpc DeleteChatSession(DeleteChatSessionRequest) returns (Empty);
 }
 
 message Empty {}
@@ -342,6 +345,8 @@ message FnPin {
   string name = 1;
   string data_type = 2;
   string description = 3;
+  string default_json = 4; // JSON-serialized default value
+  bool optional = 5;
 }
 
 message FunctionInfo {
@@ -388,6 +393,9 @@ message CompileDslRequest { string source = 1; }
 message DecompileBlueprintRequest {
   string workspace_path = 1;
   string blueprint_id = 2;
+  // When set, decompiles this exact blueprint instead of the stored copy.
+  // Lets clients export the live canvas without depending on the archive.
+  Blueprint blueprint = 3;
 }
 
 message DecompileDslResponse { string source = 1; }
@@ -476,22 +484,63 @@ message SendChatRequest {
   string workspace_path = 1;
   string message = 2;
   // JSON array of `{role, content}` messages of the conversation so far.
+  // Only consulted when creating a new session; persisted sessions are authoritative.
   string history_json = 3;
   // JSON object with model / temperature / top_p / max_tokens /
   // reasoning_effort / max_iterations.
   string options_json = 4;
+  // Empty = reuse the workspace's active session (create when none exists);
+  // non-empty = resume that session (NotFound if unknown or mismatched).
+  string session_id = 5;
 }
 
 message ChatEvent {
-  // assistant | tool | done | error
+  // assistant_delta | assistant | tool | done | error | session
   string kind = 1;
   string content = 2;
-  // Structured payload: tool name, model, usage, error message.
+  // Structured payload: tool name, model, usage, session id, error message.
   string detail_json = 3;
 }
 
 message AbortChatRequest {
   string workspace_path = 1;
+}
+
+message ListChatSessionsRequest {
+  string workspace_path = 1;
+}
+
+message ChatSessionInfo {
+  string session_id = 1;
+  int64 created_at = 2;
+  int64 updated_at = 3;
+  uint64 turns = 4;
+  // First user message, truncated, for list display.
+  string title = 5;
+  // User + assistant message count for display.
+  uint64 message_count = 6;
+}
+
+message ChatSessionList {
+  repeated ChatSessionInfo sessions = 1;
+}
+
+message GetChatSessionRequest {
+  string workspace_path = 1;
+  string session_id = 2;
+}
+
+message GetChatSessionResponse {
+  string session_id = 1;
+  int64 created_at = 2;
+  // JSON array of `{role, content}` (user/assistant only) for UI restore.
+  string history_json = 3;
+}
+
+message DeleteChatSessionRequest {
+  string workspace_path = 1;
+  // Empty = delete the workspace's active session.
+  string session_id = 2;
 }
 
 // Blueprint model mirrored from the shared crate.
@@ -518,6 +567,11 @@ message Pin {
   string name = 2;
   string pin_type = 3;
   string data_type = 4;
+  string default_json = 5; // JSON-serialized default value
+  bool optional = 6;
+  repeated string choices = 7;
+  string description = 8;
+  string key = 9; // Stable semantic key; both canvas and DSL reference pins by it
 }
 
 message Edge {

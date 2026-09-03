@@ -1,8 +1,11 @@
+import type { Ref } from 'vue'
 import type {
   AddonInfo,
   Blueprint,
   ChatMessage,
   ChatOptions,
+  ChatSessionInfo,
+  ChatSessionSnapshot,
   DaemonConfig,
   ExecutionEvent,
   ExecutionInfo,
@@ -27,8 +30,10 @@ import type {
  * grpc-web through the Web Server Client.
  */
 export interface DaemonGateway {
-  /** Whether a live daemon connection is established. */
-  readonly connected: boolean
+  /** Live daemon connection state (reactive; heartbeat-driven). */
+  readonly connected: Ref<boolean>
+  /** True when the in-memory demo gateway backs the app (never blocks). */
+  readonly demo: boolean
 
   // Connection / workspace -----------------------------------------------------
   connect(): Promise<Result<void>>
@@ -63,20 +68,34 @@ export interface DaemonGateway {
   ): Promise<Result<void>>
 
   // ReAct chat -----------------------------------------------------------------
+  /**
+   * Send a chat turn. Assistant replies arrive as `onMessage` updates: deltas
+   * come with a stable id and `pending` set (append to the open bubble), the
+   * final turn carries the full text without `pending` (replace the bubble).
+   * `onSession` reports the persisted session id created or resumed.
+   */
   sendChat(
     workspacePath: string,
     content: string,
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
+    onSession?: (sessionId: string) => void,
+    sessionId?: string,
   ): Promise<Result<void>>
   abortChat(workspacePath: string): Promise<Result<void>>
+  /** List the workspace's persisted chat sessions (currently 0 or 1). */
+  listChatSessions(workspacePath: string): Promise<Result<ChatSessionInfo[]>>
+  /** Load a session's history for UI restore (NotFound when absent). */
+  getChatSession(workspacePath: string): Promise<Result<ChatSessionSnapshot>>
+  /** Clear the workspace's session (stops a running chat first). */
+  deleteChatSession(workspacePath: string): Promise<Result<void>>
 
   // Blueprints -----------------------------------------------------------------
   listNodeKinds(): Promise<Result<string[]>>
   listFunctions(workspacePath: string): Promise<Result<FunctionItem[]>>
   compileDsl(source: string): Promise<Result<Blueprint>>
-  decompileBlueprint(workspacePath: string, blueprintId: string): Promise<Result<string>>
+  decompileBlueprint(workspacePath: string, blueprintOrId: Blueprint | string): Promise<Result<string>>
   saveBlueprint(workspacePath: string, blueprint: Blueprint): Promise<Result<void>>
   loadBlueprint(workspacePath: string, blueprintId: string): Promise<Result<Blueprint>>
 

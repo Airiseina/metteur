@@ -116,6 +116,20 @@ fn statement(pair: Pair<'_, Rule>) -> SharedResult<Statement> {
                             }
                         }
                     },
+                    // `{ key: literal, ... }` block — each init_item is one keyed
+                    // constant; values land in node data under the bare key.
+                    Rule::init_block => for item in child.into_inner() {
+                        let mut pin = String::new();
+                        for part in item.into_inner() {
+                            match part.as_rule() {
+                                Rule::pin_name => pin = part.as_str().to_string(),
+                                Rule::literal => {
+                                    constants.push((pin.clone(), parse_literal(part.as_str())?));
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
                     _ => {}
                 }
             }

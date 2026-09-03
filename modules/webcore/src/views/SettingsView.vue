@@ -584,7 +584,7 @@ onMounted(async () => {
   panel.show('settings', SettingsNav, 'Settings')
 })
 
-const connectedLabel = computed(() => (gateway.connected ? 'Connected' : 'Offline | demo'))
+const connectedLabel = computed(() => (gateway.connected.value ? 'Connected' : 'Offline'))
 const modelsText = computed(() => {
   const keys = modelKeys()
   return keys.length ? keys.join(', ') : '—'
@@ -683,9 +683,9 @@ const modelsText = computed(() => {
         <SettingRow label="Daemon connection" :description="connectedLabel" source="Default" :resettable="false">
           <span
             class="flex h-8 w-8 items-center justify-center rounded-lg"
-            :class="gateway.connected ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-surface-muted text-muted-foreground'"
+            :class="gateway.connected.value ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-surface-muted text-muted-foreground'"
           >
-            <Wifi v-if="gateway.connected" class="h-4 w-4" />
+            <Wifi v-if="gateway.connected.value" class="h-4 w-4" />
             <WifiOff v-else class="h-4 w-4" />
           </span>
         </SettingRow>

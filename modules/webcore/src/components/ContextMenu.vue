@@ -42,8 +42,10 @@ const props = withDefaults(
     y: number
     groups: MenuGroup[]
     searchable?: boolean
+    /** Group labels initially folded away (e.g. a crowded node palette). */
+    defaultCollapsed?: string[]
   }>(),
-  { searchable: false },
+  { searchable: false, defaultCollapsed: () => [] },
 )
 
 const emit = defineEmits<{
@@ -54,6 +56,8 @@ const emit = defineEmits<{
 const MENU_W = 248
 const MENU_H = 360
 const PAD = 8
+/** Menu never exceeds the viewport height so the inner scroll region works. */
+const MAX_H = typeof window === 'undefined' ? MENU_H : Math.max(window.innerHeight >> 1, MENU_H)
 
 const x = Math.min(props.x, window.innerWidth - MENU_W - PAD)
 const y = Math.min(props.y, window.innerHeight - MENU_H - PAD)
@@ -94,6 +98,7 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 onMounted(() => {
+  collapsed.value = new Set(props.defaultCollapsed)
   window.addEventListener('mousedown', onGlobalDown)
   window.addEventListener('keydown', onKeydown)
 })
@@ -114,7 +119,13 @@ function onGlobalDown(e: MouseEvent) {
     <div
       ref="menuRoot"
       class="glass fixed z-50 flex flex-col overflow-hidden rounded-lg py-1"
-      :style="{ left: x + 'px', top: y + 'px', width: MENU_W + 'px', maxWidth: MENU_W + 'px' }"
+      :style="{
+        left: x + 'px',
+        top: y + 'px',
+        width: MENU_W + 'px',
+        maxWidth: MENU_W + 'px',
+        maxHeight: MAX_H + 'px',
+      }"
       role="menu"
     >
       <div v-if="searchable" class="relative px-2 pb-1 pt-1">

@@ -11,6 +11,7 @@ import {
   Moon,
   Settings,
   Sun,
+  WifiOff,
   Workflow,
   X,
 } from '@lucide/vue'
@@ -143,7 +144,9 @@ onMounted(async () => {
 /* Workspace switcher                                                   */
 
 const switchOpen = ref(false)
-const connectionLabel = computed(() => (gateway.connected ? 'Connected' : 'Offline | demo'))
+const connectionLabel = computed(() => (gateway.connected.value ? 'Connected' : 'Offline | demo'))
+/** Real-gateway outage: blocks the UI until the heartbeat reconnects. */
+const connectionLost = computed(() => !gateway.connected.value && !gateway.demo)
 
 function toggleSwitcher() {
   switchOpen.value = !switchOpen.value
@@ -484,7 +487,7 @@ function onRightResizeStart(e: MouseEvent) {
       <span v-else>{{ workspace.recents.length }} recent workspace(s)</span>
 
       <span class="ml-auto flex items-center gap-1.5">
-        <span class="h-1.5 w-1.5 rounded-full" :class="gateway.connected ? 'bg-emerald-500' : 'bg-subtle'" />
+        <span class="h-1.5 w-1.5 rounded-full" :class="gateway.connected.value ? 'bg-emerald-500' : 'bg-subtle'" />
         {{ connectionLabel }}
       </span>
     </footer>
@@ -499,5 +502,33 @@ function onRightResizeStart(e: MouseEvent) {
       @new-window="openInNewWindow"
       @cancel="cancelOpen"
     />
+
+    <!-- Blocking outage overlay: the daemon powers every save, so a lost link
+         freezes the app until the heartbeat reconnects (no manual dismiss). -->
+    <Teleport to="body">
+      <div
+        v-if="connectionLost"
+        class="fixed inset-0 z-100 grid place-items-center bg-black/60 backdrop-blur-sm"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="lost-title"
+      >
+        <div class="w-100 rounded-2xl border border-divider bg-surface p-6 text-center shadow-2xl">
+          <div class="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-full bg-danger/10 text-danger">
+            <WifiOff class="h-6 w-6" />
+          </div>
+          <h2 id="lost-title" class="mb-1 text-[18px] font-semibold text-foreground">
+            Daemon connection lost
+          </h2>
+          <p class="text-[15px] leading-relaxed text-muted-foreground">
+            The daemon is unreachable, please check whether the daemon is running properly.
+          </p>
+          <p class="mt-3 flex items-center justify-center gap-1.5 text-[11.5px] text-subtle">
+            <span class="h-1.5 w-1.5 animate-pulse rounded-full" style="background: var(--primary)" />
+            Reconnecting…
+          </p>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

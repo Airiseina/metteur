@@ -19,14 +19,20 @@ stmt       = _{ header | entry_node | node | exec_edge | data_wire }
 
 header     =  { "blueprint" ~ string_lit }
 
-node       = { alias ~ ":" ~ kind ~ paren_args? }
-entry_node = { "entry" ~ alias ~ ":" ~ kind ~ paren_args? }
+node       = { alias ~ ":" ~ kind ~ (paren_args | init_block)? }
+entry_node = { "entry" ~ alias ~ ":" ~ kind ~ (paren_args | init_block)? }
 
 paren_args = { "(" ~ NEWLINE* ~ param_list? ~ NEWLINE* ~ ")" }
 param_list = { param ~ ("," ~ NEWLINE* ~ param)* ~ ","? }
 param      = { pin_name ~ (const_arg | ref_arg) }
 const_arg  = _{ "=" ~ literal }
 ref_arg    = _{ "<-" ~ data_ref }
+
+// `{ key: literal, ... }` — the block form of inline constants; commas and
+// newlines both separate entries so multi-line configs read naturally.
+init_block = { "{" ~ NEWLINE* ~ init_item ~ (init_sep ~ init_item)* ~ ","? ~ NEWLINE* ~ "}" }
+init_item  = { pin_name ~ ":" ~ literal }
+init_sep   = _{ "," | NEWLINE+ }
 
 exec_edge  = { alias ~ ("." ~ pin_name)? ~ "->" ~ alias }
 data_wire  = { "$" ~ pin_ref ~ "<-" ~ pin_ref }

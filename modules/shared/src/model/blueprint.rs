@@ -1,6 +1,10 @@
 //! Blueprint model: nodes, pins and edges forming an execution graph.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use uuid::Uuid;
 
 /// Identifier for a node within a blueprint.
@@ -39,9 +43,15 @@ pub enum PinType {
 }
 
 /// The data type carried by a data pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Types are serialized as compact strings (`int`, `list<int>`, `object{a:int}`)
+/// shared with the proto layer, the DSL and the web UI. Deserialization accepts
+/// the legacy bare names (`"List"`, `"Float"`) so persisted blueprints and
+/// function libraries stay readable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DataType {
     /// No data.
+    #[default]
     Void,
     /// A boolean.
     Bool,
@@ -51,10 +61,99 @@ pub enum DataType {
     Float,
     /// A string.
     String,
-    /// A list of values.
-    List,
+    /// A list with a known element type.
+    List(Box<DataType>),
     /// An arbitrary JSON value.
     Json,
+    /// A structured object with a field type table; an empty table accepts
+    /// any object.
+    Object(HashMap<String, DataType>),
+    /// Any type (wildcard, used by tool arguments and function parameters).
+    Any,
+    /// An LLM context manager flowing through the blueprint.
+    Context,
+    /// A constrained string chosen from a fixed set (rendered as a dropdown).
+    Choice,
+}
+
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataType::Void => write!(f, "void"),
+            DataType::Bool => write!(f, "bool"),
+            DataType::Int => write!(f, "int"),
+            DataType::Float => write!(f, "float"),
+            DataType::String => write!(f, "string"),
+            DataType::List(inner) => write!(f, "list<{inner}>"),
+            DataType::Json => write!(f, "json"),
+            DataType::Object(fields) => {
+                write!(f, "object{{")?;
+                let mut first = true;
+                for (name, ty) in fields {
+                    if !first {
+                        write!(f, ",")?;
+                    }
+                    first = false;
+                    write!(f, "{name}:{ty}")?;
+                }
+                write!(f, "}}")
+            }
+            DataType::Any => write!(f, "any"),
+            DataType::Context => write!(f, "context"),
+            DataType::Choice => write!(f, "choice"),
+        }
+    }
+}
+
+impl FromStr for DataType {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let text = input.trim();
+        if let Some(inner) = text.strip_prefix("list<").and_then(|t| t.strip_suffix('>')) {
+            return Ok(DataType::List(Box::new(inner.parse()?)));
+        }
+        if let Some(inner) = text.strip_prefix("object{").and_then(|t| t.strip_suffix('}')) {
+            let mut fields = HashMap::new();
+            for part in inner.split(',') {
+                if part.trim().is_empty() {
+                    continue;
+                }
+                let (name, ty) = part.split_once(':').ok_or_else(|| {
+                    format!("object field '{part}' must be 'name:type'")
+                })?;
+                fields.insert(name.trim().to_string(), ty.trim().parse()?);
+            }
+            return Ok(DataType::Object(fields));
+        }
+        Ok(match text.to_ascii_lowercase().as_str() {
+            "void" | "null" | "none" => DataType::Void,
+            "bool" | "boolean" => DataType::Bool,
+            "int" | "integer" | "i64" => DataType::Int,
+            "float" | "number" | "double" | "f64" => DataType::Float,
+            "string" | "str" => DataType::String,
+            "list" | "array" => DataType::List(Box::new(DataType::Any)),
+            "json" => DataType::Json,
+            "object" | "map" | "dict" => DataType::Object(HashMap::new()),
+            "any" => DataType::Any,
+            "context" => DataType::Context,
+            "choice" | "enum" => DataType::Choice,
+            other => return Err(format!("unknown data type '{other}'")),
+        })
+    }
+}
+
+impl Serialize for DataType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for DataType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(de::Error::custom)
+    }
 }
 
 /// A pin attached to a node.
@@ -62,12 +161,60 @@ pub enum DataType {
 pub struct Pin {
     /// Unique identifier of the pin.
     pub id: PinId,
+    /// Semantic key (stable across renames); the display `name` may differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     /// Human-readable pin name.
     pub name: String,
     /// The role of the pin.
     pub pin_type: PinType,
     /// The data type carried by the pin.
     pub data_type: DataType,
+    /// Default value used when the input is not connected (data inputs only).
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Whether the input may stay unconnected (resolves to null).
+    #[serde(default)]
+    pub optional: bool,
+    /// Allowed values for enumeration pins (e.g. reasoning effort).
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// Optional human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl Pin {
+    /// Creates a data pin without metadata.
+    pub fn data(
+        name: impl Into<String>,
+        pin_type: PinType,
+        data_type: DataType,
+        id: PinId,
+    ) -> Self {
+        Self {
+            id,
+            key: None,
+            name: name.into(),
+            pin_type,
+            data_type,
+            default: None,
+            optional: false,
+            choices: Vec::new(),
+            description: None,
+        }
+    }
+
+    /// Creates an execution pin.
+    pub fn exec(pin_type: PinType, id: PinId) -> Self {
+        Self::data("Exec", pin_type, DataType::Void, id)
+    }
+}
+
+impl Default for Pin {
+    fn default() -> Self {
+        Self::data(String::new(), PinType::DataInput, DataType::Any, Uuid::nil())
+    }
 }
 
 /// A node in a blueprint.

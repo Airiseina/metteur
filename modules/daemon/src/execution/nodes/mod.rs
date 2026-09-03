@@ -3,18 +3,42 @@
 pub mod abstract_node;
 pub mod arithmetic;
 pub mod call_llm;
+pub mod collections;
+pub mod context_nodes;
 pub mod control;
+pub mod flow_nodes;
 pub mod function;
 pub mod judge;
+pub mod pure;
+pub mod string_ops;
 pub mod tool;
 pub mod validator;
 
 pub use abstract_node::AbstractExecutor;
 pub use arithmetic::{AddExecutor, DivideExecutor, MultiplyExecutor, SubtractExecutor};
 pub use call_llm::CallLlmExecutor;
+pub use collections::{
+    JsonGetExecutor, JsonSetExecutor, ListAppendExecutor, ListContainsExecutor, ListCreateExecutor,
+    ListGetExecutor, ListLengthExecutor,
+};
+pub use context_nodes::{
+    ContextCloneExecutor, ContextCreateExecutor, ContextFilterExecutor, ContextMergeExecutor,
+    ContextToTextExecutor, ContextTrimExecutor,
+};
 pub use control::BranchExecutor;
+pub use flow_nodes::{DelayExecutor, RequestApprovalExecutor};
 pub use function::{CallFunctionExecutor, FunctionEntryExecutor, FunctionExitExecutor};
 pub use judge::JudgeExecutor;
+pub use pure::{
+    AbsExecutor, AndExecutor, EqualExecutor, GreaterEqualExecutor, GreaterExecutor,
+    LessEqualExecutor, LessExecutor, MaxExecutor, MinExecutor, ModuloExecutor, NotEqualExecutor,
+    NotExecutor, OrExecutor, PowerExecutor, RoundExecutor, XorExecutor,
+};
+pub use string_ops::{
+    ConcatExecutor, ContainsExecutor, LengthExecutor, LowerExecutor, ParseJsonExecutor,
+    ReplaceExecutor, SubstringExecutor, ToBoolExecutor, ToFloatExecutor, ToIntExecutor,
+    ToJsonExecutor, ToStringExecutor, TrimExecutor, UpperExecutor,
+};
 pub use tool::ToolExecutor;
 pub use validator::ValidatorExecutor;
 
@@ -44,7 +68,8 @@ use metteur_shared::{Node, PinId, PinType, Value};
 
 use crate::error::{DaemonError, DaemonResult};
 
-/// The Start event node. Produces data output values from its `data` object.
+/// The Start event node. Produces data output values from its `data` object,
+/// plus an initial context manager on its `Context` output pin when present.
 pub struct StartExecutor;
 
 #[async_trait::async_trait]
@@ -57,7 +82,7 @@ impl crate::registry::NodeExecutor for StartExecutor {
         &self,
         node: &Node,
         _inputs: &HashMap<PinId, Value>,
-        _ctx: &mut crate::execution::context::ExecutionContext,
+        ctx: &mut crate::execution::context::ExecutionContext,
     ) -> DaemonResult<HashMap<PinId, Value>> {
         let mut outputs = HashMap::new();
         if let serde_json::Value::Object(map) = &node.data {
@@ -69,6 +94,17 @@ impl crate::registry::NodeExecutor for StartExecutor {
                     outputs.insert(pin.id, json_to_value(value));
                 }
             }
+        }
+        // The initial context manager carries the environment's system
+        // fragments so downstream nodes start from a known baseline.
+        if let Some(pin) =
+            node.pins.iter().find(|p| p.name == "Context" && p.pin_type == PinType::DataOutput)
+        {
+            let context = metteur_shared::llm::ContextManager {
+                system_fragments: ctx.addon_fragments.clone(),
+                ..Default::default()
+            };
+            outputs.insert(pin.id, Value::Context(context));
         }
         Ok(outputs)
     }
@@ -151,6 +187,111 @@ pub(crate) fn string_output(
     Ok(HashMap::from([(pin.id, Value::String(value.into()))]))
 }
 
+/// Reads a data input by pin name.
+pub(crate) fn value_input<'a>(
+    node: &Node,
+    inputs: &'a HashMap<PinId, Value>,
+    name: &str,
+) -> DaemonResult<&'a Value> {
+    let pin = node
+        .pins
+        .iter()
+        .find(|p| p.name == name && p.pin_type == PinType::DataInput)
+        .ok_or_else(|| DaemonError::Execution(format!("missing pin {name}")))?;
+    inputs
+        .get(&pin.id)
+        .ok_or_else(|| DaemonError::Execution(format!("missing input {name}")))
+}
+
+/// Reads a data input, falling back to the node's `data` constant of the same
+/// name, its pin key, or its pin id (DSL literals and frontend inline values
+/// land in one of these three slots).
+pub(crate) fn input_or_data(
+    node: &Node,
+    inputs: &HashMap<PinId, Value>,
+    name: &str,
+) -> DaemonResult<Value> {
+    if let Ok(value) = value_input(node, inputs, name) {
+        return Ok(value.clone());
+    }
+    let find_pin =
+        || node.pins.iter().find(|p| p.name == name && p.pin_type == PinType::DataInput);
+    let data = node
+        .data
+        .get(name)
+        .or_else(|| find_pin().and_then(|p| p.key.as_deref().and_then(|k| node.data.get(k))))
+        .or_else(|| {
+            // The web UI keys inline values by pin id as a last-resort slot.
+            find_pin().and_then(|p| node.data.get(p.id.to_string().as_str()))
+        })
+        .map(json_to_value);
+    data.ok_or_else(|| DaemonError::Execution(format!("missing input {name}")))
+}
+
+/// Reads a boolean input by pin name.
+pub(crate) fn bool_input(
+    node: &Node,
+    inputs: &HashMap<PinId, Value>,
+    name: &str,
+) -> DaemonResult<bool> {
+    let value = input_or_data(node, inputs, name)?;
+    value
+        .as_bool()
+        .ok_or_else(|| DaemonError::Execution(format!("input {name} is not boolean")))
+}
+
+/// Reads an integer input, tolerating float values produced by math nodes.
+pub(crate) fn int_input(
+    node: &Node,
+    inputs: &HashMap<PinId, Value>,
+    name: &str,
+) -> DaemonResult<i64> {
+    let value = input_or_data(node, inputs, name)?;
+    match value {
+        Value::Int(i) => Ok(i),
+        Value::Float(f) => Ok(f as i64),
+        Value::Json(j) => j
+            .as_i64()
+            .or_else(|| j.as_f64().map(|f| f as i64))
+            .ok_or_else(|| DaemonError::Execution(format!("input {name} is not an integer"))),
+        _ => Err(DaemonError::Execution(format!("input {name} is not an integer"))),
+    }
+}
+
+/// Reads a string input by pin name, coercing scalars when possible.
+pub(crate) fn string_input(
+    node: &Node,
+    inputs: &HashMap<PinId, Value>,
+    name: &str,
+) -> DaemonResult<String> {
+    let value = input_or_data(node, inputs, name)?;
+    match value {
+        Value::String(s) => Ok(s),
+        Value::Int(i) => Ok(i.to_string()),
+        Value::Float(f) => Ok(f.to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Json(j) => Ok(j.to_string()),
+        _ => Err(DaemonError::Execution(format!("input {name} is not text"))),
+    }
+}
+
+/// Reads a list input by pin name.
+pub(crate) fn list_input(
+    node: &Node,
+    inputs: &HashMap<PinId, Value>,
+    name: &str,
+) -> DaemonResult<Vec<Value>> {
+    let value = input_or_data(node, inputs, name)?;
+    match value {
+        Value::List(items) => Ok(items),
+        Value::Json(j) => {
+            let items = j.as_array().map(|a| a.iter().map(json_to_value).collect::<Vec<_>>());
+            items.ok_or_else(|| DaemonError::Execution(format!("input {name} is not a list")))
+        }
+        _ => Err(DaemonError::Execution(format!("input {name} is not a list"))),
+    }
+}
+
 /// Converts a value into a textual representation.
 pub(crate) fn value_to_string(value: &Value) -> String {
     match value {
@@ -192,5 +333,103 @@ pub(crate) fn is_empty(value: &Value) -> bool {
             serde_json::Value::Array(a) => a.is_empty(),
             serde_json::Value::Object(o) => o.is_empty(),
         },
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use metteur_shared::{DataType, NodeType, Pin};
+    use std::sync::Arc;
+
+    /// Builds a pure node with the given data inputs (as `Float`) and a
+    /// `Result` output, wired with fresh pin ids.
+    fn node_with_float_inputs(kind: &str, names: &[&str]) -> Node {
+        let mut pins = vec![
+            Pin::exec(PinType::ExecInput, uuid::Uuid::new_v4()),
+            Pin::exec(PinType::ExecOutput, uuid::Uuid::new_v4()),
+        ];
+        for name in names {
+            pins.push(Pin::data(*name, PinType::DataInput, DataType::Float, uuid::Uuid::new_v4()));
+        }
+        pins.push(Pin::data("Result", PinType::DataOutput, DataType::Any, uuid::Uuid::new_v4()));
+        Node {
+            id: uuid::Uuid::new_v4(),
+            node_type: NodeType::Pure,
+            kind: kind.to_string(),
+            position: (0.0, 0.0),
+            pins,
+            data: serde_json::Value::Null,
+        }
+    }
+
+    /// Runs `kind` with float inputs and returns outputs by pin name.
+    pub(crate) async fn exec_floats(
+        kind: &str,
+        inputs: &[(&str, f64)],
+    ) -> DaemonResult<HashMap<String, Value>> {
+        let node_registry = crate::registry::NodeRegistry::with_builtins();
+        let node = node_with_float_inputs(kind, &inputs.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        let mut values = HashMap::new();
+        for (name, value) in inputs {
+            let pin = node.pins.iter().find(|p| p.name == *name).unwrap();
+            values.insert(pin.id, Value::Float(*value));
+        }
+        let executor = node_registry
+            .get(kind)
+            .ok_or_else(|| crate::error::DaemonError::Execution(format!("no node {kind}")))?;
+        let mut ctx = crate::execution::context::ExecutionContext::new(
+            Arc::new(crate::registry::Registry::with_builtins()),
+            crate::llm::LlmClientFactory::new(),
+            std::env::temp_dir(),
+        );
+        let outputs = executor.execute(&node, &values, &mut ctx).await?;
+        Ok(outputs
+            .into_iter()
+            .map(|(id, value)| {
+                let name = node
+                    .pins
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                (name, value)
+            })
+            .collect())
+    }
+
+    /// Runs `kind` with boolean inputs and returns outputs by pin name.
+    pub(crate) async fn exec_bools(
+        kind: &str,
+        inputs: &[(&str, bool)],
+    ) -> DaemonResult<HashMap<String, Value>> {
+        let node_registry = crate::registry::NodeRegistry::with_builtins();
+        let node = node_with_float_inputs(kind, &inputs.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        let mut values = HashMap::new();
+        for (name, value) in inputs {
+            let pin = node.pins.iter().find(|p| p.name == *name).unwrap();
+            values.insert(pin.id, Value::Bool(*value));
+        }
+        let executor = node_registry
+            .get(kind)
+            .ok_or_else(|| crate::error::DaemonError::Execution(format!("no node {kind}")))?;
+        let mut ctx = crate::execution::context::ExecutionContext::new(
+            Arc::new(crate::registry::Registry::with_builtins()),
+            crate::llm::LlmClientFactory::new(),
+            std::env::temp_dir(),
+        );
+        let outputs = executor.execute(&node, &values, &mut ctx).await?;
+        Ok(outputs
+            .into_iter()
+            .map(|(id, value)| {
+                let name = node
+                    .pins
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                (name, value)
+            })
+            .collect())
     }
 }
