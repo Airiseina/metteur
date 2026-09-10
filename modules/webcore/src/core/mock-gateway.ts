@@ -11,6 +11,7 @@ import type {
   ChatOptions,
   ChatSessionInfo,
   ChatSessionSnapshot,
+  ChatUsage,
   DaemonConfig,
   ExecStatus,
   ExecutionEvent,
@@ -370,7 +371,34 @@ export class MockGateway implements DaemonGateway {
 
   // Configuration -------------------------------------------------------------
   /** In-memory config layers keyed by `''` (global) or workspace path. */
-  private configLayers = new Map<string, DaemonConfig>()
+  private configLayers = new Map<string, DaemonConfig>([
+    // Demo models so the mock build has a usable chat out of the box; the real
+    // gateway never falls back to sample models.
+    [
+      '',
+      {
+        llm: {
+          default_model: 'demo-chat',
+          models: {
+            'demo-chat': {
+              display_name: 'Demo Chat',
+              api_type: 'openai-chat',
+              api_endpoint: 'https://api.example.com/v1',
+              model_id: 'demo-chat-v1',
+              api_key: 'sk-demo',
+            },
+            'demo-reasoner': {
+              display_name: 'Demo Reasoner',
+              api_type: 'openai-chat',
+              api_endpoint: 'https://api.example.com/v1',
+              model_id: 'demo-reasoner-v1',
+              api_key: 'sk-demo',
+            },
+          },
+        },
+      },
+    ],
+  ])
 
   async getConfig(workspacePath = ''): Promise<Result<DaemonConfig>> {
     await delay(60)
@@ -478,10 +506,11 @@ export class MockGateway implements DaemonGateway {
     options?: ChatOptions,
     onSession?: (sessionId: string) => void,
     _sessionId?: string,
+    onUsage?: (usage: ChatUsage) => void,
   ): Promise<Result<void>> {
     this.chatAbort.delete(ws)
     onSession?.(`mock-${ws}`)
-    const model = options?.model ?? 'claude-4'
+    const model = options?.model ?? 'demo-chat'
     const wantBlueprint = /blueprint|agent|graph|自动化|蓝图/i.test(content)
     const steps: Array<{
       role: ChatMessage['role']
@@ -534,6 +563,11 @@ export class MockGateway implements DaemonGateway {
         await delay(12)
       }
     }
+    onUsage?.({
+      inputTokens: history.length * 120,
+      outputTokens: content.length * 2,
+      totalTokens: history.length * 120 + content.length * 2,
+    })
     this.chatAbort.delete(ws)
     return ok(undefined)
   }
@@ -547,11 +581,11 @@ export class MockGateway implements DaemonGateway {
     return ok([])
   }
 
-  async getChatSession(_ws: string): Promise<Result<ChatSessionSnapshot>> {
+  async getChatSession(_ws: string, _sessionId?: string): Promise<Result<ChatSessionSnapshot>> {
     return err('no chat session')
   }
 
-  async deleteChatSession(_ws: string): Promise<Result<void>> {
+  async deleteChatSession(_ws: string, _sessionId?: string): Promise<Result<void>> {
     return ok(undefined)
   }
 
@@ -717,6 +751,10 @@ export class MockGateway implements DaemonGateway {
     return ok([{ runId: `run-${ws.length}`, blueprintId: 'bp-build-feature', status, startedAt: Date.now() - 5_000, updatedAt: Date.now(), executedNodes: 6 }])
   }
 
+  async getExecutionTree(_ws: string, _runId: string): Promise<Result<ExecTreeData>> {
+    return err('no execution tree in mock mode')
+  }
+
   async listFileHistory(_ws: string, _path: string): Promise<Result<FileHistoryEntry[]>> {
     await delay(120)
     return ok(DEMO_HISTORY)
@@ -728,7 +766,7 @@ export class MockGateway implements DaemonGateway {
     return ok(DEMO_ADDONS)
   }
 
-  async setAddonEnabled(id: string, enabled: boolean): Promise<Result<void>> {
+  async setAddonEnabled(id: string, enabled: boolean, _workspacePath = ''): Promise<Result<void>> {
     const addon = DEMO_ADDONS.find((a) => a.id === id)
     if (!addon) return err(`addon not found: ${id}`)
     addon.enabled = enabled

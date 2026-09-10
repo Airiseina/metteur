@@ -251,18 +251,62 @@ fn template(kind: &str) -> Option<Vec<PinSpec>> {
             let mut pins = vec![i("x-in")];
             pins.push(PinSpec {
                 key: "",
-                name: "true",
+                name: "True",
                 pin_type: PinType::ExecOutput,
                 data_type: DataType::Void,
             });
             pins.push(PinSpec {
                 key: "",
-                name: "false",
+                name: "False",
                 pin_type: PinType::ExecOutput,
                 data_type: DataType::Void,
             });
             pins.push(di("Condition", DataType::Bool));
             pins.push(do_("Result", DataType::Bool));
+            pins
+        }
+        "Switch" => {
+            let mut pins = vec![i("x-in")];
+            pins.push(PinSpec {
+                key: "",
+                name: "Default",
+                pin_type: PinType::ExecOutput,
+                data_type: DataType::Void,
+            });
+            pins.push(di("Case", DataType::Any));
+            pins.push(do_("Result", DataType::Any));
+            pins
+        }
+        "ForEach" => {
+            let mut pins = vec![i("x-in")];
+            pins.push(PinSpec {
+                key: "",
+                name: "Body",
+                pin_type: PinType::ExecOutput,
+                data_type: DataType::Void,
+            });
+            pins.push(PinSpec {
+                key: "",
+                name: "Completed",
+                pin_type: PinType::ExecOutput,
+                data_type: DataType::Void,
+            });
+            pins.push(di("List", DataType::Any));
+            pins.push(do_("Iteration", DataType::Any));
+            pins.push(do_("Index", DataType::Int));
+            pins
+        }
+        "VariableSet" => {
+            let mut pins = exec(true);
+            pins.push(di("Name", DataType::String));
+            pins.push(di("Value", DataType::Any));
+            pins.push(do_("Value", DataType::Any));
+            pins
+        }
+        "VariableGet" => {
+            let mut pins = exec(true);
+            pins.push(di("Name", DataType::String));
+            pins.push(do_("Value", DataType::Any));
             pins
         }
         "CallLLM" => {
@@ -296,7 +340,25 @@ fn template(kind: &str) -> Option<Vec<PinSpec>> {
             pins
         }
         "RequestApproval" => {
-            let mut pins = exec(true);
+            let mut pins = vec![i("x-in")];
+            pins.push(PinSpec {
+                key: "",
+                name: "x-out",
+                pin_type: PinType::ExecOutput,
+                data_type: DataType::Void,
+            });
+            pins.push(PinSpec {
+                key: "",
+                name: "Approved",
+                pin_type: PinType::ExecOutput,
+                data_type: DataType::Void,
+            });
+            pins.push(PinSpec {
+                key: "",
+                name: "Denied",
+                pin_type: PinType::ExecOutput,
+                data_type: DataType::Void,
+            });
             pins.push(di("Message", DataType::String));
             pins.push(do_("Allowed", DataType::Bool));
             pins
@@ -318,19 +380,37 @@ fn template(kind: &str) -> Option<Vec<PinSpec>> {
     })
 }
 
+/// Folds the DSL's flat retry args (`retry_max_attempts`, `retry_rollback`)
+/// into the nested `retry` object the interpreter reads, merging with an
+/// explicitly written `retry` object when both are present.
+fn fold_validator_retry(data: &mut serde_json::Map<String, serde_json::Value>) {
+    let flat = [("retry_max_attempts", "max_attempts"), ("retry_rollback", "rollback")];
+    let mut retry = data.get("retry").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let mut changed = false;
+    for (flat_key, nested_key) in flat {
+        if let Some(v) = data.remove(flat_key) {
+            retry.insert(nested_key.to_string(), v);
+            changed = true;
+        }
+    }
+    if changed {
+        data.insert("retry".to_string(), serde_json::Value::Object(retry));
+    }
+}
+
 /// Returns the node category a kind belongs to for compiled blueprints.
 fn node_type_of(kind: &str) -> NodeType {
     match kind {
         "Start" | "End" | "FunctionEntry" | "FunctionExit" => NodeType::Event,
-        "Branch" | "RequestApproval" => NodeType::Control,
-        "Add" | "Subtract" | "Multiply" | "Divide" | "Modulo" | "Power" | "Min" | "Max"
-        | "Abs" | "Round" | "Equal" | "NotEqual" | "Greater" | "Less" | "GreaterEqual"
-        | "LessEqual" | "And" | "Or" | "Xor" | "Not" | "Concat" | "Length" | "Upper" | "Lower"
-        | "Trim" | "Contains" | "Replace" | "Substring" | "ToString" | "ToInt" | "ToFloat"
-        | "ToBool" | "ToJson" | "ParseJson" | "ListCreate" | "ListAppend" | "ListGet"
-        | "ListLength" | "ListContains" | "JsonGet" | "JsonSet" | "ContextCreate"
-        | "ContextClone" | "ContextMerge" | "ContextFilter" | "ContextTrim" | "ContextToText"
-        | "Delay" => NodeType::Pure,
+        "Branch" | "Switch" | "ForEach" | "RequestApproval" => NodeType::Control,
+        "Add" | "Subtract" | "Multiply" | "Divide" | "Modulo" | "Power" | "Min" | "Max" | "Abs"
+        | "Round" | "Equal" | "NotEqual" | "Greater" | "Less" | "GreaterEqual" | "LessEqual"
+        | "And" | "Or" | "Xor" | "Not" | "Concat" | "Length" | "Upper" | "Lower" | "Trim"
+        | "Contains" | "Replace" | "Substring" | "ToString" | "ToInt" | "ToFloat" | "ToBool"
+        | "ToJson" | "ParseJson" | "ListCreate" | "ListAppend" | "ListGet" | "ListLength"
+        | "ListContains" | "JsonGet" | "JsonSet" | "ContextCreate" | "ContextClone"
+        | "ContextMerge" | "ContextFilter" | "ContextTrim" | "ContextToText" | "Delay"
+        | "VariableGet" => NodeType::Pure,
         _ => NodeType::Function,
     }
 }
@@ -345,10 +425,18 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
 
     for stmt in &statements {
         match stmt {
-            Statement::Header { name: n } => name = n.clone(),
-            Statement::Node { .. } => nodes.push(stmt),
-            Statement::ExecEdge { .. } => exec_edges.push(stmt),
-            Statement::DataWire { .. } => data_wires.push(stmt),
+            Statement::Header {
+                name: n,
+            } => name = n.clone(),
+            Statement::Node {
+                ..
+            } => nodes.push(stmt),
+            Statement::ExecEdge {
+                ..
+            } => exec_edges.push(stmt),
+            Statement::DataWire {
+                ..
+            } => data_wires.push(stmt),
         }
     }
 
@@ -365,10 +453,21 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
     let entry = nodes
         .iter()
         .copied()
-        .find(|s| matches!(s, Statement::Node { is_entry: true, .. }))
+        .find(|s| {
+            matches!(
+                s,
+                Statement::Node {
+                    is_entry: true,
+                    ..
+                }
+            )
+        })
         .unwrap_or(nodes[0]);
     let entry_alias = match entry {
-        Statement::Node { alias, .. } => alias.as_str(),
+        Statement::Node {
+            alias,
+            ..
+        } => alias.as_str(),
         _ => "",
     };
 
@@ -382,7 +481,10 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
     let node_id_of: HashMap<&str, Uuid> = nodes
         .iter()
         .map(|s| match s {
-            Statement::Node { alias, .. } => (alias.as_str(), Uuid::new_v4()),
+            Statement::Node {
+                alias,
+                ..
+            } => (alias.as_str(), Uuid::new_v4()),
             _ => unreachable!(),
         })
         .collect();
@@ -411,7 +513,8 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
         })?;
         let mut pins = Vec::new();
         for p in &spec {
-            let mut pin = Pin::data(p.name.to_string(), p.pin_type, p.data_type.clone(), Uuid::new_v4());
+            let mut pin =
+                Pin::data(p.name.to_string(), p.pin_type, p.data_type.clone(), Uuid::new_v4());
             if !p.key.is_empty() {
                 pin.key = Some(p.key.to_string());
             }
@@ -419,6 +522,47 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
                 src_pin_of.insert((alias.as_str(), p.name), (node_id, pin.id));
             }
             pins.push(pin);
+        }
+        // Switch case branches are declared with `cases = [...]`; each entry
+        // becomes a `Case_<value>` execution output pin.
+        if kind == "Switch"
+            && let Some(cases) =
+                constants.iter().find(|(k, _)| k == "cases").and_then(|(_, v)| v.as_array())
+        {
+            for case in cases {
+                let Some(text) = case.as_str() else {
+                    return Err(SharedError::Invalid(format!(
+                        "switch cases must be strings (line {line}, column {col})"
+                    )));
+                };
+                let name = format!("Case_{text}");
+                if pins.iter().any(|pin: &Pin| pin.name == name) {
+                    continue;
+                }
+                pins.push(Pin::data(name, PinType::ExecOutput, DataType::Void, Uuid::new_v4()));
+            }
+        }
+        // Start carries ad-hoc initial attributes: constants outside the
+        // template become data output pins so downstream nodes can reference
+        // them (`A <- start.A`). The Start executor emits data values by pin
+        // name, matching the stored constant keys.
+        if kind == "Start" {
+            for (k, _) in constants {
+                let known = spec.iter().any(|p| p.key == k || p.name == k)
+                    || pins.iter().any(|pin: &Pin| &pin.name == k);
+                if !known {
+                    let id = Uuid::new_v4();
+                    src_pin_of.insert((alias.as_str(), k.as_str()), (node_id, id));
+                    pins.push(Pin {
+                        id,
+                        key: Some(k.clone()),
+                        name: k.clone(),
+                        pin_type: PinType::DataOutput,
+                        data_type: DataType::Any,
+                        ..Default::default()
+                    });
+                }
+            }
         }
         let mut data = serde_json::Map::new();
         for (k, v) in constants {
@@ -432,6 +576,9 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
                 .filter(|k| !k.is_empty())
                 .unwrap_or(k.as_str());
             data.insert(key.to_string(), v.clone());
+        }
+        if kind == "Validator" {
+            fold_validator_retry(&mut data);
         }
         blueprint.nodes.push(Node {
             id: node_id,
@@ -498,10 +645,8 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
         else {
             unreachable!("data_wires only contains DataWire statements")
         };
-        let (source_node, source_pin_id) = src_pin_of
-            .get(&(source.0.as_str(), source.1.as_str()))
-            .cloned()
-            .ok_or_else(|| {
+        let (source_node, source_pin_id) =
+            src_pin_of.get(&(source.0.as_str(), source.1.as_str())).cloned().ok_or_else(|| {
                 SharedError::Invalid(format!(
                     "unknown data source '{}.{}' (line {line}, column {col})",
                     source.0, source.1
@@ -535,9 +680,9 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
         else {
             unreachable!("exec_edges only contains ExecEdge statements")
         };
-        let source_node = *node_id_of
-            .get(source.as_str())
-            .ok_or_else(|| SharedError::Invalid(format!("unknown node '{source}' (line {line}, column {col})")))?;
+        let source_node = *node_id_of.get(source.as_str()).ok_or_else(|| {
+            SharedError::Invalid(format!("unknown node '{source}' (line {line}, column {col})"))
+        })?;
         let source_pin_id = {
             let node = blueprint.nodes.iter().find(|n| n.id == source_node).unwrap();
             match source_pin {
@@ -563,9 +708,9 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
                     })?,
             }
         };
-        let target_node = *node_id_of
-            .get(target.as_str())
-            .ok_or_else(|| SharedError::Invalid(format!("unknown node '{target}' (line {line}, column {col})")))?;
+        let target_node = *node_id_of.get(target.as_str()).ok_or_else(|| {
+            SharedError::Invalid(format!("unknown node '{target}' (line {line}, column {col})"))
+        })?;
         let target_pin_id = blueprint
             .nodes
             .iter()
@@ -600,14 +745,10 @@ fn lay_out(bp: &mut Blueprint) {
         .filter_map(|e| {
             let src = bp.nodes.iter().find(|n| n.id == e.source_node)?;
             let dst = bp.nodes.iter().find(|n| n.id == e.target_node)?;
-            let is_exec_out = src
-                .pins
-                .iter()
-                .any(|p| p.id == e.source_pin && p.pin_type == PinType::ExecOutput);
-            let is_exec_in = dst
-                .pins
-                .iter()
-                .any(|p| p.id == e.target_pin && p.pin_type == PinType::ExecInput);
+            let is_exec_out =
+                src.pins.iter().any(|p| p.id == e.source_pin && p.pin_type == PinType::ExecOutput);
+            let is_exec_in =
+                dst.pins.iter().any(|p| p.id == e.target_pin && p.pin_type == PinType::ExecInput);
             (is_exec_out && is_exec_in).then_some((e.source_node, e.target_node))
         })
         .collect();
@@ -642,6 +783,18 @@ fn lay_out(bp: &mut Blueprint) {
         n.position = (layer as f32 * 260.0 + 40.0, *row as f32 * 170.0 + 60.0);
         *row += 1;
     }
+}
+
+/// Reads a data input pin by name, verifying it is a `DataInput`.
+fn find_data_input(bp: &Blueprint, node_id: Uuid, pin_name: &str) -> SharedResult<Uuid> {
+    bp.nodes
+        .iter()
+        .find(|n| n.id == node_id)
+        .and_then(|n| {
+            n.pins.iter().find(|p| p.name == pin_name && p.pin_type == PinType::DataInput)
+        })
+        .map(|p| p.id)
+        .ok_or_else(|| SharedError::Invalid(format!("node has no data input pin '{pin_name}'")))
 }
 
 #[cfg(test)]
@@ -735,18 +888,4 @@ n2.x-out -> n3
         // Layer-1 siblings (Add, Length) occupy distinct rows.
         assert_ne!(by("Add").position.1, by("Length").position.1);
     }
-}
-
-/// Reads a data input pin by name, verifying it is a `DataInput`.
-fn find_data_input(bp: &Blueprint, node_id: Uuid, pin_name: &str) -> SharedResult<Uuid> {
-    bp.nodes
-        .iter()
-        .find(|n| n.id == node_id)
-        .and_then(|n| {
-            n.pins
-                .iter()
-                .find(|p| p.name == pin_name && p.pin_type == PinType::DataInput)
-        })
-        .map(|p| p.id)
-        .ok_or_else(|| SharedError::Invalid(format!("node has no data input pin '{pin_name}'")))
 }

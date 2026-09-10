@@ -6,8 +6,8 @@ use metteur_proto::proto::{
 };
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Handles `snap <description...> [--alias <name>]`.
 pub(crate) async fn handle_snap(

@@ -23,19 +23,17 @@ fn context_input(
     name: &str,
 ) -> DaemonResult<ContextManager> {
     let value = value_input(node, inputs, name)?;
-    value
-        .as_context()
-        .cloned()
-        .ok_or_else(|| crate::error::DaemonError::Execution(format!("input {name} is not a context")))
+    value.as_context().cloned().ok_or_else(|| {
+        crate::error::DaemonError::Execution(format!("input {name} is not a context"))
+    })
 }
 
 /// Writes a context to the `Result` pin.
 fn context_output(node: &Node, value: ContextManager) -> DaemonResult<HashMap<PinId, Value>> {
-    let pin = node
-        .pins
-        .iter()
-        .find(|p| p.name == "Result")
-        .ok_or_else(|| crate::error::DaemonError::Execution("missing pin Result".to_string()))?;
+    let pin =
+        node.pins.iter().find(|p| p.name == "Result").ok_or_else(|| {
+            crate::error::DaemonError::Execution("missing pin Result".to_string())
+        })?;
     Ok(HashMap::from([(pin.id, Value::Context(value))]))
 }
 

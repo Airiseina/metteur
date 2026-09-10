@@ -3,6 +3,7 @@
 pub mod billing;
 pub mod client;
 pub mod mock;
+pub mod peak;
 pub mod provider;
 
 pub use billing::{Cost, ModelUsageSummary, UsageSummaryData};

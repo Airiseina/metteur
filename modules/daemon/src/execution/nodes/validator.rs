@@ -84,11 +84,7 @@ impl NodeExecutor for ValidatorExecutor {
 
 /// Parses the validation mode from `node.data.mode`.
 fn parse_mode(node: &Node) -> DaemonResult<ValidationMode> {
-    let mode = node
-        .data
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("eq");
+    let mode = node.data.get("mode").and_then(|v| v.as_str()).unwrap_or("eq");
     let normalized = mode.to_ascii_lowercase();
     Ok(match normalized.as_str() {
         "eq" | "equal" | "=" => ValidationMode::Eq,
@@ -101,11 +97,7 @@ fn parse_mode(node: &Node) -> DaemonResult<ValidationMode> {
         "regex" => ValidationMode::Regex,
         "not_empty" | "exists" => ValidationMode::NotEmpty,
         "json" => ValidationMode::Json,
-        other => {
-            return Err(DaemonError::Execution(format!(
-                "unknown validation mode '{other}'"
-            )))
-        }
+        other => return Err(DaemonError::Execution(format!("unknown validation mode '{other}'"))),
     })
 }
 
@@ -116,11 +108,7 @@ fn compare_numeric(
     actual: Value,
     f: impl Fn(f64, f64) -> bool,
 ) -> DaemonResult<bool> {
-    let expected = get_input(
-        inputs,
-        node,
-        "Expected",
-    )?;
+    let expected = get_input(inputs, node, "Expected")?;
     let a = actual
         .as_float()
         .ok_or_else(|| DaemonError::Execution("input Actual is not numeric".to_string()))?;

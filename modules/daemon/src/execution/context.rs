@@ -7,10 +7,10 @@ use metteur_shared::config::Config;
 use metteur_shared::{Blueprint, NodeId, PinId, Value};
 use tokio::sync::RwLock;
 
-use crate::observability::audit::AuditWriter;
 use crate::llm::LlmClientFactory;
-use crate::storage::persistence::Db;
+use crate::observability::audit::AuditWriter;
 use crate::registry::Registry;
+use crate::storage::persistence::Db;
 
 use super::interrupt::InterruptBus;
 use super::transaction::TransactionLog;
@@ -51,6 +51,10 @@ pub struct Scheduler {
     triggered: HashSet<NodeId>,
     executed: HashSet<NodeId>,
     queue: VecDeque<NodeId>,
+    /// Completed node ids in completion order; defines the retry segment
+    /// boundary used by validation rollback.
+    #[serde(default)]
+    order: Vec<NodeId>,
 }
 
 impl Scheduler {
@@ -59,11 +63,13 @@ impl Scheduler {
         executed: Vec<NodeId>,
         pending: Vec<NodeId>,
         triggered: Vec<NodeId>,
+        order: Vec<NodeId>,
     ) -> Self {
         Self {
             triggered: triggered.into_iter().collect(),
             executed: executed.into_iter().collect(),
             queue: pending.into_iter().collect(),
+            order,
         }
     }
 
@@ -76,6 +82,11 @@ impl Scheduler {
     /// Completed node ids, in arbitrary order.
     pub fn executed_list(&self) -> Vec<NodeId> {
         self.executed.iter().copied().collect()
+    }
+
+    /// All completed node ids in completion order.
+    pub fn order_list(&self) -> Vec<NodeId> {
+        self.order.clone()
     }
 
     /// Pending (queued) node ids, in scheduling order.
@@ -98,14 +109,28 @@ impl Scheduler {
         self.triggered.contains(&node_id)
     }
 
-    /// Marks a node as completed.
+    /// Marks a node as completed, recording its position in the execution
+    /// order.
     pub fn mark_executed(&mut self, node_id: NodeId) {
-        self.executed.insert(node_id);
+        if self.executed.insert(node_id) {
+            self.order.push(node_id);
+        }
     }
 
-    /// Un-marks a node so the circuit breaker can re-queue it after a replan.
+    /// Un-marks a node so a retry or replan can re-queue it.
     pub fn unmark_executed(&mut self, node_id: NodeId) {
         self.executed.remove(&node_id);
+        self.order.retain(|n| *n != node_id);
+    }
+
+    /// Current length of the completion order, usable as a segment mark.
+    pub fn order_len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Completed node ids from `start` onwards, in completion order.
+    pub fn order_from(&self, start: usize) -> Vec<NodeId> {
+        self.order.iter().skip(start).copied().collect()
     }
 
     /// Removes the next queued node, if any.
@@ -113,11 +138,36 @@ impl Scheduler {
         self.queue.pop_front()
     }
 
+    /// Removes all queued occurrences of `ids`.
+    ///
+    /// A node fed by both an execution edge and a data edge is enqueued twice
+    /// (the second pop is normally skipped as already executed). Retry and
+    /// replan paths un-mark segment nodes, which would resurrect the stale
+    /// duplicate, so they drain the queue first and re-queue each node once.
+    pub fn dequeue_all(&mut self, ids: &[NodeId]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.queue.retain(|n| !ids.contains(n));
+    }
+
     /// Marks `node_id` as triggered and queues it when inputs allow later.
     pub fn enqueue(&mut self, node_id: NodeId) {
         self.triggered.insert(node_id);
         self.queue.push_back(node_id);
     }
+}
+
+/// Rollback/retry boundary captured when a validator last passed.
+///
+/// Marks index into the transaction log (which mutations to undo) and into
+/// the active frame's completion order (which nodes to re-execute).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetryMark {
+    /// Transaction log length at the last pass.
+    pub log_mark: usize,
+    /// Completion-order length at the last pass.
+    pub order_mark: usize,
 }
 
 /// The runtime state of a single blueprint execution.
@@ -132,6 +182,27 @@ pub struct ExecutionState {
     pub data_values: HashMap<PinId, Value>,
     /// The node at which execution is paused, if any.
     pub paused_at: Option<NodeId>,
+    /// Failed validation attempts per validator node.
+    pub attempt_counts: HashMap<NodeId, u32>,
+    /// Rollback boundaries per validator node, refreshed on each pass.
+    pub validation_marks: HashMap<NodeId, RetryMark>,
+    /// Active ForEach loops, innermost last (one per frame at most).
+    pub foreach_stack: Vec<ForEachState>,
+}
+
+/// The runtime state of one active ForEach loop.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForEachState {
+    /// The ForEach node owning the loop.
+    pub node_id: NodeId,
+    /// The iterated items.
+    pub items: Vec<Value>,
+    /// Index of the item currently (or next) exposed on `Iteration`.
+    pub index: usize,
+    /// Call-stack depth of the owning frame; loops never cross frames.
+    pub depth: usize,
+    /// Body entries so far, bounded by `foreach_max_iterations`.
+    pub count: u32,
 }
 
 /// Shared capabilities available to node executors during execution.
@@ -186,6 +257,14 @@ pub struct ExecutionContext {
     pub addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
     /// Shared handle to the executing root blueprint (replan hot-apply).
     pub blueprint: Option<Arc<parking_lot::RwLock<Blueprint>>>,
+    /// Frame-scoped variable maps, innermost last. The interpreter pushes one
+    /// per entered function frame; executors read and write through it.
+    pub variables: Vec<HashMap<String, Value>>,
+    /// Tree operations queued by executors, drained by the interpreter when
+    /// the node finishes.
+    pub tree_ops: Vec<super::tree::TreeOp>,
+    /// The workspace version manager, enabling snapshot tools.
+    pub version_manager: Option<Arc<crate::storage::versioning::VersionManager>>,
 }
 
 impl ExecutionContext {
@@ -219,7 +298,20 @@ impl ExecutionContext {
             lsp: None,
             addon_fragments: Vec::new(),
             blueprint: None,
+            variables: vec![HashMap::new()],
+            tree_ops: Vec::new(),
+            version_manager: None,
         }
+    }
+
+    /// Returns the innermost variable frame for writing, if any.
+    pub fn variables_last_mut(&mut self) -> Option<&mut HashMap<String, Value>> {
+        self.variables.last_mut()
+    }
+
+    /// Iterates variable frames from the innermost outwards for lookup.
+    pub fn variables_frames(&self) -> impl DoubleEndedIterator<Item = &HashMap<String, Value>> {
+        self.variables.iter()
     }
 
     /// Attaches the workspace language-server manager.
@@ -260,6 +352,7 @@ impl ExecutionContext {
         child.lsp = self.lsp.clone();
         child.addon_fragments = self.addon_fragments.clone();
         child.blueprint = self.blueprint.clone();
+        child.version_manager = self.version_manager.clone();
         child.depth = self.depth + 1;
         child
     }

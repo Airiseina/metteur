@@ -1,8 +1,8 @@
 //! Output formatting helpers for command results and execution events.
 
 use metteur_proto::proto::{
-    AuditLogList, ExecutionEvent, ExecutionList, FileHistory, McpServerList, SnapshotList,
-    ToolList, UsageSummary, WorkspaceList,
+    AuditLogList, ChatEvent, ChatSessionList, ExecutionEvent, ExecutionList, ExecutionTree,
+    FileHistory, McpServerList, SnapshotList, ToolList, UsageSummary, WorkspaceList,
 };
 
 /// Renders a live execution event as `[node kind] message`.
@@ -83,6 +83,55 @@ pub fn executions(list: &ExecutionList) -> String {
             run.executed_nodes,
             timestamp(run.updated_at),
         ));
+    }
+    out.trim_end().to_string()
+}
+
+/// Renders an agent execution tree as indented ASCII.
+pub fn execution_tree(tree: &ExecutionTree) -> String {
+    if tree.nodes.is_empty() {
+        return "(empty execution tree)".to_string();
+    }
+    let by_id: std::collections::HashMap<&str, &metteur_proto::proto::ExecTreeNode> =
+        tree.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    fn render(
+        by_id: &std::collections::HashMap<&str, &metteur_proto::proto::ExecTreeNode>,
+        id: &str,
+        prefix: &str,
+        out: &mut String,
+    ) {
+        let Some(node) = by_id.get(id) else {
+            return;
+        };
+        let status = match node.status.split(':').next().unwrap_or("") {
+            "done" => "done",
+            "failed" => "FAILED",
+            _ => "running",
+        };
+        out.push_str(&format!(
+            "{}{} [{}] {} ({} tokens)\n",
+            prefix, node.label, node.kind, status, node.tokens,
+        ));
+        for (i, child) in node.children.iter().enumerate() {
+            let last = i + 1 == node.children.len();
+            render(
+                by_id,
+                child,
+                &format!(
+                    "{prefix}{}",
+                    if last {
+                        "  "
+                    } else {
+                        "│ "
+                    }
+                ),
+                out,
+            );
+        }
+    }
+    let mut out = String::new();
+    for root in &tree.roots {
+        render(&by_id, root, "", &mut out);
     }
     out.trim_end().to_string()
 }
@@ -246,6 +295,54 @@ fn compact_json(text: &str) -> String {
         Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| text.to_string()),
         Err(_) => text.to_string(),
     }
+}
+
+/// How one chat event should be displayed.
+pub enum ChatLine {
+    /// A reply fragment printed inline without a newline.
+    Inline(String),
+    /// A complete line to print.
+    Line(String),
+    /// A terminal marker (`session`, `done`) with nothing to show.
+    Done,
+}
+
+/// Renders one chat event for the REPL.
+pub fn chat_event(event: &ChatEvent) -> ChatLine {
+    match event.kind.as_str() {
+        "assistant_delta" => ChatLine::Inline(event.content.clone()),
+        "assistant" => ChatLine::Line(format!("\n{}", event.content)),
+        "tool" => {
+            let name = serde_json::from_str::<serde_json::Value>(&event.detail_json)
+                .ok()
+                .and_then(|d| d.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            ChatLine::Line(format!("\n[tool {name}] {}", event.content))
+        }
+        "error" => ChatLine::Line(format!("\n[chat error] {}", event.content)),
+        _ => ChatLine::Done,
+    }
+}
+
+/// Lists chat threads of a workspace.
+pub fn chat_sessions(list: &ChatSessionList) -> String {
+    if list.sessions.is_empty() {
+        return "(no chat sessions)".to_string();
+    }
+    let mut out = String::from(
+        "SESSION ID                           TURNS  MSGS  UPDATED              TITLE\n",
+    );
+    for session in &list.sessions {
+        out.push_str(&format!(
+            "{:<38} {:>5}  {:>4}  {:<20} {}\n",
+            session.session_id,
+            session.turns,
+            session.message_count,
+            timestamp(session.updated_at),
+            session.title,
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 #[cfg(test)]

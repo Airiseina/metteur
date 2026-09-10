@@ -1,7 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { gateway } from '@/core'
-import type { AddonInfo, ChatMessage, ChatOptions, FileTreeNode } from '@/core'
+import type {
+  AddonInfo,
+  ChatMessage,
+  ChatOptions,
+  ChatSessionInfo,
+  ChatUsage,
+  FileTreeNode,
+} from '@/core'
 import { useWorkspaceStore } from './workspace'
 
 /**
@@ -25,6 +32,10 @@ export const useChatStore = defineStore('chat', () => {
   const busy = ref(false)
   /** id of the persisted session, passed back on every turn. */
   const sessionId = ref('')
+  /** All persisted threads, newest first. */
+  const threads = ref<ChatSessionInfo[]>([])
+  /** Token usage of the most recently completed turn. */
+  const lastUsage = ref<ChatUsage | null>(null)
 
   // Files / addons driving the composer's attach, @-mention and plugin toggles.
   const files = ref<FileTreeNode[]>([])
@@ -35,6 +46,8 @@ export const useChatStore = defineStore('chat', () => {
   const pendingFiles = ref<FileTreeNode[]>([])
 
   // Switching workspaces resets the surface and restores the new session.
+  // Immediate so a store created after the workspace was already opened still
+  // loads the persisted conversation (otherwise restore would never run).
   watch(
     () => workspace.active?.path,
     async () => {
@@ -43,8 +56,10 @@ export const useChatStore = defineStore('chat', () => {
       busy.value = false
       pendingFiles.value = []
       sessionId.value = ''
+      lastUsage.value = null
       if (workspace.active?.path) await restore()
     },
+    { immediate: true },
   )
 
   /** Reload the persisted conversation of the active workspace, if any. */
@@ -53,13 +68,47 @@ export const useChatStore = defineStore('chat', () => {
     if (!ws) return
     const target = ws.path
     const sessions = await gateway.listChatSessions(target)
-    if (!sessions.ok || sessions.data.length === 0) return
-    const snap = await gateway.getChatSession(target)
-    if (!snap.ok) return
+    if (!sessions.ok || sessions.data.length === 0) {
+      threads.value = []
+      return
+    }
+    threads.value = sessions.data
+    const latest = sessions.data[0]
+    await openThread(target, latest.sessionId, latest.title)
+  }
+
+  /** Reload the thread list without touching the open conversation. */
+  async function refreshThreads(): Promise<void> {
+    const ws = workspace.active
+    if (!ws) return
+    const sessions = await gateway.listChatSessions(ws.path)
+    if (sessions.ok) threads.value = sessions.data
+  }
+
+  /** Switch the surface to an existing thread. */
+  async function switchTo(sessionId: string): Promise<void> {
+    const ws = workspace.active
+    if (!ws) return
+    await openThread(ws.path, sessionId, '')
+  }
+
+  /** Load one thread into the surface (empty history on failure). */
+  async function openThread(wsPath: string, id: string, title: string): Promise<void> {
+    if (streaming.value) await abort()
+    const snap = await gateway.getChatSession(wsPath, id)
     // The user may have switched workspaces while loading; discard stale data.
-    if (workspace.active?.path !== target) return
-    sessionId.value = snap.data.sessionId
-    messages.value = snap.data.history
+    if (workspace.active?.path !== wsPath) return
+    sessionId.value = id
+    if (snap.ok) {
+      messages.value = snap.data.history
+      sessionId.value = snap.data.sessionId
+    } else {
+      messages.value = []
+    }
+    if (title) {
+      const info = threads.value.find((t) => t.sessionId === id)
+      if (info) info.title = title
+    }
   }
 
   /** Load the workspace file list into the attach / @-mention menu. */
@@ -108,8 +157,8 @@ export const useChatStore = defineStore('chat', () => {
     const ws = workspace.active
     const text = content.trim()
     if (!ws || !text || streaming.value) return false
-    // Fold any queued composer chips into the turn as @file references so the
-    // agent sees them on the first reply, then clear the chip queue.
+    // A "new chat" turn creates a fresh thread; sending into an existing one
+    // keeps its id (non-empty below).
     const refs = pendingFiles.value.map((f) => `@file ${f.path}`)
     const body = refs.length ? `${[...refs, text].join('\n')}` : text
     messages.value.push({
@@ -121,6 +170,7 @@ export const useChatStore = defineStore('chat', () => {
     pendingFiles.value = []
     streaming.value = true
     busy.value = true
+    lastUsage.value = null
     try {
       const r = await gateway.sendChat(
         ws.path,
@@ -132,7 +182,11 @@ export const useChatStore = defineStore('chat', () => {
           sessionId.value = id
         },
         sessionId.value,
+        (usage) => {
+          lastUsage.value = usage
+        },
       )
+      await refreshThreads()
       return r.ok
     } finally {
       if (streaming.value) {
@@ -165,13 +219,30 @@ export const useChatStore = defineStore('chat', () => {
     else messages.value[idx] = m
   }
 
-  /** Drop the conversation (used by the "New chat" action). */
+  /** Start a fresh conversation without touching the previous thread.
+   *
+   * The prior thread stays on disk and reappears in the session list; deleting
+   * one is an explicit action (`deleteThread`). */
   async function clear() {
     if (streaming.value) await abort()
-    const ws = workspace.active
-    if (ws) await gateway.deleteChatSession(ws.path)
     messages.value = []
     sessionId.value = ''
+    lastUsage.value = null
+    await refreshThreads()
+  }
+
+  /** Delete one persisted thread (explicit user action). */
+  async function deleteThread(id: string) {
+    const ws = workspace.active
+    if (!ws) return
+    if (streaming.value && sessionId.value === id) await abort()
+    await gateway.deleteChatSession(ws.path, id)
+    if (sessionId.value === id) {
+      messages.value = []
+      sessionId.value = ''
+      lastUsage.value = null
+    }
+    await refreshThreads()
   }
 
   /** Attach a file reference to the conversation without sending a turn
@@ -190,6 +261,8 @@ export const useChatStore = defineStore('chat', () => {
     streaming,
     busy,
     sessionId,
+    threads,
+    lastUsage,
     files,
     filesLoading,
     addons,
@@ -198,7 +271,10 @@ export const useChatStore = defineStore('chat', () => {
     send,
     abort,
     clear,
+    deleteThread,
     restore,
+    switchTo,
+    refreshThreads,
     attach,
     loadFiles,
     loadAddons,

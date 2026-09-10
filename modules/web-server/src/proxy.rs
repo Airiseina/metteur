@@ -8,18 +8,18 @@ use metteur_proto::proto::{
     CancelRequest, ChatEvent, ChatSessionList, CloseWorkspaceRequest, CompileDslRequest, Config,
     ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest, DecompileBlueprintRequest,
     DecompileDslResponse, DeleteChatSessionRequest, DeleteFunctionRequest, Empty,
-    ExecuteBlueprintRequest, ExecutionEvent, ExecutionList, FileHistory, FileInfo, FileList,
-    FunctionList, GetChatSessionRequest, GetChatSessionResponse, GetConfigRequest,
-    GetExecutionUsageRequest, GetFileHistoryRequest, InstallAddonRequest, InterruptRequest,
-    ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest,
-    ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest,
-    LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest,
-    PauseRequest, ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest,
-    ResumeRequest, RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest,
-    SaveFunctionRequest, SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest,
-    SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest,
-    UsageSummary, WatchEvent, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList,
-    WriteFileRequest,
+    ExecuteBlueprintRequest, ExecutionEvent, ExecutionList, ExecutionTree, FileHistory, FileInfo,
+    FileList, FunctionList, GetChatSessionRequest, GetChatSessionResponse, GetConfigRequest,
+    GetExecutionTreeRequest, GetExecutionUsageRequest, GetFileHistoryRequest, InstallAddonRequest,
+    InterruptRequest, ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest,
+    ListExecutionsRequest, ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest,
+    LoadBlueprintRequest, LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList,
+    OpenWorkspaceRequest, PauseRequest, ReadFileRequest, ReadFileResponse, RemoveFileRequest,
+    RenameFileRequest, ResumeRequest, RevealInExplorerRequest, RollbackRequest,
+    SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse, SendChatRequest,
+    SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest,
+    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest,
+    WorkspaceInfo, WorkspaceList, WriteFileRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -34,7 +34,9 @@ pub struct ForwardService {
 impl ForwardService {
     /// Creates a proxy backed by a connected daemon client.
     pub fn new(client: DaemonClient<Channel>) -> Self {
-        Self { client }
+        Self {
+            client,
+        }
     }
 }
 
@@ -168,10 +170,7 @@ impl Daemon for ForwardService {
         self.client.clone().list_snapshots(request).await
     }
 
-    async fn rollback(
-        &self,
-        request: Request<RollbackRequest>,
-    ) -> Result<Response<Empty>, Status> {
+    async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<Empty>, Status> {
         self.client.clone().rollback(request).await
     }
 
@@ -188,6 +187,13 @@ impl Daemon for ForwardService {
         request: Request<ListExecutionsRequest>,
     ) -> Result<Response<ExecutionList>, Status> {
         self.client.clone().list_executions(request).await
+    }
+
+    async fn get_execution_tree(
+        &self,
+        request: Request<GetExecutionTreeRequest>,
+    ) -> Result<Response<ExecutionTree>, Status> {
+        self.client.clone().get_execution_tree(request).await
     }
 
     type ContinueExecutionStream = ReceiverStream<Result<ExecutionEvent, Status>>;
@@ -423,8 +429,8 @@ impl Daemon for ForwardService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metteur_proto::proto::daemon_server::DaemonServer;
     use metteur_proto::proto::ChatSessionInfo;
+    use metteur_proto::proto::daemon_server::DaemonServer;
     use std::convert::Infallible;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::transport::Server;
@@ -572,6 +578,12 @@ mod tests {
             _: Request<ListExecutionsRequest>,
         ) -> Result<Response<ExecutionList>, Status> {
             Err(Status::unimplemented("list_executions"))
+        }
+        async fn get_execution_tree(
+            &self,
+            _: Request<GetExecutionTreeRequest>,
+        ) -> Result<Response<ExecutionTree>, Status> {
+            Err(Status::unimplemented("get_execution_tree"))
         }
         async fn continue_execution(
             &self,
@@ -767,8 +779,11 @@ mod tests {
     /// Serves `svc` on an ephemeral port and returns the connected client.
     async fn serve_client<S>(svc: S) -> DaemonClient<Channel>
     where
-        S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>, Error = Infallible>
-            + tonic::server::NamedService
+        S: Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<tonic::body::Body>,
+                Error = Infallible,
+            > + tonic::server::NamedService
             + Clone
             + Send
             + Sync
@@ -800,11 +815,8 @@ mod tests {
         assert_eq!(list.workspaces[0].path, "C:/demo");
 
         // Streaming passthrough.
-        let mut stream = proxy
-            .execute_blueprint(ExecuteBlueprintRequest::default())
-            .await
-            .unwrap()
-            .into_inner();
+        let mut stream =
+            proxy.execute_blueprint(ExecuteBlueprintRequest::default()).await.unwrap().into_inner();
         let mut kinds = Vec::new();
         while let Some(event) = stream.message().await.unwrap() {
             kinds.push(event.kind);

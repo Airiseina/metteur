@@ -6,9 +6,9 @@
 //! [`SharedError::Invalid`](crate::error::SharedError::Invalid) with a
 //! line/column hint taken from the Pest error span.
 
+use pest::Parser;
 use pest::error::LineColLocation;
 use pest::iterators::Pair;
-use pest::Parser;
 use pest_derive::Parser as DslParserMacro;
 
 use crate::error::{SharedError, SharedResult};
@@ -57,10 +57,7 @@ pub(crate) fn parse(source: &str) -> SharedResult<Vec<Statement>> {
             LineColLocation::Pos((l, c)) => (l, c),
             LineColLocation::Span(s, _) => (s.0, s.1),
         };
-        SharedError::Invalid(format!(
-            "{} (line {line}, column {col})",
-            e.variant.message()
-        ))
+        SharedError::Invalid(format!("{} (line {line}, column {col})", e.variant.message()))
     })?;
     let document = pairs.next().expect("document is the single root rule");
     document
@@ -82,7 +79,9 @@ fn statement(pair: Pair<'_, Rule>) -> SharedResult<Statement> {
                 .unwrap_or_default()
                 .trim_matches('"')
                 .to_string();
-            Ok(Statement::Header { name })
+            Ok(Statement::Header {
+                name,
+            })
         }
         Rule::node | Rule::entry_node => {
             let is_entry = pair.as_rule() == Rule::entry_node;
@@ -94,42 +93,48 @@ fn statement(pair: Pair<'_, Rule>) -> SharedResult<Statement> {
                 match child.as_rule() {
                     Rule::alias => alias = child.as_str().to_string(),
                     Rule::kind => kind = child.as_str().to_string(),
-                    Rule::paren_args => for param in child.into_inner().flat_map(|nested| {
-                        // `param_list` wraps params one level when present.
-                        if nested.as_rule() == Rule::param_list {
-                            nested.into_inner().collect::<Vec<_>>()
-                        } else {
-                            vec![nested]
-                        }
-                    }) {
-                        let mut pin = String::new();
-                        for part in param.into_inner() {
-                            match part.as_rule() {
-                                Rule::pin_name => pin = part.as_str().to_string(),
-                                Rule::literal => {
-                                    constants.push((pin.clone(), parse_literal(part.as_str())?));
+                    Rule::paren_args => {
+                        for param in child.into_inner().flat_map(|nested| {
+                            // `param_list` wraps params one level when present.
+                            if nested.as_rule() == Rule::param_list {
+                                nested.into_inner().collect::<Vec<_>>()
+                            } else {
+                                vec![nested]
+                            }
+                        }) {
+                            let mut pin = String::new();
+                            for part in param.into_inner() {
+                                match part.as_rule() {
+                                    Rule::pin_name => pin = part.as_str().to_string(),
+                                    Rule::literal => {
+                                        constants
+                                            .push((pin.clone(), parse_literal(part.as_str())?));
+                                    }
+                                    Rule::data_ref => {
+                                        refs.push((pin.clone(), part.as_str().to_string()));
+                                    }
+                                    _ => {}
                                 }
-                                Rule::data_ref => {
-                                    refs.push((pin.clone(), part.as_str().to_string()));
-                                }
-                                _ => {}
                             }
                         }
-                    },
+                    }
                     // `{ key: literal, ... }` block — each init_item is one keyed
                     // constant; values land in node data under the bare key.
-                    Rule::init_block => for item in child.into_inner() {
-                        let mut pin = String::new();
-                        for part in item.into_inner() {
-                            match part.as_rule() {
-                                Rule::pin_name => pin = part.as_str().to_string(),
-                                Rule::literal => {
-                                    constants.push((pin.clone(), parse_literal(part.as_str())?));
+                    Rule::init_block => {
+                        for item in child.into_inner() {
+                            let mut pin = String::new();
+                            for part in item.into_inner() {
+                                match part.as_rule() {
+                                    Rule::pin_name => pin = part.as_str().to_string(),
+                                    Rule::literal => {
+                                        constants
+                                            .push((pin.clone(), parse_literal(part.as_str())?));
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -151,11 +156,7 @@ fn statement(pair: Pair<'_, Rule>) -> SharedResult<Statement> {
                     Some(children[1].as_str().to_string()),
                     children[2].as_str().to_string(),
                 ),
-                2 => (
-                    children[0].as_str().to_string(),
-                    None,
-                    children[1].as_str().to_string(),
-                ),
+                2 => (children[0].as_str().to_string(), None, children[1].as_str().to_string()),
                 _ => {
                     return Err(SharedError::Invalid(format!(
                         "malformed exec edge (line {line}, column {col})"

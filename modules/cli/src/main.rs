@@ -114,10 +114,7 @@ async fn main() -> anyhow::Result<()> {
 /// then waits until its gRPC endpoint is ready.
 async fn ensure_daemon(cli: &Cli) -> anyhow::Result<()> {
     let listen_addr = daemon_spawn::listen_from_addr(&cli.addr)?;
-    let wake_path = cli
-        .daemon_wake_path
-        .clone()
-        .unwrap_or_else(daemon_spawn::default_wake_path);
+    let wake_path = cli.daemon_wake_path.clone().unwrap_or_else(daemon_spawn::default_wake_path);
 
     // A daemon registered to auto-start may already be running quietly; waking
     // it alone avoids launching a duplicate.

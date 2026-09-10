@@ -94,25 +94,49 @@ impl TransactionLog {
         self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Returns the current log length, usable as a rollback mark.
+    ///
+    /// A later [`Self::rollback_after`] with this value undoes exactly the
+    /// mutations recorded after the mark was taken.
+    pub fn mark(&self) -> usize {
+        self.lock().len()
+    }
+
     /// Reverses all recorded mutations, restoring the pre-execution state.
     ///
     /// File writes restore the previous content (or delete the file if it did
     /// not exist); file deletes restore the deleted file.
     pub fn rollback(&self) -> std::io::Result<()> {
-        for entry in self.lock().iter().rev() {
+        self.rollback_after(0).map(|_| ())
+    }
+
+    /// Reverses the mutations recorded after `mark`, returning their count.
+    ///
+    /// Entries are replayed in reverse order, so multiple writes to the same
+    /// file converge on the earliest before-image. This also holds for the
+    /// duplicated entries a re-executed node records after a crash/resume.
+    /// Shell side effects (e.g. `ExecuteCommand`) are not captured by the WAL
+    /// and therefore cannot be undone.
+    pub fn rollback_after(&self, mark: usize) -> std::io::Result<usize> {
+        let entries = self.lock();
+        let mut undone = 0;
+        for entry in entries.iter().skip(mark).rev() {
             match entry {
                 TransactionEntry::FileWrite {
                     path,
                     old_content,
                     ..
-                } => match old_content {
-                    Some(content) => std::fs::write(path, content)?,
-                    None => {
-                        if path.exists() {
-                            std::fs::remove_file(path)?;
+                } => {
+                    match old_content {
+                        Some(content) => std::fs::write(path, content)?,
+                        None => {
+                            if path.exists() {
+                                std::fs::remove_file(path)?;
+                            }
                         }
                     }
-                },
+                    undone += 1;
+                }
                 TransactionEntry::FileDelete {
                     path,
                     content,
@@ -121,13 +145,14 @@ impl TransactionLog {
                         std::fs::create_dir_all(parent)?;
                     }
                     std::fs::write(path, content)?;
+                    undone += 1;
                 }
                 TransactionEntry::ToolCall {
                     ..
                 } => {}
             }
         }
-        Ok(())
+        Ok(undone)
     }
 }
 
@@ -162,5 +187,60 @@ mod tests {
 
         log.rollback().unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn rollback_after_undoes_only_entries_past_the_mark() {
+        let dir = std::env::temp_dir().join(format!("metteur-txn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("kept.txt");
+        let reverted = dir.join("reverted.txt");
+        std::fs::write(&kept, "v1").unwrap();
+
+        let log = TransactionLog::new();
+        log.record_file_write(kept.clone(), Some(b"v1".to_vec()), b"v2".to_vec());
+        std::fs::write(&kept, "v2").unwrap();
+
+        let mark = log.mark();
+        log.record_file_write(reverted.clone(), None, b"tmp".to_vec());
+        std::fs::write(&reverted, "tmp").unwrap();
+
+        let undone = log.rollback_after(mark).unwrap();
+        assert_eq!(undone, 1);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "v2");
+        assert!(!reverted.exists());
+    }
+
+    #[test]
+    fn rollback_after_zero_matches_full_rollback() {
+        let dir = std::env::temp_dir().join(format!("metteur-txn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "v1").unwrap();
+
+        let log = TransactionLog::new();
+        log.record_file_write(path.clone(), Some(b"v1".to_vec()), b"v2".to_vec());
+        std::fs::write(&path, "v2").unwrap();
+
+        log.rollback_after(0).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1");
+    }
+
+    #[test]
+    fn repeated_writes_converge_on_the_earliest_before_image() {
+        let dir = std::env::temp_dir().join(format!("metteur-txn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "v1").unwrap();
+
+        let log = TransactionLog::new();
+        // Simulates a node executing twice (e.g. after a crash/resume) without
+        // an intermediate rollback: both writes are recorded.
+        log.record_file_write(path.clone(), Some(b"v1".to_vec()), b"v2".to_vec());
+        log.record_file_write(path.clone(), Some(b"v2".to_vec()), b"v3".to_vec());
+        std::fs::write(&path, "v3").unwrap();
+
+        log.rollback().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1");
     }
 }

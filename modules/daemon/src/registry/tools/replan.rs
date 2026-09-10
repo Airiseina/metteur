@@ -50,16 +50,12 @@ impl Tool for ReplanBlueprint {
 
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {
         let a = Args::new(args);
-        let summary = a
-            .string("summary", 0)
-            .ok_or_else(|| crate::error::DaemonError::Execution(
-                "ReplanBlueprint requires a summary".to_string()
-            ))?;
-        let edits = a
-            .get("edits", 1)
-            .ok_or_else(|| crate::error::DaemonError::Execution(
-                "ReplanBlueprint requires edits".to_string()
-            ))?;
+        let summary = a.string("summary", 0).ok_or_else(|| {
+            crate::error::DaemonError::Execution("ReplanBlueprint requires a summary".to_string())
+        })?;
+        let edits = a.get("edits", 1).ok_or_else(|| {
+            crate::error::DaemonError::Execution("ReplanBlueprint requires edits".to_string())
+        })?;
         let edits_json = match &edits {
             Value::Json(j) => j.clone(),
             other => serde_json::json!([other]),

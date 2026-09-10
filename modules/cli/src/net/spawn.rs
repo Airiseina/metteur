@@ -15,7 +15,11 @@ use std::{env, io};
 use anyhow::Context;
 
 /// The file name of the daemon binary, platform-dependent.
-const DAEMON_NAME: &str = if cfg!(windows) { "metteurd.exe" } else { "metteurd" };
+const DAEMON_NAME: &str = if cfg!(windows) {
+    "metteurd.exe"
+} else {
+    "metteurd"
+};
 
 /// Everything needed to launch a detached `metteurd` process.
 #[derive(Debug, Clone)]
@@ -119,9 +123,7 @@ pub fn build_daemon_command(spawn: &DaemonSpawn) -> Command {
 /// process running, so the CLI exit never kills it.
 pub fn spawn_daemon(spawn: &DaemonSpawn) -> anyhow::Result<()> {
     let mut cmd = build_daemon_command(spawn);
-    cmd.spawn()
-        .map(|_| ())
-        .context("failed to spawn daemon")
+    cmd.spawn().map(|_| ()).context("failed to spawn daemon")
 }
 
 /// Polls the given address until it accepts TCP connections or `timeout` lapses.
@@ -215,17 +217,19 @@ pub fn listen_from_addr(addr: &str) -> anyhow::Result<SocketAddr> {
         None => (host_port, "50051"),
     };
     let host = host.trim_matches(['[', ']']);
-    let host = if host.is_empty() { "127.0.0.1" } else { host };
+    let host = if host.is_empty() {
+        "127.0.0.1"
+    } else {
+        host
+    };
     let address = if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
     };
-    address
-        .parse()
-        .with_context(|| {
-            format!("cannot auto-start daemon: {address} is not an IP address (start it manually)")
-        })
+    address.parse().with_context(|| {
+        format!("cannot auto-start daemon: {address} is not an IP address (start it manually)")
+    })
 }
 
 /// Returns the absolute path of an executable found on `PATH`, if any.
@@ -311,7 +315,11 @@ mod tests {
     fn locate_prefers_explicit_binary() {
         let dir = env::temp_dir().join(format!("metteur-spawn-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let binary = if cfg!(windows) { dir.join("metteurd.exe") } else { dir.join("metteurd") };
+        let binary = if cfg!(windows) {
+            dir.join("metteurd.exe")
+        } else {
+            dir.join("metteurd")
+        };
         std::fs::write(&binary, b"#!/bin/sh").unwrap();
         assert_eq!(locate_daemon(Some(&binary)).unwrap(), binary);
         std::fs::remove_dir_all(&dir).unwrap();

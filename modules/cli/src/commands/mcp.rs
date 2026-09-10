@@ -1,11 +1,11 @@
 //! MCP server listing command handler.
 
-use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::Empty;
+use metteur_proto::proto::daemon_client::DaemonClient;
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Handles `mcp`: lists registered MCP servers.
 pub(crate) async fn handle_mcp(client: &mut DaemonClient<Channel>) -> anyhow::Result<Outcome> {

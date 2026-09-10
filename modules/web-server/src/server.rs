@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
+use axum::Router;
 use axum::body::Body as AxumBody;
 use axum::extract::Json;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use axum::Router;
 use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::daemon_server::DaemonServer;
 use std::convert::Infallible;
@@ -29,8 +29,8 @@ use crate::{Cli, ForwardService};
 /// Missing assets return a real 404 instead of HTML, so a stale hashed
 /// stylesheet (e.g. after a rebuild) never surfaces as a `text/html` CSS.
 pub fn build_router(client: DaemonClient<Channel>, static_dir: PathBuf) -> Router {
-    let grpc_web = tonic_web::GrpcWebLayer::new()
-        .layer(DaemonServer::new(ForwardService::new(client)));
+    let grpc_web =
+        tonic_web::GrpcWebLayer::new().layer(DaemonServer::new(ForwardService::new(client)));
     let static_dir = Arc::new(static_dir);
     Router::new()
         .route_service(
@@ -38,9 +38,7 @@ pub fn build_router(client: DaemonClient<Channel>, static_dir: PathBuf) -> Route
             axum::routing::any_service(GrpcWebAdapter(grpc_web)),
         )
         .route("/api/pick-directory", axum::routing::post(pick_directory))
-        .fallback(move |uri: Uri| async move {
-            serve_static(static_dir.clone(), uri).await
-        })
+        .fallback(move |uri: Uri| async move { serve_static(static_dir.clone(), uri).await })
 }
 
 /// Serves a real file when present; otherwise, for extension-less paths only,
@@ -121,13 +119,13 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         if !output.status.success() {
             return Err("folder picker failed".to_string());
         }
-        let path = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let path = if path.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(path) };
+        let path =
+            String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("").trim().to_string();
+        let path = if path.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(path)
+        };
         Ok(serde_json::json!({ "path": path }))
     }
     #[cfg(not(windows))]
@@ -143,7 +141,11 @@ struct GrpcWebAdapter<S>(S);
 
 impl<S> Service<axum::http::Request<AxumBody>> for GrpcWebAdapter<S>
 where
-    S: Service<axum::http::Request<AxumBody>, Response = axum::http::Response<tonic::body::Body>, Error = Infallible>,
+    S: Service<
+            axum::http::Request<AxumBody>,
+            Response = axum::http::Response<tonic::body::Body>,
+            Error = Infallible,
+        >,
     <S as Service<axum::http::Request<AxumBody>>>::Future: Send + 'static,
 {
     type Response = axum::http::Response<AxumBody>;
@@ -187,20 +189,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("metteur-web-dist-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), "<html>metteur</html>").unwrap();
-        let client = tonic::transport::Channel::from_shared("http://127.0.0.1:1")
-            .unwrap()
-            .connect_lazy();
+        let client =
+            tonic::transport::Channel::from_shared("http://127.0.0.1:1").unwrap().connect_lazy();
         let app = build_router(DaemonClient::new(client), dir.clone());
 
         // GET hits a POST-only route, proving it is mounted (and not swallowed
         // by the SPA fallback).
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/pick-directory")
-                    .body(AxumBody::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/api/pick-directory").body(AxumBody::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), http::StatusCode::METHOD_NOT_ALLOWED);
@@ -214,20 +210,14 @@ mod tests {
         std::fs::write(dir.join("index.html"), "<html>metteur</html>").unwrap();
         std::fs::write(dir.join("asset.js"), "console.log(1)").unwrap();
 
-        let client = tonic::transport::Channel::from_shared("http://127.0.0.1:1")
-            .unwrap()
-            .connect_lazy();
+        let client =
+            tonic::transport::Channel::from_shared("http://127.0.0.1:1").unwrap().connect_lazy();
         let app = build_router(DaemonClient::new(client), dir.clone());
 
         // A real asset is served as-is.
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/asset.js")
-                    .body(AxumBody::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/asset.js").body(AxumBody::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), http::StatusCode::OK);
@@ -238,12 +228,7 @@ mod tests {
         let app = app.clone();
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/chat")
-                    .body(AxumBody::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/chat").body(AxumBody::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), http::StatusCode::OK);
@@ -254,10 +239,7 @@ mod tests {
         // an HTML page — browsers must never load CSS as `text/html`.
         let response = app
             .oneshot(
-                Request::builder()
-                    .uri("/assets/stale-abc123.css")
-                    .body(AxumBody::empty())
-                    .unwrap(),
+                Request::builder().uri("/assets/stale-abc123.css").body(AxumBody::empty()).unwrap(),
             )
             .await
             .unwrap();

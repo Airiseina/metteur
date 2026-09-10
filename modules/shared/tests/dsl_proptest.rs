@@ -10,6 +10,7 @@ use metteur_shared::model::blueprint::{Blueprint, DataType, Edge, Node, NodeType
 use proptest::collection::vec as vec_strategy;
 use proptest::prelude::*;
 use proptest::sample::select;
+use proptest::test_runner::FileFailurePersistence;
 use uuid::Uuid;
 
 /// Minimal pin layout for the node kinds the generator knows about.
@@ -32,9 +33,19 @@ fn pins_of(kind: &str) -> Vec<(String, PinType)> {
             pins.push(("A".into(), PinType::DataOutput));
             pins.push(("B".into(), PinType::DataOutput));
         }
-        "Add" | "Subtract" | "Multiply" | "Divide" | "Validator" | "Judge" => {
+        "Add" | "Subtract" | "Multiply" | "Divide" => {
             pins.push(("A".into(), PinType::DataInput));
             pins.push(("B".into(), PinType::DataInput));
+        }
+        // Pin names must match the DSL templates, otherwise a constant cannot
+        // survive the round trip (the template defines the canonical layout).
+        "Validator" => {
+            pins.push(("Actual".into(), PinType::DataInput));
+            pins.push(("Expected".into(), PinType::DataInput));
+        }
+        "Judge" => {
+            pins.push(("Score".into(), PinType::DataInput));
+            pins.push(("Result".into(), PinType::DataInput));
         }
         _ => {}
     }
@@ -46,7 +57,15 @@ fn pins_of(kind: &str) -> Vec<(String, PinType)> {
 fn any_blueprint() -> impl Strategy<Value = Blueprint> {
     let kinds = vec_strategy(
         select(&[
-            "Add", "Subtract", "Multiply", "Divide", "Validator", "Judge", "Tool", "Abstract", "End",
+            "Add",
+            "Subtract",
+            "Multiply",
+            "Divide",
+            "Validator",
+            "Judge",
+            "Tool",
+            "Abstract",
+            "End",
         ]),
         1..=5,
     );
@@ -62,10 +81,13 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
             }
             let pins: Vec<Pin> = pins_of(k)
                 .into_iter()
-                .map(|(name, pin_type)| Pin { id: Uuid::new_v4(),
+                .map(|(name, pin_type)| Pin {
+                    id: Uuid::new_v4(),
                     name,
                     pin_type,
-                    data_type: DataType::Json, ..Default::default() })
+                    data_type: DataType::Json,
+                    ..Default::default()
+                })
                 .collect();
             nodes.push(Node {
                 id: node_id,
@@ -79,16 +101,10 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
         // Exec chain edges node i -> i+1 (first exec output -> first exec input).
         let mut edges = Vec::new();
         for i in 0..nodes.len() - 1 {
-            let src_pin = nodes[i]
-                .pins
-                .iter()
-                .find(|p| p.pin_type == PinType::ExecOutput)
-                .map(|p| p.id);
-            let dst_pin = nodes[i + 1]
-                .pins
-                .iter()
-                .find(|p| p.pin_type == PinType::ExecInput)
-                .map(|p| p.id);
+            let src_pin =
+                nodes[i].pins.iter().find(|p| p.pin_type == PinType::ExecOutput).map(|p| p.id);
+            let dst_pin =
+                nodes[i + 1].pins.iter().find(|p| p.pin_type == PinType::ExecInput).map(|p| p.id);
             if let (Some(source_pin), Some(target_pin)) = (src_pin, dst_pin) {
                 edges.push(Edge {
                     id: Uuid::new_v4(),
@@ -128,6 +144,17 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
 }
 
 proptest! {
+    // Pin the regression file next to this test: the default SourceParallel
+    // persistence cannot resolve a crate root from an integration test and
+    // warns on every run.
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/dsl_proptest.proptest-regressions",
+        )))),
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn round_trip_preserves_structure(input in any_blueprint()) {
         let text = decompile(&input);
@@ -137,8 +164,17 @@ proptest! {
 
         for (a, b) in input.nodes.iter().zip(recompiled.nodes.iter()) {
             for pin in a.pins.iter().filter(|p| p.pin_type == PinType::DataInput) {
-                let before = a.data.get(&pin.name);
-                let after = b.data.get(&pin.name);
+                // Constants live under the pin's semantic key (display name
+                // when the key is absent), which decompile/compile preserve.
+                let key_before = pin.key.as_deref().unwrap_or(&pin.name);
+                let before = a.data.get(key_before);
+                let after = b.pins
+                    .iter()
+                    .find(|p| p.name == pin.name && p.pin_type == PinType::DataInput)
+                    .and_then(|p| {
+                        let key = p.key.as_deref().unwrap_or(&p.name);
+                        b.data.get(key)
+                    });
                 assert_eq!(before, after, "constant on pin {} drifted", pin.name);
             }
         }

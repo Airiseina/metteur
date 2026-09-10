@@ -49,12 +49,16 @@ export function ensureMbpLanguage(monaco: Monaco): void {
     insertText,
     detail,
   })
-  const kindEntries = Object.keys(NODE_PRESETS).map((kind) => ({
-    kind: Class,
-    label: kind,
-    insertText: `${kind}()`,
-    detail: 'Add a node of this kind',
-  }))
+  // Tool presets (SubAgentTool, ...) are canvas aliases for kind `Tool`;
+  // only real daemon kinds complete in DSL headers.
+  const kindEntries = Object.keys(NODE_PRESETS)
+    .filter((kind) => !NODE_PRESETS[kind].kind)
+    .map((kind) => ({
+      kind: Class,
+      label: kind,
+      insertText: `${kind}()`,
+      detail: 'Add a node of this kind',
+    }))
   monaco.languages.registerCompletionItemProvider('mbp', {
     triggerCharacters: ['b', 'e', 'a', 'B', 'E', 'A'],
     provideCompletionItems(model, position) {

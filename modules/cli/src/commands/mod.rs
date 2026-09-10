@@ -11,6 +11,7 @@ pub mod approve;
 pub mod assets;
 pub mod audit;
 pub mod blueprint;
+pub mod chat;
 pub mod config;
 pub mod mcp;
 pub mod version;
@@ -56,6 +57,9 @@ pub enum Command {
         run_id: String,
     },
     Runs,
+    Tree {
+        run_id: String,
+    },
     Cancel,
     Pause,
     Resume,
@@ -132,6 +136,15 @@ pub enum Command {
     BpDecompile {
         id: String,
     },
+    ChatSend {
+        text: String,
+        session_id: Option<String>,
+    },
+    ChatAbort,
+    ChatSessions,
+    ChatClear {
+        session_id: Option<String>,
+    },
 }
 
 /// Parses the `func` command family: save/list/load/delete functions.
@@ -174,11 +187,9 @@ fn parse_func(args: &[&str]) -> Result<Command, String> {
                 workspace: w,
             })
         }
-        _ => Err(
-            "usage: func save <name> <file.json> [ws|global] | func list [ws|global] | \
+        _ => Err("usage: func save <name> <file.json> [ws|global] | func list [ws|global] | \
              func load <name> [ws|global] | func rm <name> [ws|global]"
-                .to_string(),
-        ),
+            .to_string()),
     }
 }
 
@@ -201,12 +212,47 @@ fn parse_bp(args: &[&str]) -> Result<Command, String> {
     }
 }
 
+/// Parses the `chat` command family: send/abort/sessions/clear.
+fn parse_chat(args: &[&str]) -> Result<Command, String> {
+    const USAGE: &str = "usage: chat send <text...> [session <id>] | chat abort | \
+        chat sessions | chat clear [session <id>]";
+    match args {
+        ["send", rest @ ..] if !rest.is_empty() => {
+            let (text_parts, session_id) = match rest.iter().position(|&w| w == "session") {
+                Some(i) => {
+                    let id = rest.get(i + 1).ok_or_else(|| USAGE.to_string())?;
+                    (rest[..i].join(" "), Some((*id).to_string()))
+                }
+                None => (rest.join(" "), None),
+            };
+            if text_parts.is_empty() {
+                return Err(USAGE.to_string());
+            }
+            Ok(Command::ChatSend {
+                text: text_parts,
+                session_id,
+            })
+        }
+        ["abort"] => Ok(Command::ChatAbort),
+        ["sessions"] | ["list"] | ["ls"] => Ok(Command::ChatSessions),
+        ["clear"] => Ok(Command::ChatClear {
+            session_id: None,
+        }),
+        ["clear", "session", id] => Ok(Command::ChatClear {
+            session_id: Some((*id).to_string()),
+        }),
+        _ => Err(USAGE.to_string()),
+    }
+}
+
 /// Result of dispatching one command.
 pub enum Outcome {
     /// Text to show before the next prompt.
     Printed(String),
     /// A live execution stream started by `exec` or `cont`.
     Started(Box<StreamStart>),
+    /// A live chat stream started by `chat send`.
+    StartedChat(Box<ChatStart>),
     /// Leave the REPL.
     Exit,
 }
@@ -218,6 +264,14 @@ pub struct StreamStart {
     /// Server-assigned run id when it could be discovered.
     pub run_id: Option<String>,
     /// Short label shown by `status` while the run is active.
+    pub label: String,
+}
+
+/// A freshly started chat stream handed to the REPL.
+pub struct ChatStart {
+    /// Live server-side chat event stream.
+    pub stream: tonic::codec::Streaming<metteur_proto::proto::ChatEvent>,
+    /// Short label shown by `status` while the chat is active.
     pub label: String,
 }
 
@@ -233,6 +287,7 @@ Metteur REPL commands:
   exec <blueprint_id>                   Execute a blueprint (streams events).
   cont <run_id>                         Resume a suspended run (streams events).
   runs                                  List executions of the workspace.
+  tree <run_id>                       Show the agent execution tree of a run.
   cancel | pause | resume               Control the running execution.
   say <normal|urgent|emergency> <text>  Send an interrupt message.
   approve <request_id> <decision> [workspace|global]
@@ -260,6 +315,10 @@ Metteur REPL commands:
   bp compile <file.mbp> [save [as <id>]]
                                         Compile DSL to JSON (and save).
   bp decompile <blueprint_id>          Render a stored blueprint as DSL.
+  chat send <text...> [session <id>]    Send a chat message (streams reply).
+  chat abort                          Abort the running chat turn.
+  chat sessions                       List chat threads of the workspace.
+  chat clear [session <id>]            Delete a chat thread (default: latest).
 Decisions: AllowOnce|AllowRun|AllowWorkspace|AllowGlobal|DenyOnce|DenyRun|\
 DenyWorkspace|DenyGlobal (shorthand: allow|deny plus a scope).";
 
@@ -295,6 +354,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
             run_id: p[0].clone(),
         }),
         "runs" => exact(args, "runs").map(|()| Command::Runs),
+        "tree" => one(args, "tree <run_id>").map(|p| Command::Tree {
+            run_id: p[0].clone(),
+        }),
         "cancel" => exact(args, "cancel").map(|()| Command::Cancel),
         "pause" => exact(args, "pause").map(|()| Command::Pause),
         "resume" => exact(args, "resume").map(|()| Command::Resume),
@@ -323,6 +385,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
         },
         "tools" => exact(args, "tools").map(|()| Command::Tools),
         "nodes" => exact(args, "nodes").map(|()| Command::Nodes),
+        "chat" => parse_chat(args),
         "snap" => parse_snap(args),
         "snaps" => exact(args, "snaps").map(|()| Command::Snaps),
         "rollback" => one(args, "rollback <snapshot_id|alias>").map(|p| Command::Rollback {
@@ -563,6 +626,9 @@ pub async fn dispatch(
             run_id,
         } => blueprint::handle_cont(client, state, run_id).await,
         Command::Runs => blueprint::handle_runs(client, state).await,
+        Command::Tree {
+            run_id,
+        } => blueprint::handle_tree(client, state, run_id).await,
         Command::Cancel => blueprint::handle_cancel(client, state).await,
         Command::Pause => blueprint::handle_pause(client, state).await,
         Command::Resume => blueprint::handle_resume(client, state).await,
@@ -638,6 +704,15 @@ pub async fn dispatch(
         Command::BpDecompile {
             id,
         } => blueprint::handle_bp_decompile(client, state, id).await,
+        Command::ChatSend {
+            text,
+            session_id,
+        } => chat::handle_send(client, state, text, session_id).await,
+        Command::ChatAbort => chat::handle_abort(client, state).await,
+        Command::ChatSessions => chat::handle_sessions(client, state).await,
+        Command::ChatClear {
+            session_id,
+        } => chat::handle_clear(client, state, session_id).await,
     }
 }
 

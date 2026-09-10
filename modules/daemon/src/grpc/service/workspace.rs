@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use metteur_shared::model::function::FunctionSource;
 use tonic::{Request, Response, Status};
 
+use super::super::acl::subject_from_request;
 use super::super::proto::{
     CloseWorkspaceRequest, Empty, OpenWorkspaceRequest, WorkspaceInfo, WorkspaceList,
 };
-use super::super::acl::subject_from_request;
 use super::*;
 
 impl DaemonService {
@@ -19,9 +19,13 @@ impl DaemonService {
         let subject = subject_from_request(&request).unwrap_or_else(|| "local".to_string());
         let req = request.into_inner();
         let ws = self.state.workspaces.open(&PathBuf::from(req.path)).await.map_err(to_status)?;
-        // Register this workspace's function library into the shared registry.
-        if let Err(err) = self.state.registry.load_functions(&ws.db, FunctionSource::Workspace) {
-            tracing::warn!("failed to load workspace functions: {err}");
+        // Register this workspace's function library into the shared registry,
+        // remembering the names so only this workspace's set is retired later.
+        match self.state.registry.load_functions(&ws.db, FunctionSource::Workspace) {
+            Ok(names) => {
+                self.state.ws_functions.write().await.insert(ws.root().to_path_buf(), names);
+            }
+            Err(err) => tracing::warn!("failed to load workspace functions: {err}"),
         }
         record_global_audit(
             &self.state,
@@ -45,18 +49,44 @@ impl DaemonService {
     ) -> Result<Response<Empty>, Status> {
         let subject = subject_from_request(&request).unwrap_or_else(|| "local".to_string());
         let req = request.into_inner();
-        self.state.workspaces.close(&PathBuf::from(req.path)).await.map_err(to_status)?;
-        // Retire workspace-scoped functions from the shared registry.
-        let names: Vec<String> = self
+        // Resolve the workspace first: its `root()` is the normalized key used
+        // when its functions were registered.
+        let root = self
             .state
-            .registry
-            .functions()
-            .into_iter()
-            .filter(|f| f.source == FunctionSource::Workspace)
-            .map(|f| f.name)
-            .collect();
+            .workspaces
+            .get(&PathBuf::from(&req.path))
+            .await
+            .map(|ws| ws.root().to_path_buf())
+            .ok_or_else(|| Status::not_found("workspace is not open"))?;
+        self.state.workspaces.close(&PathBuf::from(&req.path)).await.map_err(to_status)?;
+        // Retire exactly this workspace's functions. A name another open
+        // workspace also defines is restored from that workspace's database;
+        // otherwise the global definition (if any) takes over, so closing one
+        // workspace never strips another's library.
+        let names = self.state.ws_functions.write().await.remove(&root).unwrap_or_default();
+        let global_db = self.state.global_db.clone();
         for name in names {
             self.state.registry.unregister_function(&name);
+            let mut restored = false;
+            for ws in self.state.workspaces.list().await {
+                if ws.root() == root.as_path() {
+                    continue;
+                }
+                if self
+                    .state
+                    .registry
+                    .restore_function(&ws.db, &name, FunctionSource::Workspace)
+                    .unwrap_or(false)
+                {
+                    restored = true;
+                    break;
+                }
+            }
+            if !restored
+                && let Some(db) = &global_db
+            {
+                let _ = self.state.registry.restore_function(db, &name, FunctionSource::Global);
+            }
         }
         record_global_audit(&self.state, &subject, "workspace.close", serde_json::json!({}));
         self.state.metrics.workspaces_active.store(

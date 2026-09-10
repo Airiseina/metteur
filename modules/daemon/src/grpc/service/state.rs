@@ -8,16 +8,17 @@ use metteur_shared::config::{AclConfig, Config};
 use metteur_shared::llm::{Message, ReasoningEffort, Role};
 use tokio::sync::{RwLock, watch};
 use tonic::Status;
+use uuid::Uuid;
 
-use crate::observability::audit::AuditWriter;
 use crate::error::DaemonError;
+use crate::execution::RunStatus;
 use crate::execution::interrupt::InterruptBus;
 use crate::execution::react::{DEFAULT_MAX_ITERATIONS, ReactOptions};
-use crate::execution::RunStatus;
 use crate::llm::LlmClientFactory;
-use crate::storage::persistence::Db;
+use crate::observability::audit::AuditWriter;
 use crate::registry::Registry;
 use crate::sandbox::approval::ApprovalBroker;
+use crate::storage::persistence::Db;
 use crate::workspace::WorkspaceManager;
 
 use super::super::proto::{AddonInfo, ExecutionEvent};
@@ -48,6 +49,8 @@ pub(crate) struct ChatRun {
     /// `delete_chat_session` so a late finalize cannot resurrect a cleared
     /// session.
     pub(crate) persist: Arc<std::sync::atomic::AtomicBool>,
+    /// The thread this chat turn runs on; lets deletion target the right one.
+    pub(crate) session_id: Option<Uuid>,
 }
 
 /// Shared application state passed to the gRPC service.
@@ -76,6 +79,9 @@ pub struct AppState {
     pub(crate) running: RwLock<HashMap<PathBuf, RunningExecution>>,
     /// Workspaces with a currently running chat session.
     pub(crate) chats: RwLock<HashMap<PathBuf, ChatRun>>,
+    /// Workspace-scoped blueprint function names per workspace root, so only
+    /// the closing workspace's functions are retired from the shared registry.
+    pub(crate) ws_functions: RwLock<HashMap<PathBuf, Vec<String>>>,
     /// Broadcast channel for global config changes.
     pub(crate) config_tx: watch::Sender<Config>,
 }
@@ -103,14 +109,23 @@ impl AppState {
             acl_store,
             running: RwLock::new(HashMap::new()),
             chats: RwLock::new(HashMap::new()),
+            ws_functions: RwLock::new(HashMap::new()),
             config_tx,
         }
     }
 
     /// Attaches the global database for global audit logging.
     pub fn with_global_db(mut self, db: Db) -> Self {
-        self.global_audit = Some(AuditWriter::new(db.clone()));
-        self.global_db = Some(db);
+        self.global_db = Some(db.clone());
+        // Global blueprint functions live only in this database; load them so
+        // they survive a daemon restart and are callable/listed again.
+        if let Err(err) = self
+            .registry
+            .load_functions(&db, metteur_shared::model::function::FunctionSource::Global)
+        {
+            tracing::warn!("failed to load global functions: {err}");
+        }
+        self.global_audit = Some(AuditWriter::new(db));
         self
     }
 
@@ -197,38 +212,36 @@ fn proto_event(event: crate::execution::ExecutionEvent) -> ExecutionEvent {
             detail_json: detail,
         },
         E::ContextUsage {
-        node_id,
-        regions,
-    } => ExecutionEvent {
-        node_id: node_id.to_string(),
-        kind: "context".to_string(),
-        message: String::new(),
-        detail_json: serde_json::to_string(
-            &serde_json::json!({ "regions": regions }),
-        )
-        .unwrap_or_default(),
-    },
-    E::NodeData {
-        node_id,
-        outputs,
-        function,
-    } => ExecutionEvent {
-        node_id: node_id.to_string(),
-        kind: "node_data".to_string(),
-        message: String::new(),
-        detail_json: serde_json::to_string(&serde_json::json!({
-            "outputs": outputs
-                .iter()
-                .map(|(id, value)| (
-                    id.to_string(),
-                    crate::execution::nodes::value_to_json(value),
-                ))
-                .collect::<serde_json::Map<_, _>>(),
-            "function": function.map(|f| f.to_string()),
-        }))
-        .unwrap_or_default(),
-    },
-}
+            node_id,
+            regions,
+        } => ExecutionEvent {
+            node_id: node_id.to_string(),
+            kind: "context".to_string(),
+            message: String::new(),
+            detail_json: serde_json::to_string(&serde_json::json!({ "regions": regions }))
+                .unwrap_or_default(),
+        },
+        E::NodeData {
+            node_id,
+            outputs,
+            function,
+        } => ExecutionEvent {
+            node_id: node_id.to_string(),
+            kind: "node_data".to_string(),
+            message: String::new(),
+            detail_json: serde_json::to_string(&serde_json::json!({
+                "outputs": outputs
+                    .iter()
+                    .map(|(id, value)| (
+                        id.to_string(),
+                        crate::execution::nodes::value_to_json(value),
+                    ))
+                    .collect::<serde_json::Map<_, _>>(),
+                "function": function.map(|f| f.to_string()),
+            }))
+            .unwrap_or_default(),
+        },
+    }
 }
 
 /// Shared setup for streaming execution RPCs.
@@ -255,6 +268,7 @@ pub(crate) async fn spawn_execution(
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     lsp: Option<Arc<crate::integration::lsp::LspManager>>,
     addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
+    version_manager: Option<Arc<crate::storage::versioning::VersionManager>>,
 ) -> Result<tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>, Status> {
     let broker = Arc::new(ApprovalBroker::new());
     {
@@ -302,6 +316,9 @@ pub(crate) async fn spawn_execution(
         interpreter = interpreter.with_addon_fragments(addon_fragments);
         if let Some(db) = global_db {
             interpreter = interpreter.with_global_db(db);
+        }
+        if let Some(version_manager) = version_manager {
+            interpreter = interpreter.with_version_manager(version_manager);
         }
         let result = match resume {
             Some(checkpoint) => {
@@ -379,16 +396,19 @@ pub(crate) fn io_status(err: std::io::Error) -> Status {
 /// directory are rejected. The check is lexical: Windows `canonicalize` output
 /// (with its `\\?\` prefix) is not stable across calls, so containment cannot
 /// rely on it.
-pub(crate) fn resolve_ws_path(root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, Status> {
+pub(crate) fn resolve_ws_path(
+    root: &std::path::Path,
+    relative: &str,
+) -> Result<std::path::PathBuf, Status> {
     use std::path::Component;
     if relative.is_empty() {
         return Ok(root.to_path_buf());
     }
     let rel = std::path::Path::new(relative);
     let invalid = rel.is_absolute()
-        || rel.components().any(|c| {
-            matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
-        })
+        || rel
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
         || rel.starts_with(crate::workspace::METADATA_DIR);
     if invalid {
         return Err(Status::invalid_argument("workspace paths must be relative, outside metadata"));
@@ -401,10 +421,7 @@ pub(crate) fn chat_options(options_json: &str) -> ReactOptions {
     let data: serde_json::Value =
         serde_json::from_str(options_json).unwrap_or(serde_json::Value::Null);
     let string = |key: &str| {
-        data.get(key)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+        data.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string())
     };
     ReactOptions {
         provider: string("provider").unwrap_or_else(|| "openai-chat".to_string()),
@@ -439,8 +456,12 @@ pub(crate) fn history_messages(history_json: &str, out: &mut Vec<Message>) {
         return;
     };
     for entry in entries {
-        let Some(role) = entry.get("role").and_then(|v| v.as_str()) else { continue };
-        let Some(content) = entry.get("content").and_then(|v| v.as_str()) else { continue };
+        let Some(role) = entry.get("role").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(content) = entry.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
         match role {
             "user" => out.push(Message::text(Role::User, content.to_string())),
             "assistant" => out.push(Message::text(Role::Assistant, content.to_string())),

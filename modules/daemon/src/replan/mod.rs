@@ -55,11 +55,13 @@ fn parse_edits(script: &serde_json::Value) -> Result<Vec<EditOp>, String> {
 
 fn parse_edit(edit: &serde_json::Value) -> Result<EditOp, String> {
     let obj = edit.as_object().ok_or_else(|| "each edit must be a JSON object".to_string())?;
-    let op = obj.get("op").and_then(|v| v.as_str()).ok_or_else(|| "edit missing 'op'".to_string())?;
+    let op =
+        obj.get("op").and_then(|v| v.as_str()).ok_or_else(|| "edit missing 'op'".to_string())?;
     let selector = parse_selector(obj.get("match"))?;
     match op {
         "set_data" => {
-            let data = obj.get("data").cloned().ok_or_else(|| "set_data requires 'data'".to_string())?;
+            let data =
+                obj.get("data").cloned().ok_or_else(|| "set_data requires 'data'".to_string())?;
             Ok(EditOp::SetData {
                 selector,
                 data,
@@ -71,7 +73,8 @@ fn parse_edit(edit: &serde_json::Value) -> Result<EditOp, String> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "set_pin requires 'pin'".to_string())?
                 .to_string();
-            let value = obj.get("value").cloned().ok_or_else(|| "set_pin requires 'value'".to_string())?;
+            let value =
+                obj.get("value").cloned().ok_or_else(|| "set_pin requires 'value'".to_string())?;
             Ok(EditOp::SetPin {
                 selector,
                 key,
@@ -176,8 +179,7 @@ fn persist(ctx: &ExecutionContext, bp: &Blueprint) -> DaemonResult<()> {
     let Some(db) = &ctx.workspace_db else {
         return Ok(());
     };
-    let data =
-        serde_json::to_vec(bp).map_err(|e| DaemonError::Serialization(e.to_string()))?;
+    let data = serde_json::to_vec(bp).map_err(|e| DaemonError::Serialization(e.to_string()))?;
     db.put(crate::storage::persistence::cf::BLUEPRINTS, bp.id.as_bytes(), &data)
 }
 
@@ -195,10 +197,7 @@ pub async fn apply_to_shared(
         replan_apply(&mut bp, script)?
     };
     persist(ctx, &handle.read())?;
-    ctx.audit(
-        "replan.applied",
-        serde_json::json!({ "script": script, "summary": &summary }),
-    );
+    ctx.audit("replan.applied", serde_json::json!({ "script": script, "summary": &summary }));
     Ok(summary)
 }
 
@@ -329,8 +328,12 @@ async fn trip_and_replan_core(
         return Err(DaemonError::Execution("circuit tripped; aborted by user".to_string()));
     }
     let edits = run_plan_agent(ctx, &task, plan_mock).await?;
-    approve_and_apply(ctx, &format!("Plan agent produced a revised plan for {failing_node}"), &edits)
-        .await
+    approve_and_apply(
+        ctx,
+        &format!("Plan agent produced a revised plan for {failing_node}"),
+        &edits,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -430,9 +433,8 @@ mod tests {
         let node_id = NodeId::nil();
         let mock = r#"[{"op":"set_pin","match":{"kind":"CallLLM","nth":1},"pin":"temperature","value":0.2}]"#
             .to_string();
-        let task = tokio::spawn(async move {
-            trip_and_replan_mock(&mut ctx, node_id, 3, mock).await
-        });
+        let task =
+            tokio::spawn(async move { trip_and_replan_mock(&mut ctx, node_id, 3, mock).await });
 
         // Allow both the circuit-tripped and the replan-proposal requests.
         let mut allowed = 0u32;

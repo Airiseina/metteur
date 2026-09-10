@@ -12,6 +12,12 @@ struct ActiveRun {
     label: String,
 }
 
+/// A chat stream currently producing reply events.
+struct ActiveChat {
+    stream: tonic::codec::Streaming<metteur_proto::proto::ChatEvent>,
+    label: String,
+}
+
 /// Runs the read-eval-print loop until the user exits.
 pub async fn run(
     mut client: DaemonClient<Channel>,
@@ -50,6 +56,7 @@ pub async fn run(
 
     println!("Metteur REPL connected. Type 'help' for commands.");
     let mut active: Option<ActiveRun> = None;
+    let mut chat: Option<ActiveChat> = None;
     loop {
         tokio::select! {
             line = line_rx.recv() => {
@@ -66,6 +73,13 @@ pub async fn run(
                         Ok(Outcome::Started(start)) => {
                             println!("-- started: {} --", start.label);
                             active = Some(ActiveRun {
+                                stream: start.stream,
+                                label: start.label,
+                            });
+                        }
+                        Ok(Outcome::StartedChat(start)) => {
+                            println!("-- started: {} --", start.label);
+                            chat = Some(ActiveChat {
                                 stream: start.stream,
                                 label: start.label,
                             });
@@ -97,6 +111,28 @@ pub async fn run(
                     }
                 }
             }
+            chat_event = async {
+                match chat.as_mut() {
+                    Some(active) => Some(active.stream.message().await),
+                    None => {
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }
+                }
+            } => {
+                match chat_event {
+                    Some(Ok(Some(event))) => react_chat(&event),
+                    Some(Err(status)) => {
+                        chat = None;
+                        println!("\n-- chat failed: {status} --");
+                    }
+                    _ => {
+                        if let Some(active) = chat.take() {
+                            println!("\n-- chat finished: {} --", active.label);
+                        }
+                    }
+                }
+            }
         }
     }
     println!("bye");
@@ -108,6 +144,19 @@ async fn handle(client: &mut DaemonClient<Channel>, state: &mut SessionState, cm
         Ok(Outcome::Printed(text)) => println!("{text}"),
         Err(err) => println!("error: {err:#}"),
         _ => {}
+    }
+}
+
+/// Prints one live chat event; deltas stream inline without newlines.
+fn react_chat(event: &metteur_proto::proto::ChatEvent) {
+    match print::chat_event(event) {
+        print::ChatLine::Inline(text) => {
+            use std::io::Write;
+            print!("{text}");
+            let _ = std::io::stdout().flush();
+        }
+        print::ChatLine::Line(text) => println!("{text}"),
+        print::ChatLine::Done => {}
     }
 }
 

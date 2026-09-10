@@ -2,19 +2,21 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
+  TriangleAlert,
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
-  Cpu,
   FileCode,
   Loader2,
   MessageSquarePlus,
   Paperclip,
   Plug,
   Send,
+  Settings2,
   SlidersHorizontal,
+  Sparkles,
   Square,
   User,
   X,
@@ -23,7 +25,7 @@ import { useChatStore } from '@/stores/chat'
 import { useConfigStore } from '@/stores/config'
 import { useTabsStore } from '@/stores/tabs'
 import { fileRoute } from '@/lib/file-token'
-import type { ChatOptions, FileTreeNode } from '@/core'
+import type { ChatOptions, FileTreeNode, LlmModelConfig } from '@/core'
 
 const chat = useChatStore()
 const tabs = useTabsStore()
@@ -32,37 +34,55 @@ const router = useRouter()
 const draft = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
 
-/** Model ids from the daemon model table (`llm.models`), falling back to a
- *  sane pair until the config has loaded. */
-const MODELS = computed(() => {
-  const keys = Object.keys((config.effective.llm?.models as Record<string, unknown> | undefined) ?? {})
+/* Models --------------------------------------------------------------- */
+
+/** Configured models, keyed by config key, in declaration order. */
+const modelTable = computed<Record<string, LlmModelConfig>>(
+  () => (config.effective.llm?.models as Record<string, LlmModelConfig> | undefined) ?? {},
+)
+
+/** Model keys with the default first. Empty when none are configured. */
+const modelKeys = computed(() => {
+  const keys = Object.keys(modelTable.value)
   const def = config.effective.llm?.default_model
-  const list = def ? [def, ...keys.filter((k) => k !== def)] : keys
-  return list.length ? list : ['claude-4', 'deepseek-v4']
+  if (def && keys.includes(def)) return [def, ...keys.filter((k) => k !== def)]
+  return keys
 })
+
+/** Whether a usable model exists; drives the "configure a model" state. */
+const hasModel = computed(() => modelKeys.value.length > 0)
+
+/** Human label for a model key (display name when set). */
+function modelLabel(key: string): string {
+  return modelTable.value[key]?.display_name || key
+}
+
 const model = ref('')
 watch(
-  MODELS,
-  (list) => {
-    if (!model.value || !list.includes(model.value)) model.value = list[0] ?? ''
+  modelKeys,
+  (keys) => {
+    if (!model.value || !keys.includes(model.value)) model.value = keys[0] ?? ''
   },
   { immediate: true },
 )
+
 const reasoning = ref<ChatOptions['reasoning_effort']>('medium')
 const temperature = ref(0.7)
 const topP = ref(0.9)
 const maxTokens = ref(4096)
 const paramsOpen = ref(false)
 
-/* Popovers ----------------------------------------------------------- */
+/* Popovers ------------------------------------------------------------- */
 
 const filePickerOpen = ref(false)
 const pluginOpen = ref(false)
+const sessionOpen = ref(false)
+const modelOpen = ref(false)
 
 /** Collapsed/expanded tool-call cards, keyed by message id. */
 const expandedTools = ref<Set<string>>(new Set())
 
-/* Flattened file list (attach + @-mention) --------------------------- */
+/* Flattened file list (attach + @-mention) ------------------------------ */
 
 interface FileEntry {
   name: string
@@ -99,15 +119,13 @@ function currentToken(): string {
 
 const mentionQuery = computed(() => (currentToken().startsWith('@') ? currentToken().slice(1).toLowerCase() : ''))
 const commandQuery = computed(() => (currentToken().startsWith('/') ? currentToken().slice(1).toLowerCase() : ''))
-/** True while the cursor is inside an `@` token (show the file menu). */
 const mentionOpen = computed(() => mentionQuery.value !== '')
-/** True while the cursor is inside a `/` token (show the command menu). */
 const commandOpen = computed(() => commandQuery.value !== '')
 
 const filteredFiles = computed(() => {
   const q = mentionQuery.value
-  if (!q) return fileEntries.value
-  return fileEntries.value.filter((e) => e.name.toLowerCase().includes(q))
+  if (!q) return fileEntries.value.slice(0, 40)
+  return fileEntries.value.filter((e) => e.name.toLowerCase().includes(q)).slice(0, 40)
 })
 const filteredCommands = computed(() => {
   const q = commandQuery.value
@@ -141,9 +159,14 @@ function attachFile(e: FileEntry) {
   chat.queueFile({ name: e.name, path: e.path, kind: 'file' })
 }
 
-function enabledAddons() {
-  return chat.addons.filter((a) => a.enabled)
+function closeMenus() {
+  filePickerOpen.value = false
+  pluginOpen.value = false
+  sessionOpen.value = false
+  modelOpen.value = false
 }
+
+const enabledAddons = computed(() => chat.addons.filter((a) => a.enabled))
 
 async function toggleAddon(name: string, enabled: boolean) {
   await chat.toggleAddon(name, enabled)
@@ -191,10 +214,13 @@ function chatOptions(): ChatOptions {
   }
 }
 
+/** Whether the composer can send right now. */
+const canSend = computed(() => hasModel.value && draft.value.trim().length > 0 && !chat.streaming)
+
 async function send() {
+  if (!canSend.value) return
   const text = draft.value.trim()
-  if (!text || chat.streaming) return
-  filePickerOpen.value = false
+  closeMenus()
   draft.value = ''
   await chat.send(text, chatOptions())
   scrollToBottom()
@@ -210,10 +236,21 @@ function openFile(path: string | undefined) {
   router.push(fileRoute(path))
 }
 
+function openSettings() {
+  router.push('/settings')
+}
+
 let textarea: HTMLTextAreaElement | null = null
 function onTextareaMount(el: unknown) {
   textarea = el instanceof HTMLTextAreaElement ? el : null
 }
+
+function autosize() {
+  if (!textarea) return
+  textarea.style.height = 'auto'
+  textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+}
+watch(draft, () => nextTick(autosize))
 
 async function onComposerKey(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -221,58 +258,127 @@ async function onComposerKey(e: KeyboardEvent) {
     await send()
     return
   }
-  if (e.key === 'Escape') {
-    filePickerOpen.value = false
-    pluginOpen.value = false
-  }
+  if (e.key === 'Escape') closeMenus()
 }
 
 async function copyMessage(content: string) {
   await navigator.clipboard.writeText(content)
 }
 
+/** Short relative timestamp for message headers. */
+function timeOf(ms: number): string {
+  const d = new Date(ms)
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 onMounted(() => {
   void chat.loadFiles()
   void chat.loadAddons()
+  nextTick(autosize)
 })
 </script>
 
 <template>
   <div class="flex h-full flex-col bg-background">
-    <!-- ── Agent action bar ─────────────────────────────────────────────── -->
-    <div class="flex h-12 shrink-0 items-center gap-2 border-b border-divider px-3">
-      <span class="flex h-6 w-6 items-center justify-center rounded-lg text-primary-foreground" style="background: var(--primary)">
+    <!-- ── Header ──────────────────────────────────────────────────────── -->
+    <header class="flex h-12 shrink-0 items-center gap-2 border-b border-divider px-3">
+      <span
+        class="flex h-6 w-6 items-center justify-center rounded-lg text-primary-foreground"
+        style="background: var(--primary)"
+      >
         <Bot class="h-3.5 w-3.5" />
       </span>
-      <span class="text-[13px] font-semibold">Agent</span>
-      <span class="chip">ReAct</span>
+      <span class="text-[13px] font-semibold tracking-tight">Agent</span>
+      <span class="chip" title="Execution paradigm">ReAct</span>
 
-      <div class="ml-auto flex items-center gap-1.5">
-        <!-- Model selector -->
-        <label class="relative inline-flex items-center">
-          <select v-model="model" class="input h-7 w-auto! cursor-pointer pr-6 text-[12px]!" :aria-label="'Model'">
-            <option v-for="m in MODELS" :key="m" :value="m">{{ m }}</option>
-          </select>
-          <ChevronDown class="pointer-events-none absolute right-1.5 h-3 w-3 text-subtle" />
-        </label>
+      <div class="ml-auto flex items-center gap-1">
+        <!-- Session switcher -->
+        <div class="relative">
+          <button
+            class="btn btn-ghost h-7! max-w-48! gap-1.5 px-2! text-[12px]"
+            type="button"
+            :disabled="chat.busy || chat.threads.length === 0"
+            title="Chat sessions"
+            @click="sessionOpen = !sessionOpen; modelOpen = false; pluginOpen = false"
+          >
+            <span class="truncate">
+              {{ chat.threads.find((t) => t.sessionId === chat.sessionId)?.title || 'New chat' }}
+            </span>
+            <ChevronDown class="h-3 w-3 shrink-0 text-subtle" />
+          </button>
 
-        <!-- Plugin toggles -->
+          <div v-if="sessionOpen" class="menu-card absolute right-0 top-9 w-80">
+            <p class="mb-1 px-2 text-[11px] font-medium text-muted-foreground">Sessions</p>
+            <p v-if="!chat.threads.length" class="px-2 py-1.5 text-[12px] text-subtle">
+              No saved conversations yet.
+            </p>
+            <div
+              v-for="t in chat.threads"
+              :key="t.sessionId"
+              class="group/thread flex items-center gap-1 rounded-md hover:bg-hover"
+            >
+              <button
+                class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+                type="button"
+                @click="chat.switchTo(t.sessionId); sessionOpen = false"
+              >
+                <Check v-if="t.sessionId === chat.sessionId" class="h-3.5 w-3.5 shrink-0" style="color: var(--primary)" />
+                <span v-else class="w-3.5 shrink-0" />
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate text-[12.5px]">{{ t.title || '(untitled)' }}</span>
+                  <span class="block text-[10.5px] text-subtle">{{ t.messageCount }} messages · {{ t.turns }} turns</span>
+                </span>
+              </button>
+              <button
+                class="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded text-subtle opacity-0 transition-opacity hover:text-danger group-hover/thread:opacity-100"
+                type="button"
+                :aria-label="`Delete ${t.title || 'conversation'}`"
+                title="Delete conversation"
+                @click="chat.deleteThread(t.sessionId)"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div class="my-1 border-t border-divider" />
+            <button
+              class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] hover:bg-hover"
+              type="button"
+              @click="chat.clear(); sessionOpen = false"
+            >
+              <MessageSquarePlus class="h-3.5 w-3.5" /> New chat
+            </button>
+          </div>
+        </div>
+
+        <!-- New chat -->
+        <button
+          class="btn-icon h-7! w-7!"
+          type="button"
+          :disabled="chat.busy"
+          title="New chat"
+          aria-label="New chat"
+          @click="chat.clear()"
+        >
+          <MessageSquarePlus class="h-4 w-4" />
+        </button>
+
+        <!-- Plugins -->
         <div class="relative">
           <button
             class="btn-icon relative h-7! w-7!"
             type="button"
             title="Plugins"
-            :aria-label="'Plugins'"
+            aria-label="Plugins"
             :class="pluginOpen ? 'text-foreground!' : ''"
-            @click="pluginOpen = !pluginOpen"
+            @click="pluginOpen = !pluginOpen; filePickerOpen = false; sessionOpen = false; modelOpen = false"
           >
             <Plug class="h-3.5 w-3.5" />
             <span
-              v-if="enabledAddons().length"
+              v-if="enabledAddons.length"
               class="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[9px] font-semibold text-primary-foreground"
               style="background: var(--primary)"
             >
-              {{ enabledAddons().length }}
+              {{ enabledAddons.length }}
             </span>
           </button>
 
@@ -281,12 +387,12 @@ onMounted(() => {
             <div v-if="chat.addonsLoading" class="flex items-center gap-1.5 px-2 py-2 text-[12px] text-subtle">
               <Loader2 class="h-3.5 w-3.5 animate-spin" /> Loading…
             </div>
-            <button v-if="!chat.addons.length && !chat.addonsLoading" class="px-2 py-2 text-[12px] text-subtle" type="button">
+            <p v-else-if="!chat.addons.length" class="px-2 py-2 text-[12px] text-subtle">
               No plugins installed.
-            </button>
+            </p>
             <div
               v-for="a in chat.addons"
-              :key="a.name"
+              :key="a.id"
               class="flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-hover"
             >
               <div class="min-w-0 flex-1">
@@ -297,7 +403,7 @@ onMounted(() => {
                 <p class="text-[11px] text-subtle">v{{ a.version }}</p>
               </div>
               <button
-                class="flex h-4 w-7 items-center rounded-full p-0.5 transition-colors duration-150"
+                class="flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors duration-150"
                 type="button"
                 role="switch"
                 :aria-checked="a.enabled"
@@ -313,95 +419,183 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- Model parameters -->
-        <button
-          class="btn-icon h-7! w-7!"
-          type="button"
-          title="Model parameters"
-          :aria-label="'Model parameters'"
-          :class="paramsOpen ? 'text-foreground!' : ''"
-          @click="paramsOpen = !paramsOpen"
-        >
-          <SlidersHorizontal class="h-3.5 w-3.5" />
-        </button>
-
-        <button
-          class="btn btn-ghost h-7! px-2! text-[12px]"
-          type="button"
-          :disabled="chat.busy"
-          title="New chat (clears history)"
-          @click="chat.clear()"
-        >
-          <MessageSquarePlus class="h-4 w-4" /> New
-        </button>
-      </div>
-    </div>
-
-    <!-- Model parameters (collapsible) -->
-    <div v-if="paramsOpen" class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-divider bg-surface-muted/50 px-4 py-2">
-      <label class="flex items-center gap-2 text-[11px] text-muted-foreground">
-        Reasoning
-        <select v-model="reasoning" class="input h-6 w-auto! px-1.5! text-[11px]!">
-          <option value="none">none</option>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-        </select>
-      </label>
-      <label class="flex items-center gap-2 text-[11px] text-muted-foreground">
-        Temperature
-        <input v-model.number="temperature" type="number" step="0.1" min="0" max="2" class="input h-6 w-16 px-1.5! text-[11px]!" />
-      </label>
-      <label class="flex items-center gap-2 text-[11px] text-muted-foreground">
-        Top P
-        <input v-model.number="topP" type="number" step="0.05" min="0" max="1" class="input h-6 w-16 px-1.5! text-[11px]!" />
-      </label>
-      <label class="flex items-center gap-2 text-[11px] text-muted-foreground">
-        Max tokens
-        <input v-model.number="maxTokens" type="number" step="256" min="256" class="input h-6 w-20 px-1.5! text-[11px]!" />
-      </label>
-    </div>
-
-    <!-- ── Message thread (ReAct) ───────────────────────────────────────── -->
-    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto">
-      <div class="mx-auto flex max-w-2xl flex-col gap-4 p-5 pb-8">
-        <div v-if="!chat.messages.length" class="py-10 text-center">
-          <span
-            class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl text-primary-foreground"
-            style="background: var(--primary)"
+        <!-- Model & parameters -->
+        <div class="relative">
+          <button
+            class="btn btn-ghost h-7! max-w-56! gap-1.5 px-2! text-[12px]"
+            type="button"
+            title="Model and parameters"
+            @click="modelOpen = !modelOpen; pluginOpen = false; sessionOpen = false; filePickerOpen = false"
           >
-            <Bot class="h-6 w-6" />
+            <SlidersHorizontal class="h-3.5 w-3.5 shrink-0" />
+            <span class="truncate font-medium">{{ hasModel ? modelLabel(model) : 'No model' }}</span>
+            <ChevronDown class="h-3 w-3 shrink-0 text-subtle" />
+          </button>
+
+          <div v-if="modelOpen" class="menu-card absolute right-0 top-9 w-80">
+            <template v-if="hasModel">
+              <p class="mb-1 px-2 text-[11px] font-medium text-muted-foreground">Model</p>
+              <div class="max-h-56 overflow-y-auto">
+                <button
+                  v-for="key in modelKeys"
+                  :key="key"
+                  class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-hover"
+                  type="button"
+                  @click="model = key"
+                >
+                  <Check v-if="key === model" class="h-3.5 w-3.5 shrink-0" style="color: var(--primary)" />
+                  <span v-else class="w-3.5 shrink-0" />
+                  <span class="min-w-0 flex-1 truncate text-[12.5px]">{{ modelLabel(key) }}</span>
+                  <span class="shrink-0 text-[10px] text-subtle">{{ modelTable[key]?.model_id || key }}</span>
+                </button>
+              </div>
+
+              <div class="my-1.5 border-t border-divider" />
+              <p class="mb-1.5 px-2 text-[11px] font-medium text-muted-foreground">Parameters</p>
+              <div class="space-y-2 px-2 pb-1">
+                <label class="flex items-center justify-between text-[12px] text-muted-foreground">
+                  Reasoning
+                  <select v-model="reasoning" class="input h-6 w-28! px-1.5! text-[11px]!">
+                    <option value="none">none</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                </label>
+                <label class="flex items-center justify-between text-[12px] text-muted-foreground">
+                  Temperature
+                  <input v-model.number="temperature" type="number" step="0.1" min="0" max="2" class="input h-6 w-28! px-1.5! text-[11px]!" />
+                </label>
+                <label class="flex items-center justify-between text-[12px] text-muted-foreground">
+                  Top P
+                  <input v-model.number="topP" type="number" step="0.05" min="0" max="1" class="input h-6 w-28! px-1.5! text-[11px]!" />
+                </label>
+                <label class="flex items-center justify-between text-[12px] text-muted-foreground">
+                  Max tokens
+                  <input v-model.number="maxTokens" type="number" step="256" min="256" class="input h-6 w-28! px-1.5! text-[11px]!" />
+                </label>
+              </div>
+            </template>
+
+            <!-- No configured model -->
+            <template v-else>
+              <p class="flex items-center gap-1.5 px-2 py-1 text-[12px] font-medium text-danger">
+                <TriangleAlert class="h-3.5 w-3.5" /> No model configured
+              </p>
+              <p class="px-2 pb-2 text-[11.5px] leading-relaxed text-muted-foreground">
+                Add a model under Settings → LLM &amp; Models to start chatting.
+              </p>
+              <button class="btn btn-primary ml-2 mb-1 h-7! w-[calc(100%-1rem)]! text-[12px]" type="button" @click="openSettings">
+                Open settings
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Thread ──────────────────────────────────────────────────────── -->
+    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto">
+      <div class="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 py-6">
+        <!-- Empty state -->
+        <div v-if="!chat.messages.length" class="flex flex-col items-center pt-10 text-center">
+          <span
+            class="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl text-primary-foreground"
+            style="background: linear-gradient(140deg, var(--primary), var(--ring))"
+          >
+            <Sparkles class="h-7 w-7" />
           </span>
-          <p class="text-[14px] font-medium">What can I build for you?</p>
-          <p class="mt-1 text-[12px] text-muted-foreground">
-            Describe a task, attach files, or pick a plugin — I'll run tools in the
-            sandbox and can generate blueprints.
+          <h2 class="text-[17px] font-semibold tracking-tight">What should we build?</h2>
+          <p class="mt-1.5 max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
+            Describe a task, reference files with
+            <span class="mono rounded bg-surface-muted px-1 py-0.5 text-[11.5px]">@</span>, or run a command with
+            <span class="mono rounded bg-surface-muted px-1 py-0.5 text-[11.5px]">/</span>. Agents run tools in the sandbox
+            and can draft blueprints for review.
           </p>
+
+          <div v-if="hasModel" class="mt-6 grid w-full max-w-lg grid-cols-2 gap-2">
+            <button
+              v-for="c in COMMANDS"
+              :key="c.label"
+              class="panel-muted flex items-start gap-2.5 px-3 py-2.5 text-left transition-colors duration-150 hover:bg-hover"
+              type="button"
+              @click="draft = c.label + ' '; textarea?.focus()"
+            >
+              <span class="mono mt-0.5 shrink-0 text-[11.5px]" style="color: var(--primary)">{{ c.label }}</span>
+              <span class="text-[11.5px] leading-snug text-muted-foreground">{{ c.desc }}</span>
+            </button>
+          </div>
+
+          <!-- Blocking hint when nothing is configured -->
+          <div v-else class="panel mt-6 flex max-w-md flex-col items-center gap-2 px-5 py-4">
+            <p class="flex items-center gap-1.5 text-[12.5px] font-medium text-danger">
+              <TriangleAlert class="h-4 w-4" /> No model configured
+            </p>
+            <p class="text-[12px] leading-relaxed text-muted-foreground">
+              Chat needs at least one model. Add an endpoint, model id and API key in Settings.
+            </p>
+            <button class="btn btn-primary mt-1 h-8! px-4! text-[12.5px]" type="button" @click="openSettings">
+              Open settings
+            </button>
+          </div>
         </div>
 
         <template v-for="m in chat.messages" :key="m.id">
           <!-- User turn -->
-          <div v-if="m.role === 'user'" class="group flex flex-row-reverse gap-3">
-            <span class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <User class="h-4 w-4" />
+          <div v-if="m.role === 'user'" class="group flex flex-col items-end gap-1">
+            <div
+              class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2.5 text-[13px] leading-relaxed text-primary-foreground"
+              style="background: var(--primary)"
+            >
+              <template v-for="(part, i) in renderUserContent(m.content)" :key="i">
+                <button
+                  v-if="part.kind === 'file'"
+                  class="mb-0.5 mr-1 inline-flex items-center gap-1 rounded-md bg-white/20 px-1.5 py-0.5 font-mono text-[11.5px] underline decoration-dotted underline-offset-2 hover:bg-white/30"
+                  type="button"
+                  @click="openFile(part.path)"
+                >
+                  <FileCode class="h-3 w-3" /> {{ part.path }}
+                </button>
+                <template v-else>{{ part.text }}</template>
+              </template>
+              <span
+                v-if="m.pending"
+                class="ml-0.5 inline-block h-3 w-1.5 animate-pulse align-middle bg-white/80"
+              />
+            </div>
+            <div class="flex items-center gap-1.5 pr-1 text-[10.5px] text-subtle">
+              <span>{{ timeOf(m.createdAt) }}</span>
+              <button
+                class="rounded p-0.5 opacity-0 transition-opacity duration-150 hover:text-foreground group-hover:opacity-100"
+                type="button"
+                title="Copy"
+                aria-label="Copy"
+                @click="copyMessage(m.content)"
+              >
+                <Copy class="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Assistant turn -->
+          <div v-else-if="m.role === 'assistant'" class="group flex gap-3">
+            <span
+              class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-primary-foreground"
+              style="background: var(--primary)"
+            >
+              <Bot class="h-4 w-4" />
             </span>
-            <div class="min-w-0 max-w-[85%]">
-              <div class="rounded-xl bg-primary px-3.5 py-2.5 text-[13px] leading-relaxed text-primary-foreground">
-                <template v-for="(part, i) in renderUserContent(m.content)" :key="i">
-                  <span v-if="part.kind === 'file'">
-                    <button
-                      class="mb-0.5 mr-1 inline-flex items-center gap-1 rounded-md bg-white/20 px-1.5 py-0.5 font-mono text-[11.5px] underline decoration-dotted underline-offset-2 hover:bg-white/30"
-                      type="button"
-                      @click="openFile(part.path)"
-                    >
-                      <FileCode class="h-3 w-3" /> {{ part.path }}
-                    </button>
-                  </span>
-                  <template v-else>{{ part.text }}</template>
-                </template>
-                <span v-if="m.pending" class="ml-0.5 inline-block h-3 w-1.75 animate-pulse align-middle bg-white/80" />
+            <div class="min-w-0 flex-1">
+              <div class="mb-1 flex items-center gap-2 text-[11px] text-subtle">
+                <span class="font-medium text-foreground/80">Agent</span>
+                <span>{{ timeOf(m.createdAt) }}</span>
               </div>
-              <div class="mt-1 flex justify-end">
+              <div class="whitespace-pre-wrap text-[13.5px] leading-6 text-foreground">{{ m.content }}</div>
+              <span v-if="m.pending" class="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse align-middle" style="background: var(--primary)" />
+              <div v-if="m.detail && m.detail.model" class="mt-1 text-[10.5px] text-subtle">
+                {{ m.detail.model }}
+              </div>
+              <div class="mt-1.5 flex gap-1">
                 <button
                   class="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-subtle opacity-0 transition-opacity duration-150 hover:bg-hover hover:text-foreground group-hover:opacity-100"
                   type="button"
@@ -415,82 +609,47 @@ onMounted(() => {
             </div>
           </div>
 
-          <!-- Tool call card (collapsible) -->
-          <div v-else-if="m.role === 'tool'" class="group flex gap-3">
+          <!-- Tool call card -->
+          <div v-else class="group flex gap-3">
             <span class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style="background: var(--primary-soft)">
-              <Cpu class="h-4 w-4" style="color: var(--primary)" />
+              <SlidersHorizontal class="h-4 w-4" style="color: var(--primary)" />
             </span>
-            <div class="min-w-0 max-w-[85%] flex-1">
-              <div class="overflow-hidden rounded-xl border border-divider" style="background: var(--surface-muted)">
+            <div class="min-w-0 flex-1">
+              <div class="overflow-hidden rounded-xl" style="background: var(--surface-muted); box-shadow: inset 0 0 0 1px var(--divider)">
                 <button
                   class="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors duration-150 hover:bg-hover"
                   type="button"
                   @click="toggleTool(m.id)"
                 >
-                  <ChevronRight class="h-3.5 w-3.5 text-subtle transition-transform duration-150" :class="isToolOpen(m.id) ? 'rotate-90' : ''" />
-                  <span class="font-mono text-[12px] font-semibold" style="color: var(--primary)">{{ m.actor }}</span>
-                  <Cpu v-if="m.pending" class="h-3 w-3 animate-pulse text-subtle" style="color: var(--primary)" />
-                  <span class="ml-auto flex items-center gap-1 text-[11px] text-subtle">
-                    <span v-if="!m.pending" class="flex h-1.5 w-1.5 rounded-full" style="background: var(--primary)" />
-                    {{ m.pending ? 'running…' : 'done' }}
-                  </span>
+                  <ChevronRight
+                    class="h-3.5 w-3.5 shrink-0 text-subtle transition-transform duration-150"
+                    :class="isToolOpen(m.id) ? 'rotate-90' : ''"
+                  />
+                  <span class="mono truncate text-[12px] font-semibold" style="color: var(--primary)">{{ m.actor }}</span>
+                  <Loader2 v-if="m.pending" class="h-3 w-3 shrink-0 animate-spin text-subtle" />
+                  <span class="ml-auto shrink-0 text-[10.5px] text-subtle">{{ m.pending ? 'running' : 'done' }}</span>
                 </button>
                 <div v-if="isToolOpen(m.id)" class="border-t border-divider px-3 py-2.5">
                   <div class="mb-1.5 flex items-center justify-between">
-                    <span class="text-[11px] font-medium uppercase tracking-wide text-subtle">Output</span>
+                    <span class="text-[10.5px] font-medium uppercase tracking-wide text-subtle">Output</span>
                     <button
-                      v-if="m.detail && (m.detail.file as string)"
-                      class="text-[11px] text-primary underline decoration-dotted underline-offset-2 hover:no-underline"
+                      v-if="m.detail && typeof m.detail.file === 'string'"
+                      class="text-[11px] underline decoration-dotted underline-offset-2 hover:no-underline"
+                      style="color: var(--primary)"
                       type="button"
-                      @click="openFile(m.detail!.file as string)"
+                      @click="openFile(m.detail.file as string)"
                     >
                       open file
                     </button>
                   </div>
-                  <pre class="whitespace-pre-wrap font-mono text-[12px] leading-relaxed text-foreground/90">{{ m.content }}</pre>
+                  <pre class="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-foreground/90">{{ m.content }}</pre>
                 </div>
-              </div>
-              <div v-if="m.detail && m.detail.model" class="mt-1 pl-1 text-[10px] text-subtle">{{ m.detail.model }}</div>
-              <div class="mt-1 flex">
-                <button
-                  class="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-subtle opacity-0 transition-opacity duration-150 hover:bg-hover hover:text-foreground group-hover:opacity-100"
-                  type="button"
-                  title="Copy"
-                  aria-label="Copy"
-                  @click="copyMessage(m.content)"
-                >
-                  <Copy class="h-3 w-3" /> Copy
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- Assistant bubble -->
-          <div v-else class="group flex gap-3">
-            <span class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface-muted text-muted-foreground">
-              <Bot class="h-4 w-4" />
-            </span>
-            <div class="min-w-0 max-w-[85%]">
-              <div class="panel rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed">
-                {{ m.content }}<span v-if="m.pending" class="ml-0.5 inline-block h-3 w-1.75 animate-pulse align-middle" style="background: var(--primary)" />
-              </div>
-              <div v-if="m.detail && m.detail.model" class="mt-1 pl-1 text-[10px] text-subtle">{{ m.detail.model }}</div>
-              <div class="mt-1 flex">
-                <button
-                  class="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-subtle opacity-0 transition-opacity duration-150 hover:bg-hover hover:text-foreground group-hover:opacity-100"
-                  type="button"
-                  title="Copy"
-                  aria-label="Copy"
-                  @click="copyMessage(m.content)"
-                >
-                  <Copy class="h-3 w-3" /> Copy
-                </button>
               </div>
             </div>
           </div>
         </template>
 
-        <!-- Agent activity indicator -->
+        <!-- Working indicator -->
         <div v-if="chat.streaming" class="flex items-center gap-2 pl-10 text-[12px] text-subtle">
           <Loader2 class="h-3.5 w-3.5 animate-spin" style="color: var(--primary)" />
           Agent is working…
@@ -498,18 +657,15 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- ── Agent composer ───────────────────────────────────────────────── -->
-    <div class="shrink-0 border-t border-divider p-3">
-      <div class="mx-auto max-w-2xl">
-        <div class="composer relative panel flex flex-col p-2">
-          <!-- @-mention / slash-command menu -->
-          <div
-            v-if="mentionOpen || commandOpen"
-            class="menu-card absolute bottom-full left-2 mb-2 max-h-64 w-72 overflow-y-auto"
-          >
+    <!-- ── Composer ────────────────────────────────────────────────────── -->
+    <div class="shrink-0 px-4 pb-4">
+      <div class="mx-auto w-full max-w-3xl">
+        <div class="composer relative rounded-2xl p-2.5" style="background: var(--surface); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--divider)">
+          <!-- @ / slash menu -->
+          <div v-if="mentionOpen || commandOpen" class="menu-card absolute bottom-full left-2 mb-2 max-h-64 w-80 overflow-y-auto">
             <template v-if="mentionOpen">
               <p class="mb-1 px-2 text-[11px] font-medium text-muted-foreground">Reference a file</p>
-              <button v-if="!filteredFiles.length" class="px-2 py-1.5 text-[12px] text-subtle" type="button">No matches</button>
+              <p v-if="!filteredFiles.length" class="px-2 py-1.5 text-[12px] text-subtle">No matches</p>
               <button
                 v-for="e in filteredFiles"
                 :key="e.path"
@@ -517,16 +673,16 @@ onMounted(() => {
                 type="button"
                 @mousedown.prevent="pickFile(e)"
               >
-                <FileCode class="h-3.5 w-3.5 shrink-0 text-subtle" style="color: var(--primary)" />
+                <FileCode class="h-3.5 w-3.5 shrink-0 text-subtle" />
                 <span class="min-w-0 flex-1 truncate text-[12.5px]" :style="{ paddingLeft: e.depth * 10 + 'px' }">
                   {{ e.name }}
                 </span>
-                <Check v-if="chat.pendingFiles.some((f) => f.path === e.path)" class="h-3.5 w-3.5 text-subtle" />
+                <Check v-if="chat.pendingFiles.some((f) => f.path === e.path)" class="h-3.5 w-3.5 shrink-0" style="color: var(--primary)" />
               </button>
             </template>
             <template v-else>
               <p class="mb-1 px-2 text-[11px] font-medium text-muted-foreground">Commands</p>
-              <button v-if="!filteredCommands.length" class="px-2 py-1.5 text-[12px] text-subtle" type="button">No commands</button>
+              <p v-if="!filteredCommands.length" class="px-2 py-1.5 text-[12px] text-subtle">No commands</p>
               <button
                 v-for="c in filteredCommands"
                 :key="c.label"
@@ -534,14 +690,14 @@ onMounted(() => {
                 type="button"
                 @mousedown.prevent="pickCommand(c)"
               >
-                <span class="w-16 shrink-0 font-mono text-[12px]" style="color: var(--primary)">{{ c.label }}</span>
+                <span class="mono w-20 shrink-0 text-[12px]" style="color: var(--primary)">{{ c.label }}</span>
                 <span class="truncate text-[12px] text-muted-foreground">{{ c.desc }}</span>
               </button>
             </template>
           </div>
 
-          <!-- Pending file chips -->
-          <div v-if="chat.pendingFiles.length" class="mb-1.5 flex flex-wrap gap-1.5">
+          <!-- Queued file chips -->
+          <div v-if="chat.pendingFiles.length" class="mb-2 flex flex-wrap gap-1.5">
             <span
               v-for="f in chat.pendingFiles"
               :key="f.path"
@@ -561,22 +717,21 @@ onMounted(() => {
             </span>
           </div>
 
-          <!-- Composer row -->
+          <!-- Input row -->
           <div class="flex items-end gap-1.5">
-            <!-- Attach file -->
             <div class="relative">
               <button
                 class="btn-icon h-8! w-8! shrink-0"
                 type="button"
                 title="Attach a file"
-                :aria-label="'Attach a file'"
+                aria-label="Attach a file"
                 :class="filePickerOpen ? 'text-foreground!' : ''"
-                @click="filePickerOpen = !filePickerOpen; pluginOpen = false"
+                @click="filePickerOpen = !filePickerOpen; pluginOpen = false; modelOpen = false"
               >
                 <Paperclip class="h-4 w-4" />
               </button>
 
-              <div v-if="filePickerOpen" class="menu-card absolute bottom-10 left-0 max-h-80 w-72 overflow-y-auto">
+              <div v-if="filePickerOpen" class="menu-card absolute bottom-10 left-0 max-h-80 w-80 overflow-y-auto">
                 <p class="mb-1 flex items-center gap-1.5 px-2 text-[11px] font-medium text-muted-foreground">
                   <Paperclip class="h-3 w-3" /> Attach a file
                 </p>
@@ -590,11 +745,11 @@ onMounted(() => {
                   type="button"
                   @mousedown.prevent="attachFile(e)"
                 >
-                  <FileCode class="h-3.5 w-3.5 shrink-0 text-subtle" style="color: var(--primary)" />
+                  <FileCode class="h-3.5 w-3.5 shrink-0 text-subtle" />
                   <span class="min-w-0 flex-1 truncate text-[12.5px]" :style="{ paddingLeft: e.depth * 10 + 'px' }">
                     {{ e.name }}
                   </span>
-                  <Check v-if="chat.pendingFiles.some((f) => f.path === e.path)" class="h-3.5 w-3.5 text-subtle" />
+                  <Check v-if="chat.pendingFiles.some((f) => f.path === e.path)" class="h-3.5 w-3.5 shrink-0" style="color: var(--primary)" />
                 </button>
               </div>
             </div>
@@ -603,15 +758,16 @@ onMounted(() => {
               :ref="onTextareaMount"
               v-model="draft"
               rows="1"
-              class="min-h-9 max-h-40 flex-1 resize-none bg-transparent px-1 py-1.5 text-[13px] outline-none placeholder:text-subtle"
-              placeholder="Describe a task, type @ for a file or / for a command…"
-              :aria-label="'Message'"
+              :placeholder="hasModel ? 'Describe a task — @ to reference a file, / for a command' : 'Configure a model to start chatting'"
+              :disabled="!hasModel"
+              class="max-h-50 min-h-8 flex-1 resize-none bg-transparent px-1 py-1.5 text-[13px] leading-5 outline-none placeholder:text-subtle disabled:cursor-not-allowed"
+              aria-label="Message"
               @keydown="onComposerKey"
             />
 
             <button
               v-if="chat.streaming"
-              class="btn btn-danger-outline shrink-0 px-3!"
+              class="btn btn-danger-outline h-8! shrink-0 px-3!"
               type="button"
               title="Stop"
               aria-label="Stop"
@@ -621,9 +777,9 @@ onMounted(() => {
             </button>
             <button
               v-else
-              class="btn btn-primary shrink-0 px-3!"
+              class="btn btn-primary h-8! shrink-0 px-3!"
               type="button"
-              :disabled="!draft.trim() || chat.streaming"
+              :disabled="!canSend"
               title="Send"
               aria-label="Send"
               @click="send"
@@ -633,20 +789,28 @@ onMounted(() => {
           </div>
         </div>
 
-        <p class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-1 text-[10.5px] text-subtle">
-          <span class="flex items-center gap-1"><Send class="h-3 w-3" /> Enter to send | Shift+Enter newline</span>
-          <span class="flex items-center gap-1"><User class="h-3 w-3" /> @ mention a file</span>
-          <span class="flex items-center gap-1"><SlidersHorizontal class="h-3 w-3" /> / commands</span>
-          <span class="ml-auto font-mono">{{ model }}</span>
-        </p>
+        <!-- Footer: hints, model, usage -->
+        <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[10.5px] text-subtle">
+          <span v-if="hasModel" class="flex items-center gap-1">
+            <Settings2 class="h-3 w-3" /> Enter to send · Shift+Enter for newline
+          </span>
+          <span v-if="chat.lastUsage" class="ml-auto tabular-nums">
+            {{ chat.lastUsage.totalTokens.toLocaleString() }} tokens
+            <span class="text-subtle/70">
+              ({{ chat.lastUsage.inputTokens.toLocaleString() }} in ·
+              {{ chat.lastUsage.outputTokens.toLocaleString() }} out)
+            </span>
+          </span>
+          <span v-else-if="hasModel" class="ml-auto mono">{{ modelLabel(model) }}</span>
+        </div>
       </div>
     </div>
 
-    <!-- Overlay to dismiss popovers on outside click (kept under the .menu-card z-index). -->
+    <!-- Outside-click catcher for popovers -->
     <div
-      v-if="filePickerOpen || pluginOpen"
+      v-if="filePickerOpen || pluginOpen || sessionOpen || modelOpen"
       class="fixed inset-0 z-20"
-      @mousedown="filePickerOpen = false; pluginOpen = false"
+      @mousedown="closeMenus"
     />
   </div>
 </template>
@@ -657,12 +821,11 @@ onMounted(() => {
   border-radius: 10px;
   border: 1px solid var(--divider);
   background: var(--surface);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-popover);
   padding: 4px;
 }
 
-/* The composer is self-contained input chrome — no loud focus ring (beats the
-   global :focus-visible outline). */
+/* Self-contained input chrome: no loud focus ring (beats the global outline). */
 .composer textarea:focus-visible {
   outline: none;
 }

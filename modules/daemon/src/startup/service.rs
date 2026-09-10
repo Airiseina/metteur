@@ -99,9 +99,10 @@ pub fn uninstall_service() -> DaemonResult<()> {
         use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-        let Ok(service) =
-            manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)
-        else {
+        let Ok(service) = manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+        ) else {
             tracing::info!("Windows service '{SERVICE_NAME}' is not installed");
             return Ok(());
         };
@@ -130,11 +131,9 @@ pub fn start_service() -> DaemonResult<()> {
         use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-        let service =
-            manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
-        if service.query_status()?.current_state
-            == ServiceState::Running
-        {
+        let service = manager
+            .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
+        if service.query_status()?.current_state == ServiceState::Running {
             tracing::info!("Windows service '{SERVICE_NAME}' is already running");
             return Ok(());
         }
@@ -158,17 +157,13 @@ pub fn stop_service() -> DaemonResult<()> {
         use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-        let service =
-            manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
-        if service.query_status()?.current_state
-            == ServiceState::Stopped
-        {
+        let service = manager
+            .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
+        if service.query_status()?.current_state == ServiceState::Stopped {
             tracing::info!("Windows service '{SERVICE_NAME}' is already stopped");
             return Ok(());
         }
-        service
-            .stop()
-            .map_err(|e| DaemonError::Internal(format!("cannot stop service: {e}")))?;
+        service.stop().map_err(|e| DaemonError::Internal(format!("cannot stop service: {e}")))?;
         tracing::info!("stopped Windows service '{SERVICE_NAME}'");
         Ok(())
     }
@@ -248,34 +243,33 @@ fn service_main(args: Vec<std::ffi::OsString>) {
     let (re_tx, re_rx) = std::sync::mpsc::channel::<()>();
     let notify = re_tx;
 
-    let status_handle = match service_control_handler::register(SERVICE_NAME, move |control| {
-        match control {
+    let status_handle =
+        match service_control_handler::register(SERVICE_NAME, move |control| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 let _ = notify.send(());
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
-        }
-    }) {
-        Ok(handle) => handle,
-        Err(e) => {
-            tracing::error!("cannot register service control handler: {e}");
-            return;
-        }
-    };
+        }) {
+            Ok(handle) => handle,
+            Err(e) => {
+                tracing::error!("cannot register service control handler: {e}");
+                return;
+            }
+        };
 
-    let set_status = |status_handle: &windows_service::service_control_handler::ServiceStatusHandle,
-                      state| {
-        let _ = status_handle.set_service_status(ServiceStatus {
-            service_type: StatusServiceType::OWN_PROCESS,
-            current_state: state,
-            controls_accepted: ServiceControlAccept::STOP,
-            exit_code: ServiceExitCode::NO_ERROR,
-            checkpoint: 0,
-            wait_hint: std::time::Duration::from_secs(3),
-            process_id: None,
-        });
-    };
+    let set_status =
+        |status_handle: &windows_service::service_control_handler::ServiceStatusHandle, state| {
+            let _ = status_handle.set_service_status(ServiceStatus {
+                service_type: StatusServiceType::OWN_PROCESS,
+                current_state: state,
+                controls_accepted: ServiceControlAccept::STOP,
+                exit_code: ServiceExitCode::NO_ERROR,
+                checkpoint: 0,
+                wait_hint: std::time::Duration::from_secs(3),
+                process_id: None,
+            });
+        };
     set_status(&status_handle, windows_service::service::ServiceState::StartPending);
 
     let cli = match cli_from_args(&args) {
@@ -331,7 +325,9 @@ const SERVICE_DISPLAY_NAME: &str = "Metteur Daemon";
 #[cfg(windows)]
 fn is_elevated() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
@@ -339,7 +335,9 @@ fn is_elevated() -> bool {
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
             return false;
         }
-        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut elevation = TOKEN_ELEVATION {
+            TokenIsElevated: 0,
+        };
         let mut size = 0u32;
         let ok = GetTokenInformation(
             token,
@@ -378,7 +376,11 @@ fn reexec_elevated() -> DaemonResult<()> {
     let exe_w = to_wide(&exe.to_string_lossy());
     // The empty-params case must still hold a live Vec so the pointer stays
     // valid for the duration of the `ShellExecuteW` call below.
-    let params_wide = if params.is_empty() { Vec::new() } else { to_wide(&params) };
+    let params_wide = if params.is_empty() {
+        Vec::new()
+    } else {
+        to_wide(&params)
+    };
     let params_w = if params_wide.is_empty() {
         std::ptr::null()
     } else {
@@ -399,9 +401,7 @@ fn reexec_elevated() -> DaemonResult<()> {
     if status > 32 {
         Ok(())
     } else {
-        Err(DaemonError::Internal(format!(
-            "UAC elevation was not granted (code {status})"
-        )))
+        Err(DaemonError::Internal(format!("UAC elevation was not granted (code {status})")))
     }
 }
 
@@ -421,11 +421,7 @@ mod tests {
         use std::path::Path;
 
         let os = |s: &str| OsString::from(s);
-        let args = vec![
-            os("--service"),
-            os("--config"),
-            os("C:\\metteur\\config.toml"),
-        ];
+        let args = vec![os("--service"), os("--config"), os("C:\\metteur\\config.toml")];
         let cli = cli_from_args(&args).unwrap();
         assert_eq!(cli.config.as_deref(), Some(Path::new("C:\\metteur\\config.toml")));
         assert!(!cli.service);

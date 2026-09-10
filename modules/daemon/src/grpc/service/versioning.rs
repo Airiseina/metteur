@@ -5,17 +5,17 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use crate::observability::audit::AuditWriter;
 use crate::execution::interrupt::InterruptBus;
 use crate::execution::{DbCheckpointSink, RunStatus};
+use crate::observability::audit::AuditWriter;
 
+use super::super::acl::subject_from_request;
 use super::super::proto::{
     self, ContinueExecutionRequest, CreateSnapshotRequest, Empty, ExecutionEvent, ExecutionInfo,
-    ExecutionList, FileHistory, FileHistoryEntry, GetExecutionUsageRequest, GetFileHistoryRequest,
-    ListExecutionsRequest, ListSnapshotsRequest, RollbackRequest, SnapshotInfo, SnapshotList,
-    UsageSummary,
+    ExecutionList, ExecutionTree, FileHistory, FileHistoryEntry, GetExecutionTreeRequest,
+    GetExecutionUsageRequest, GetFileHistoryRequest, ListExecutionsRequest, ListSnapshotsRequest,
+    RollbackRequest, SnapshotInfo, SnapshotList, UsageSummary,
 };
-use super::super::acl::subject_from_request;
 use super::*;
 
 impl DaemonService {
@@ -44,7 +44,7 @@ impl DaemonService {
         Ok(Response::new(SnapshotInfo {
             id: snapshot.id.to_string(),
             description: snapshot.description,
-            created_at: snapshot.created_at as i64,
+            created_at: (snapshot.created_at / 1000) as i64,
             alias: snapshot.alias.unwrap_or_default(),
         }))
     }
@@ -66,7 +66,7 @@ impl DaemonService {
             .map(|s| SnapshotInfo {
                 id: s.id.to_string(),
                 description: s.description,
-                created_at: s.created_at as i64,
+                created_at: (s.created_at / 1000) as i64,
                 alias: s.alias.unwrap_or_default(),
             })
             .collect();
@@ -75,7 +75,10 @@ impl DaemonService {
         }))
     }
 
-    pub(crate) async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<Empty>, Status> {
+    pub(crate) async fn rollback(
+        &self,
+        request: Request<RollbackRequest>,
+    ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
         let ws = self
             .state
@@ -128,6 +131,64 @@ impl DaemonService {
             .collect();
         Ok(Response::new(ExecutionList {
             executions,
+        }))
+    }
+
+    pub(crate) async fn get_execution_tree(
+        &self,
+        request: Request<GetExecutionTreeRequest>,
+    ) -> Result<Response<ExecutionTree>, Status> {
+        let req = request.into_inner();
+        let ws = self
+            .state
+            .workspaces
+            .get(&PathBuf::from(&req.workspace_path))
+            .await
+            .ok_or_else(|| Status::not_found("workspace not open"))?;
+        let run_id = uuid::Uuid::parse_str(&req.run_id)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let checkpoint = DbCheckpointSink::load(&ws.db, run_id)
+            .map_err(to_status)?
+            .ok_or_else(|| Status::not_found("execution not found"))?;
+        let mut nodes: Vec<proto::ExecTreeNode> = checkpoint
+            .exec_tree
+            .nodes
+            .values()
+            .map(|n| {
+                let kind = match &n.kind {
+                    crate::execution::tree::TreeNodeKind::Run => "run".to_string(),
+                    crate::execution::tree::TreeNodeKind::BlueprintNode(kind) => {
+                        format!("node:{kind}")
+                    }
+                    crate::execution::tree::TreeNodeKind::SubAgent => "subagent".to_string(),
+                    crate::execution::tree::TreeNodeKind::Function(name) => {
+                        format!("function:{name}")
+                    }
+                };
+                let status = match &n.status {
+                    crate::execution::tree::TreeNodeStatus::Running => "running".to_string(),
+                    crate::execution::tree::TreeNodeStatus::Done => "done".to_string(),
+                    crate::execution::tree::TreeNodeStatus::Failed(reason) => {
+                        format!("failed:{reason}")
+                    }
+                };
+                proto::ExecTreeNode {
+                    id: n.id.clone(),
+                    kind,
+                    label: n.label.clone(),
+                    parent: n.parent.clone().unwrap_or_default(),
+                    children: n.children.clone(),
+                    status,
+                    tokens: n.tokens,
+                    started_at: n.started_at_ms as i64,
+                    finished_at: n.finished_at_ms.unwrap_or(0) as i64,
+                }
+            })
+            .collect();
+        nodes.sort_by_key(|n| n.started_at);
+        Ok(Response::new(ExecutionTree {
+            nodes,
+            roots: checkpoint.exec_tree.roots.clone(),
         }))
     }
 
@@ -190,6 +251,7 @@ impl DaemonService {
             cancel_flag,
             ws.lsp_manager.clone(),
             addon_fragments,
+            Some(ws.version_manager.clone()),
         )
         .await?;
 
@@ -213,12 +275,16 @@ impl DaemonService {
             .map(|entry| FileHistoryEntry {
                 snapshot_id: entry.snapshot.id.to_string(),
                 description: entry.snapshot.description,
-                created_at: entry.snapshot.created_at as i64,
+                created_at: (entry.snapshot.created_at / 1000) as i64,
                 status: match entry.status {
                     crate::storage::versioning::FileChangeStatus::Added => "Added".to_string(),
-                    crate::storage::versioning::FileChangeStatus::Modified => "Modified".to_string(),
+                    crate::storage::versioning::FileChangeStatus::Modified => {
+                        "Modified".to_string()
+                    }
                     crate::storage::versioning::FileChangeStatus::Deleted => "Deleted".to_string(),
-                    crate::storage::versioning::FileChangeStatus::Unchanged => "Unchanged".to_string(),
+                    crate::storage::versioning::FileChangeStatus::Unchanged => {
+                        "Unchanged".to_string()
+                    }
                 },
                 content_hash: entry.hash.unwrap_or_default(),
             })
@@ -240,8 +306,8 @@ impl DaemonService {
             .await
             .ok_or_else(|| Status::not_found("workspace not open"))?;
         let config = ws.config.read().await;
-        let summary =
-            crate::llm::billing::run_usage(&ws.db, &config.billing, &req.run_id).map_err(to_status)?;
+        let summary = crate::llm::billing::run_usage(&ws.db, &config.billing, &req.run_id)
+            .map_err(to_status)?;
         drop(config);
         Ok(Response::new(UsageSummary {
             currency: summary.currency,

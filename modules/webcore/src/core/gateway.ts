@@ -6,7 +6,9 @@ import type {
   ChatOptions,
   ChatSessionInfo,
   ChatSessionSnapshot,
+  ChatUsage,
   DaemonConfig,
+  ExecTreeData,
   ExecutionEvent,
   ExecutionInfo,
   FileContent,
@@ -72,7 +74,8 @@ export interface DaemonGateway {
    * Send a chat turn. Assistant replies arrive as `onMessage` updates: deltas
    * come with a stable id and `pending` set (append to the open bubble), the
    * final turn carries the full text without `pending` (replace the bubble).
-   * `onSession` reports the persisted session id created or resumed.
+   * `onSession` reports the persisted session id created or resumed, and
+   *  `onUsage` the token usage of a completed turn.
    */
   sendChat(
     workspacePath: string,
@@ -82,14 +85,15 @@ export interface DaemonGateway {
     options?: ChatOptions,
     onSession?: (sessionId: string) => void,
     sessionId?: string,
+    onUsage?: (usage: ChatUsage) => void,
   ): Promise<Result<void>>
   abortChat(workspacePath: string): Promise<Result<void>>
-  /** List the workspace's persisted chat sessions (currently 0 or 1). */
+  /** List the workspace's persisted chat sessions (newest first). */
   listChatSessions(workspacePath: string): Promise<Result<ChatSessionInfo[]>>
-  /** Load a session's history for UI restore (NotFound when absent). */
-  getChatSession(workspacePath: string): Promise<Result<ChatSessionSnapshot>>
-  /** Clear the workspace's session (stops a running chat first). */
-  deleteChatSession(workspacePath: string): Promise<Result<void>>
+  /** Load a session's history for UI restore (empty id = latest, NotFound when absent). */
+  getChatSession(workspacePath: string, sessionId?: string): Promise<Result<ChatSessionSnapshot>>
+  /** Delete one session (empty id = latest; stops a running chat first). */
+  deleteChatSession(workspacePath: string, sessionId?: string): Promise<Result<void>>
 
   // Blueprints -----------------------------------------------------------------
   listNodeKinds(): Promise<Result<string[]>>
@@ -111,6 +115,7 @@ export interface DaemonGateway {
     onEvent: (e: ExecutionEvent) => void,
   ): Promise<Result<void>>
   listExecutions(workspacePath: string): Promise<Result<ExecutionInfo[]>>
+  getExecutionTree(workspacePath: string, runId: string): Promise<Result<ExecTreeData>>
   cancel(workspacePath: string): Promise<Result<void>>
   pause(workspacePath: string): Promise<Result<void>>
   resume(workspacePath: string): Promise<Result<void>>
@@ -130,7 +135,9 @@ export interface DaemonGateway {
 
   // Addons / usage / resources --------------------------------------------------
   listAddons(): Promise<Result<AddonInfo[]>>
-  setAddonEnabled(id: string, enabled: boolean): Promise<Result<void>>
+  /** Toggle an addon. `workspacePath` selects the workspace scope; empty means
+   *  the global scope. */
+  setAddonEnabled(id: string, enabled: boolean, workspacePath?: string): Promise<Result<void>>
   listMcpServers(): Promise<Result<McpServerInfo[]>>
   getExecutionUsage(workspacePath: string, runId: string): Promise<Result<UsageSummary>>
 }

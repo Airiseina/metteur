@@ -1,7 +1,7 @@
 //! Approval command handlers.
 
-use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::ApprovalDecisionRequest;
+use metteur_proto::proto::daemon_client::DaemonClient;
 use tonic::transport::Channel;
 
 use super::*;
@@ -25,7 +25,10 @@ pub(crate) async fn handle_approve(
 }
 
 /// Handles `approve-auto on|off`.
-pub(crate) async fn handle_approve_auto(state: &mut SessionState, on: bool) -> anyhow::Result<Outcome> {
+pub(crate) async fn handle_approve_auto(
+    state: &mut SessionState,
+    on: bool,
+) -> anyhow::Result<Outcome> {
     state.auto_approve = on;
     Ok(Outcome::Printed(format!(
         "auto-approve {}",

@@ -14,11 +14,13 @@ interface InspectorNodeData {
 
 /** Inspector shows the selected node's pins; data inputs that are not wired
  *  can have their default value edited here (mirrors the inline editors on the
- *  node itself). Emits `change` so the caller can mark the graph dirty. */
+ *  node itself). Emits `change` so the caller can mark the graph dirty, and
+ *  `recase` when a Switch node's case list is edited. */
 const props = defineProps<{ node: InspectorNodeData }>()
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'change'): void
+  (e: 'recase', cases: string[]): void
 }>()
 
 const ROOT = (type?: string): string => (type ?? 'any').split(/[<{]/)[0]
@@ -55,6 +57,24 @@ function setValue(pin: BlueprintPin, raw: string) {
   if (raw === '') delete values[pin.id]
   else values[pin.id] = raw
   emit('change')
+}
+
+/** Whether the inspected node is a Switch (editable case branches). */
+function isSwitch(): boolean {
+  return props.node.title === 'Switch'
+}
+
+/** Current case names from the node's `Case_*` exec outputs. */
+function switchCases(): string[] {
+  return (props.node.outputs ?? [])
+    .filter((p) => p.kind === 'exec-out' && p.name.startsWith('Case_'))
+    .map((p) => p.name.slice('Case_'.length))
+}
+
+/** Rebuild the Switch branches from a comma-separated case list. */
+function applySwitchCases(raw: string) {
+  const cases = raw.split(',').map((c) => c.trim()).filter((c) => c.length > 0)
+  emit('recase', cases)
 }
 </script>
 
@@ -122,6 +142,20 @@ function setValue(pin: BlueprintPin, raw: string) {
           <span class="truncate text-[12px] text-foreground">{{ pin.name }}</span>
           <span class="ml-auto shrink-0 text-[10px] text-subtle">{{ pin.type }}</span>
         </div>
+      </section>
+
+      <section v-if="isSwitch()">
+        <h4 class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-subtle">Cases</h4>
+        <input
+          type="text"
+          class="input mt-1 h-7! w-full text-[12px]"
+          placeholder="a, b, c"
+          :value="switchCases().join(', ')"
+          @change="applySwitchCases(($event.target as HTMLInputElement).value)"
+        />
+        <p class="mt-0.5 text-[10px] leading-snug text-subtle">
+          Comma-separated branch names; each becomes a `Case_*` outlet.
+        </p>
       </section>
     </div>
   </aside>

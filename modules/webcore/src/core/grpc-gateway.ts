@@ -13,7 +13,9 @@ import type {
   ChatOptions,
   ChatSessionInfo,
   ChatSessionSnapshot,
+  ChatUsage,
   DaemonConfig,
+  ExecTreeData,
   ExecutionEvent,
   ExecutionInfo,
   FileContent,
@@ -532,6 +534,7 @@ export class GrpcGateway implements DaemonGateway {
     options?: ChatOptions,
     onSession?: (sessionId: string) => void,
     sessionId?: string,
+    onUsage?: (usage: ChatUsage) => void,
   ): Promise<Result<void>> {
     try {
       let seq = 0
@@ -592,6 +595,20 @@ export class GrpcGateway implements DaemonGateway {
             content: ev.content,
             createdAt: Date.now(),
           })
+        } else if (ev.kind === 'done') {
+          let usage: Record<string, unknown> = {}
+          if (ev.detailJson) {
+            try {
+              usage = JSON.parse(ev.detailJson).usage ?? {}
+            } catch {
+              usage = {}
+            }
+          }
+          onUsage?.({
+            inputTokens: Number(usage.input_tokens) || 0,
+            outputTokens: Number(usage.output_tokens) || 0,
+            totalTokens: Number(usage.total_tokens) || 0,
+          })
         } else if (ev.kind === 'error') {
           return err(ev.content)
         }
@@ -629,9 +646,9 @@ export class GrpcGateway implements DaemonGateway {
     }
   }
 
-  async getChatSession(workspacePath: string): Promise<Result<ChatSessionSnapshot>> {
+  async getChatSession(workspacePath: string, sessionId?: string): Promise<Result<ChatSessionSnapshot>> {
     try {
-      const res = await this.client.getChatSession({ workspacePath })
+      const res = await this.client.getChatSession({ workspacePath, sessionId: sessionId ?? '' })
       let history: ChatMessage[] = []
       try {
         const entries: Array<{ role: string; content: string }> = JSON.parse(res.historyJson)
@@ -650,9 +667,9 @@ export class GrpcGateway implements DaemonGateway {
     }
   }
 
-  async deleteChatSession(workspacePath: string): Promise<Result<void>> {
+  async deleteChatSession(workspacePath: string, sessionId?: string): Promise<Result<void>> {
     try {
-      await this.client.deleteChatSession({ workspacePath })
+      await this.client.deleteChatSession({ workspacePath, sessionId: sessionId ?? '' })
       return ok(undefined)
     } catch (e) {
       return toErr(e)
@@ -781,6 +798,28 @@ export class GrpcGateway implements DaemonGateway {
     }
   }
 
+  async getExecutionTree(workspacePath: string, runId: string): Promise<Result<ExecTreeData>> {
+    try {
+      const res = await this.client.getExecutionTree({ workspacePath, runId })
+      return ok({
+        nodes: res.nodes.map((n) => ({
+          id: n.id,
+          kind: n.kind,
+          label: n.label,
+          parent: n.parent,
+          children: [...n.children],
+          status: n.status,
+          tokens: Number(n.tokens),
+          startedAt: Number(n.startedAt),
+          finishedAt: Number(n.finishedAt),
+        })),
+        roots: [...res.roots],
+      })
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
   async cancel(workspacePath: string): Promise<Result<void>> {
     try {
       await this.client.cancelExecution({ workspacePath })
@@ -899,9 +938,13 @@ export class GrpcGateway implements DaemonGateway {
     }
   }
 
-  async setAddonEnabled(id: string, enabled: boolean): Promise<Result<void>> {
+  async setAddonEnabled(
+    id: string,
+    enabled: boolean,
+    workspacePath = '',
+  ): Promise<Result<void>> {
     try {
-      await this.client.setAddonEnabled({ id, workspacePath: '', enabled })
+      await this.client.setAddonEnabled({ id, workspacePath, enabled })
       return ok(undefined)
     } catch (e) {
       return toErr(e)

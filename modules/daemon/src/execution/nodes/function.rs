@@ -28,9 +28,7 @@ impl NodeExecutor for CallFunctionExecutor {
         _inputs: &HashMap<PinId, Value>,
         _ctx: &mut ExecutionContext,
     ) -> DaemonResult<HashMap<PinId, Value>> {
-        Err(DaemonError::Execution(
-            "CallFunction is handled by the interpreter".to_string(),
-        ))
+        Err(DaemonError::Execution("CallFunction is handled by the interpreter".to_string()))
     }
 }
 
@@ -49,9 +47,7 @@ impl NodeExecutor for FunctionEntryExecutor {
         _inputs: &HashMap<PinId, Value>,
         _ctx: &mut ExecutionContext,
     ) -> DaemonResult<HashMap<PinId, Value>> {
-        Err(DaemonError::Execution(
-            "FunctionEntry is handled by the interpreter".to_string(),
-        ))
+        Err(DaemonError::Execution("FunctionEntry is handled by the interpreter".to_string()))
     }
 }
 
@@ -70,8 +66,6 @@ impl NodeExecutor for FunctionExitExecutor {
         _inputs: &HashMap<PinId, Value>,
         _ctx: &mut ExecutionContext,
     ) -> DaemonResult<HashMap<PinId, Value>> {
-        Err(DaemonError::Execution(
-            "FunctionExit is handled by the interpreter".to_string(),
-        ))
+        Err(DaemonError::Execution("FunctionExit is handled by the interpreter".to_string()))
     }
 }

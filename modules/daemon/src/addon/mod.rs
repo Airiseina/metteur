@@ -2,8 +2,8 @@
 
 pub mod manifest;
 pub mod runtime;
-pub mod signer;
 pub mod signature;
+pub mod signer;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -116,7 +116,7 @@ impl AddonHost {
             let mut names = Vec::with_capacity(manifest.tools.len());
             for tool_entry in &manifest.tools {
                 let registered = format!("{}{}", pascal(&manifest.id), tool_entry.name);
-                self.registry.register_tool(Arc::new(AddonTool {
+                if let Err(err) = self.registry.try_register_tool(Arc::new(AddonTool {
                     package_dir: package_dir.clone(),
                     manifest: manifest.clone(),
                     function: tool_entry.function.clone(),
@@ -131,7 +131,13 @@ impl AddonHost {
                         .collect(),
                     addon_tool_names: self.addon_tool_names.clone(),
                     host: self.fallback_timeout_ms,
-                }));
+                })) {
+                    tracing::warn!(
+                        "skipping addon tool '{registered}' of '{}': {err}",
+                        manifest.id
+                    );
+                    continue;
+                }
                 names.push(registered);
             }
             tracing::info!(
@@ -401,7 +407,9 @@ impl Tool for AddonTool {
             permissions: self.permissions.clone(),
             addon_tool_names: self.addon_tool_names.read().clone(),
             registry: ctx.registry.clone(),
-            workspace_fs: Some(Arc::new(crate::workspace::fs::WorkspaceFs::new(ctx.workspace_root.clone()))),
+            workspace_fs: Some(Arc::new(crate::workspace::fs::WorkspaceFs::new(
+                ctx.workspace_root.clone(),
+            ))),
             transaction_log: ctx.transaction_log.clone(),
             llm_factory: ctx.llm_factory.clone(),
             config: ctx.config.clone(),
@@ -460,9 +468,7 @@ fn toml_table_to_json(table: &toml::Table) -> serde_json::Value {
     // Convert through TOML text to reuse the lossless serializer.
     toml::to_string(table)
         .ok()
-        .and_then(|text| {
-            text.parse::<toml::Table>().ok()
-        })
+        .and_then(|text| text.parse::<toml::Table>().ok())
         .map(|converted| toml_value_to_json(&toml::Value::Table(converted)))
         .unwrap_or(serde_json::json!({"type": "object"}))
 }

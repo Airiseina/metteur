@@ -6,16 +6,12 @@ use metteur_proto::proto::{
 };
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Handles `addons`: lists installed addons.
 pub(crate) async fn handle_addons(client: &mut DaemonClient<Channel>) -> anyhow::Result<Outcome> {
-    let list = client
-        .list_addons(ListAddonsRequest::default())
-        .await
-        .map_err(status)?
-        .into_inner();
+    let list = client.list_addons(ListAddonsRequest::default()).await.map_err(status)?.into_inner();
     Ok(Outcome::Printed(print::addons(&list)))
 }
 

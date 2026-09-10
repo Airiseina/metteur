@@ -31,9 +31,15 @@ export const useAddonStore = defineStore('addon', () => {
     return u.ok ? u.data : null
   }
 
-  async function setEnabled(id: string, enabled: boolean) {
-    const r = await gateway.setAddonEnabled(id, enabled)
-    if (r.ok) await refresh()
+  /** Toggle an addon in the scope that owns it (workspace addons need the
+   *  workspace path, or the daemon resolves them against the global dir). */
+  async function setEnabled(id: string, enabled: boolean): Promise<string> {
+    const target = addons.value.find((a) => a.id === id)
+    const scope = target?.scope === 'workspace' ? (workspace.active?.path ?? '') : ''
+    const r = await gateway.setAddonEnabled(id, enabled, scope)
+    if (!r.ok) return r.error
+    await refresh()
+    return ''
   }
 
   return { addons, usage, refresh, setEnabled }

@@ -35,8 +35,9 @@ impl NodeExecutor for DelayExecutor {
 /// Pauses execution until a user approves or denies the request.
 ///
 /// The decision is published as an `approval_request` execution event and
-/// resolved through the shared broker; the outcome is exposed on the
-/// `Allowed` data pin so callers can branch on it.
+/// resolved through the shared broker. The outcome is exposed on the `Allowed`
+/// data pin, and the interpreter routes the `Approved` or `Denied` execution
+/// branch from it.
 pub struct RequestApprovalExecutor;
 
 #[async_trait]

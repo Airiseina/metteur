@@ -36,6 +36,7 @@ service Daemon {
   // Execution state management.
   rpc ListExecutions(ListExecutionsRequest) returns (ExecutionList);
   rpc ContinueExecution(ContinueExecutionRequest) returns (stream ExecutionEvent);
+  rpc GetExecutionTree(GetExecutionTreeRequest) returns (ExecutionTree);
 
   // Audit log.
   rpc ListAuditLog(ListAuditLogRequest) returns (AuditLogList);
@@ -238,6 +239,30 @@ message ExecutionList {
 message ContinueExecutionRequest {
   string workspace_path = 1;
   string run_id = 2;
+}
+
+message GetExecutionTreeRequest {
+  string workspace_path = 1;
+  string run_id = 2;
+}
+
+message ExecTreeNode {
+  string id = 1;
+  // run | node:<kind> | subagent | function:<name>
+  string kind = 2;
+  string label = 3;
+  string parent = 4;
+  repeated string children = 5;
+  // running | done | failed:<reason>
+  string status = 6;
+  uint64 tokens = 7;
+  int64 started_at = 8;
+  int64 finished_at = 9; // 0 = still running
+}
+
+message ExecutionTree {
+  repeated ExecTreeNode nodes = 1;
+  repeated string roots = 2;
 }
 
 message ListAuditLogRequest {

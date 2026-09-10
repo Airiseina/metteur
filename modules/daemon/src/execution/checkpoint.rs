@@ -60,6 +60,27 @@ pub struct ExecutionCheckpoint {
     pub triggered: Vec<NodeId>,
     /// Mutations recorded so far, for rollback.
     pub transaction_log: Vec<TransactionEntry>,
+    /// Completion order of the root scheduler (retry segment boundary).
+    #[serde(default)]
+    pub executed_order: Vec<NodeId>,
+    /// Failed validation attempts per validator node.
+    #[serde(default)]
+    pub attempt_counts: HashMap<NodeId, u32>,
+    /// Rollback boundaries per validator node, refreshed on each pass.
+    #[serde(default)]
+    pub validation_marks: HashMap<NodeId, super::context::RetryMark>,
+    /// Frame-scoped variable maps, innermost last (mirrors the call stack).
+    #[serde(default)]
+    pub variables: Vec<HashMap<String, Value>>,
+    /// Active ForEach loops, innermost last.
+    #[serde(default)]
+    pub foreach_stack: Vec<super::context::ForEachState>,
+    /// The agent execution tree of the run.
+    #[serde(default)]
+    pub exec_tree: super::tree::ExecTree,
+    /// Tree ids of entered function frames, innermost last.
+    #[serde(default)]
+    pub frame_trees: Vec<String>,
     /// The failure reason, if the run failed.
     pub error: Option<String>,
 }
@@ -79,6 +100,13 @@ impl ExecutionCheckpoint {
             pending: Vec::new(),
             triggered: Vec::new(),
             transaction_log: Vec::new(),
+            executed_order: Vec::new(),
+            attempt_counts: HashMap::new(),
+            validation_marks: HashMap::new(),
+            variables: vec![HashMap::new()],
+            foreach_stack: Vec::new(),
+            exec_tree: super::tree::ExecTree::new(),
+            frame_trees: Vec::new(),
             error: None,
         }
     }

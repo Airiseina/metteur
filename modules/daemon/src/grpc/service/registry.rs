@@ -6,13 +6,15 @@ use tonic::{Request, Response, Status};
 
 use super::super::proto::{
     AddonInfo, AddonList, Empty, InstallAddonRequest, ListAddonsRequest, McpServerInfo,
-    McpServerList, NodeKindList, SetAddonEnabledRequest, ToolInfo, ToolList,
-    UninstallAddonRequest,
+    McpServerList, NodeKindList, SetAddonEnabledRequest, ToolInfo, ToolList, UninstallAddonRequest,
 };
 use super::*;
 
 impl DaemonService {
-    pub(crate) async fn list_tools(&self, _request: Request<Empty>) -> Result<Response<ToolList>, Status> {
+    pub(crate) async fn list_tools(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<ToolList>, Status> {
         let tools = self
             .state
             .registry

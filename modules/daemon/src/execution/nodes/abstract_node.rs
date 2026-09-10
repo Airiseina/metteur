@@ -7,11 +7,11 @@ use async_trait::async_trait;
 use metteur_shared::llm::{ContextManager, Message, Role};
 use metteur_shared::{Blueprint, Node, PinId, Value};
 
-use crate::observability::anon::Anonymizer;
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
 use crate::execution::interpreter::{ExecutionEvent, Interpreter};
 use crate::execution::react::{ReactOptions, run_react};
+use crate::observability::anon::Anonymizer;
 use crate::registry::{NodeExecutor, Registry};
 
 /// A node whose execution plans a sub-blueprint with an LLM and runs it.
@@ -225,7 +225,22 @@ async fn expand_blueprint(ctx: &mut ExecutionContext, blueprint: Blueprint) -> D
     // the nested run re-execute the outer graph.
     let node_count = blueprint.nodes.len();
     let shared = Arc::new(parking_lot::RwLock::new(blueprint));
-    let nested_events = interpreter.run(&shared, None).await?;
+    ctx.tree_ops.push(crate::execution::TreeOp::SpawnChild {
+        kind: crate::execution::TreeNodeKind::Function("abstract".to_string()),
+        label: format!("abstract expansion ({node_count} nodes)"),
+    });
+    let nested_events = match interpreter.run(&shared, None).await {
+        Ok(events) => events,
+        Err(err) => {
+            ctx.tree_ops.push(crate::execution::TreeOp::FinishCurrent {
+                status: crate::execution::TreeNodeStatus::Failed(err.to_string()),
+            });
+            return Err(err);
+        }
+    };
+    ctx.tree_ops.push(crate::execution::TreeOp::FinishCurrent {
+        status: crate::execution::TreeNodeStatus::Done,
+    });
     if let Some(tx) = &event_tx {
         for event in nested_events {
             let _ = tx.send(forward_event(event, label));

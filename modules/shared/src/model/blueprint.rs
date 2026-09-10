@@ -119,9 +119,9 @@ impl FromStr for DataType {
                 if part.trim().is_empty() {
                     continue;
                 }
-                let (name, ty) = part.split_once(':').ok_or_else(|| {
-                    format!("object field '{part}' must be 'name:type'")
-                })?;
+                let (name, ty) = part
+                    .split_once(':')
+                    .ok_or_else(|| format!("object field '{part}' must be 'name:type'"))?;
                 fields.insert(name.trim().to_string(), ty.trim().parse()?);
             }
             return Ok(DataType::Object(fields));

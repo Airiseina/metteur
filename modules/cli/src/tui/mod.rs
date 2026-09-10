@@ -67,7 +67,7 @@ fn init_terminal() -> anyhow::Result<Terminal<CrosstermBackend<std::io::Stdout>>
 fn raw_mode_echo_still_active() -> bool {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE,
+        ENABLE_ECHO_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
     };
     unsafe {
         let handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -160,11 +160,7 @@ fn apply_event(app: &mut AppModel, event: UiEvent) {
 }
 
 /// Opens the initial workspace and reflects it in the model.
-async fn open_workspace(
-    client: &mut DaemonClient<Channel>,
-    app: &mut AppModel,
-    path: &str,
-) {
+async fn open_workspace(client: &mut DaemonClient<Channel>, app: &mut AppModel, path: &str) {
     let mut state = crate::commands::SessionState {
         current_ws: None,
         auto_approve: false,
@@ -347,6 +343,10 @@ async fn execute_command(
             app.set_run_status(&start.label, "running");
             spawn_stream_forwarder(start.stream, start.label.clone(), tx.clone());
         }
+        Ok(crate::commands::Outcome::StartedChat(start)) => {
+            app.set_run_status(&start.label, "chatting");
+            spawn_chat_forwarder(start.stream, start.label.clone(), tx.clone());
+        }
         Err(err) => app.push_log(Kind::Error, err.to_string()),
     }
     false
@@ -377,6 +377,48 @@ fn spawn_stream_forwarder(
                     break;
                 }
             }
+        }
+        let status = if failed {
+            "failed"
+        } else {
+            "finished"
+        }
+        .to_string();
+        tx.send(UiEvent::RunStatus(label.clone(), status)).ok();
+        tx.send(UiEvent::RunDone(label)).ok();
+    });
+}
+
+/// Forwards chat events into the UI, accumulating deltas into one reply.
+fn spawn_chat_forwarder(
+    mut stream: tonic::codec::Streaming<metteur_proto::proto::ChatEvent>,
+    label: String,
+    tx: mpsc::UnboundedSender<UiEvent>,
+) {
+    tokio::spawn(async move {
+        let mut reply = String::new();
+        let mut failed = false;
+        while let Some(event) = stream.message().await.transpose() {
+            match event {
+                Ok(event) => match crate::print::chat_event(&event) {
+                    crate::print::ChatLine::Inline(text) => reply.push_str(&text),
+                    crate::print::ChatLine::Line(text) => {
+                        if !reply.is_empty() {
+                            tx.send(UiEvent::Log(Kind::Info, std::mem::take(&mut reply))).ok();
+                        }
+                        tx.send(UiEvent::Log(Kind::Event, text)).ok();
+                    }
+                    crate::print::ChatLine::Done => {}
+                },
+                Err(err) => {
+                    tx.send(UiEvent::Log(Kind::Error, format!("chat failed: {err}"))).ok();
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if !reply.is_empty() {
+            tx.send(UiEvent::Log(Kind::Info, reply)).ok();
         }
         let status = if failed {
             "failed"

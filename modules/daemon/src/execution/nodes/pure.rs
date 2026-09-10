@@ -1,7 +1,7 @@
 //! Pure-function scalar node executors: math, comparison and logic.
 
-use std::collections::HashMap;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use metteur_shared::{Node, PinId, Value};

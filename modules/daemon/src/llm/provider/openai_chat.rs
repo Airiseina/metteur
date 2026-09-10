@@ -102,6 +102,8 @@ impl LlmClient for OpenAiChatClient {
     ) -> DaemonResult<LlmResponse> {
         let mut body = self.build_body(ctx, params, tools);
         body["stream"] = json!(true);
+        // Usage is omitted from streamed responses unless explicitly requested.
+        body["stream_options"] = json!({ "include_usage": true });
         let url = format!("{}/chat/completions", self.base_url);
         let resp = self
             .http

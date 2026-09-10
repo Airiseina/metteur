@@ -72,8 +72,7 @@ pub async fn run(
     // signal before fully starting.
     let passive = cli.passive || global_config.daemon.wake;
     if passive {
-        let wake_path =
-            cli.wake_path.clone().unwrap_or_else(crate::wake::default_wake_path);
+        let wake_path = cli.wake_path.clone().unwrap_or_else(crate::wake::default_wake_path);
         tracing::info!("passive mode: waiting for wake signal");
         let wake_fut = crate::wake::wait_for_wake(&wake_path);
         if let Some(mut shutdown) = shutdown.as_ref().cloned() {
@@ -105,8 +104,7 @@ pub async fn run(
         }
     };
 
-    let data_dir =
-        cli.data_dir.clone().unwrap_or(crate::config::global_config_dir()?);
+    let data_dir = cli.data_dir.clone().unwrap_or(crate::config::global_config_dir()?);
     let global_db = crate::storage::persistence::Db::open(&data_dir.join("db"))?;
 
     let registry = Arc::new(registry);
@@ -135,7 +133,9 @@ pub async fn run(
     if let Some(metrics_addr) = cli.metrics_addr {
         let metrics = state.metrics.clone();
         tokio::spawn(async move {
-            if let Err(err) = crate::observability::metrics::http::serve(metrics_addr, metrics).await {
+            if let Err(err) =
+                crate::observability::metrics::http::serve(metrics_addr, metrics).await
+            {
                 tracing::error!("metrics server failed: {err}");
             }
         });
@@ -166,7 +166,9 @@ fn resolve_listen(
         return Ok(cli_addr);
     }
     match override_addr {
-        Some(addr) => addr.parse().map_err(|e| format!("invalid [daemon].listen_addr {addr:?}: {e}").into()),
+        Some(addr) => {
+            addr.parse().map_err(|e| format!("invalid [daemon].listen_addr {addr:?}: {e}").into())
+        }
         None => Ok(cli_addr),
     }
 }

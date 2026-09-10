@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::Empty;
+use metteur_proto::proto::daemon_client::DaemonClient;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 /// PEM file paths that enable mutual TLS when provided together.

@@ -7,20 +7,19 @@ use std::sync::Arc;
 use metteur_shared::model::function::{FnPin, FunctionEntry, FunctionSource};
 use tonic::{Request, Response, Status};
 
-use crate::observability::audit::AuditWriter;
 use crate::error::DaemonError;
-use crate::execution::interrupt::{Interrupt, InterruptBus, InterruptPriority};
 use crate::execution::DbCheckpointSink;
+use crate::execution::interrupt::{Interrupt, InterruptBus, InterruptPriority};
+use crate::observability::audit::AuditWriter;
 
+use super::super::acl::subject_from_request;
 use super::super::proto::{
     self, Blueprint, CancelRequest, CompileDslRequest, DecompileBlueprintRequest,
     DecompileDslResponse, DeleteFunctionRequest, Empty, ExecuteBlueprintRequest, ExecutionEvent,
-    InterruptRequest, ListFunctionsRequest, LoadBlueprintRequest, LoadFunctionRequest,
-    LoadFunctionResponse, PauseRequest, ResumeRequest, SaveBlueprintRequest,
-    SaveFunctionRequest, SaveFunctionResponse, FnPin as ProtoFnPin,
-    FunctionInfo as ProtoFunctionInfo, FunctionList,
+    FnPin as ProtoFnPin, FunctionInfo as ProtoFunctionInfo, FunctionList, InterruptRequest,
+    ListFunctionsRequest, LoadBlueprintRequest, LoadFunctionRequest, LoadFunctionResponse,
+    PauseRequest, ResumeRequest, SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse,
 };
-use super::super::acl::subject_from_request;
 use super::*;
 
 impl DaemonService {
@@ -122,6 +121,7 @@ impl DaemonService {
             cancel_flag,
             ws.lsp_manager.clone(),
             addon_fragments,
+            Some(ws.version_manager.clone()),
         )
         .await?;
 
@@ -231,8 +231,8 @@ impl DaemonService {
         let body = proto_to_blueprint(&body_proto).map_err(to_status)?;
         let mut entry = proto_to_function(&info, body).map_err(to_status)?;
         crate::registry::library::validate(&entry).map_err(Status::invalid_argument)?;
-        entry.signature = FunctionEntry::derive_signature(&entry.body)
-            .map_err(Status::invalid_argument)?;
+        entry.signature =
+            FunctionEntry::derive_signature(&entry.body).map_err(Status::invalid_argument)?;
 
         if req.workspace_path.is_empty() {
             let db = self
@@ -437,7 +437,8 @@ fn proto_to_pin(proto: &proto::Pin) -> Result<metteur_shared::Pin, DaemonError> 
     } else {
         serde_json::from_str::<serde_json::Value>(&proto.default_json).ok()
     };
-    Ok(metteur_shared::Pin { id: uuid::Uuid::parse_str(&proto.id)
+    Ok(metteur_shared::Pin {
+        id: uuid::Uuid::parse_str(&proto.id)
             .map_err(|e| DaemonError::Serialization(e.to_string()))?,
         key: if proto.key.is_empty() {
             None
@@ -501,7 +502,8 @@ fn blueprint_to_proto(blueprint: &metteur_shared::Blueprint) -> Blueprint {
                 pins: n
                     .pins
                     .iter()
-                    .map(|p| proto::Pin { id: p.id.to_string(),
+                    .map(|p| proto::Pin {
+                        id: p.id.to_string(),
                         name: p.name.clone(),
                         pin_type: match p.pin_type {
                             metteur_shared::PinType::ExecInput => "ExecInput".to_string(),
@@ -567,7 +569,11 @@ fn proto_to_fn_pin(pin: &ProtoFnPin) -> Result<FnPin, DaemonError> {
     Ok(FnPin {
         name: pin.name.clone(),
         data_type: pin.data_type.parse().unwrap_or(metteur_shared::DataType::Void),
-        description: if pin.description.is_empty() { None } else { Some(pin.description.clone()) },
+        description: if pin.description.is_empty() {
+            None
+        } else {
+            Some(pin.description.clone())
+        },
         default,
         optional: pin.optional,
     })
@@ -579,11 +585,7 @@ fn fn_pin_to_proto(pin: &FnPin) -> ProtoFnPin {
         name: pin.name.clone(),
         data_type: pin.data_type.to_string(),
         description: pin.description.clone().unwrap_or_default(),
-        default_json: pin
-            .default
-            .as_ref()
-            .map(serde_json::Value::to_string)
-            .unwrap_or_default(),
+        default_json: pin.default.as_ref().map(serde_json::Value::to_string).unwrap_or_default(),
         optional: pin.optional,
     }
 }
@@ -593,22 +595,17 @@ fn proto_to_function(
     info: &ProtoFunctionInfo,
     body: metteur_shared::Blueprint,
 ) -> Result<FunctionEntry, DaemonError> {
-    let inputs = info
-        .inputs
-        .iter()
-        .map(proto_to_fn_pin)
-        .collect::<Result<Vec<_>, _>>()?;
-    let outputs = info
-        .outputs
-        .iter()
-        .map(proto_to_fn_pin)
-        .collect::<Result<Vec<_>, _>>()?;
+    let inputs = info.inputs.iter().map(proto_to_fn_pin).collect::<Result<Vec<_>, _>>()?;
+    let outputs = info.outputs.iter().map(proto_to_fn_pin).collect::<Result<Vec<_>, _>>()?;
     Ok(FunctionEntry {
         id: uuid::Uuid::parse_str(&info.id)
             .map_err(|e| DaemonError::Serialization(e.to_string()))?,
         name: info.name.clone(),
         description: info.description.clone(),
-        signature: metteur_shared::model::function::FunctionSignature { inputs, outputs },
+        signature: metteur_shared::model::function::FunctionSignature {
+            inputs,
+            outputs,
+        },
         body,
         source: FunctionSource::Workspace,
     })

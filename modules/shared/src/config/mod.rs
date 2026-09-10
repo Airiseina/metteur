@@ -298,7 +298,11 @@ impl<'de> Deserialize<'de> for AutostartMode {
             }
 
             fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-                Ok(if v { AutostartMode::Login } else { AutostartMode::Off })
+                Ok(if v {
+                    AutostartMode::Login
+                } else {
+                    AutostartMode::Off
+                })
             }
 
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
@@ -322,6 +326,23 @@ pub struct ExecutionConfig {
     /// (`0` disables the breaker).
     #[serde(default)]
     pub circuit_break_after: u32,
+    /// Default total attempts (including the first) for validators that do
+    /// not set an explicit `data.retry.max_attempts`. `1` disables retry.
+    #[serde(default = "default_validation_max_attempts")]
+    pub validation_max_attempts: u32,
+    /// Maximum body entries of one ForEach loop (`0` disables the guard).
+    #[serde(default = "default_foreach_max_iterations")]
+    pub foreach_max_iterations: u32,
+}
+
+/// Default validator retry budget.
+fn default_validation_max_attempts() -> u32 {
+    1
+}
+
+/// Default ForEach iteration guard.
+fn default_foreach_max_iterations() -> u32 {
+    1000
 }
 
 /// Daemon process configuration.
@@ -493,6 +514,16 @@ impl Config {
                     workspace.execution.circuit_break_after
                 } else {
                     self.execution.circuit_break_after
+                },
+                validation_max_attempts: if workspace.execution.validation_max_attempts != 1 {
+                    workspace.execution.validation_max_attempts
+                } else {
+                    self.execution.validation_max_attempts
+                },
+                foreach_max_iterations: if workspace.execution.foreach_max_iterations != 1000 {
+                    workspace.execution.foreach_max_iterations
+                } else {
+                    self.execution.foreach_max_iterations
                 },
             },
             daemon: DaemonConfig {
@@ -805,23 +836,33 @@ extensions = ["rs"]
         let global = Config {
             execution: ExecutionConfig {
                 circuit_break_after: 3,
+                validation_max_attempts: 2,
+                foreach_max_iterations: 100,
             },
             ..Default::default()
         };
         let workspace = Config {
             execution: ExecutionConfig {
                 circuit_break_after: 0,
+                validation_max_attempts: 1,
+                foreach_max_iterations: 1000,
             },
             ..Default::default()
         };
         let merged = global.merge(&workspace);
         assert_eq!(merged.execution.circuit_break_after, 3);
+        assert_eq!(merged.execution.validation_max_attempts, 2);
+        assert_eq!(merged.execution.foreach_max_iterations, 100);
         let workspace = Config {
             execution: ExecutionConfig {
                 circuit_break_after: 7,
+                validation_max_attempts: 5,
+                foreach_max_iterations: 50,
             },
             ..Default::default()
         };
         assert_eq!(global.merge(&workspace).execution.circuit_break_after, 7);
+        assert_eq!(global.merge(&workspace).execution.validation_max_attempts, 5);
+        assert_eq!(global.merge(&workspace).execution.foreach_max_iterations, 50);
     }
 }

@@ -24,22 +24,22 @@ use crate::sandbox::approval::ApprovalBroker;
 
 use super::proto::daemon_server::Daemon;
 use super::proto::{
-    AbortChatRequest, AddonInfo, AddonList, ApprovalDecisionRequest, AuditLogList,
-    Blueprint, CancelRequest, ChatEvent, ChatSessionList, CloseWorkspaceRequest,
-    CompileDslRequest, ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest,
-    DecompileBlueprintRequest, DecompileDslResponse, DeleteChatSessionRequest, DeleteFunctionRequest,
-    Empty, ExecuteBlueprintRequest, ExecutionEvent, ExecutionList, FileHistory, FileInfo, FileList,
-    FunctionList, GetChatSessionRequest, GetChatSessionResponse, GetConfigRequest,
-    GetExecutionUsageRequest, GetFileHistoryRequest, InstallAddonRequest, InterruptRequest,
-    ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest,
-    ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest,
-    LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest,
-    PauseRequest, Config as ProtoConfig, ReadFileRequest, ReadFileResponse, RemoveFileRequest,
-    RenameFileRequest, ResumeRequest, RollbackRequest, RevealInExplorerRequest,
-    SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse, SendChatRequest,
-    SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest,
-    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest,
-    WriteFileRequest, WorkspaceInfo, WorkspaceList,
+    AbortChatRequest, AddonInfo, AddonList, ApprovalDecisionRequest, AuditLogList, Blueprint,
+    CancelRequest, ChatEvent, ChatSessionList, CloseWorkspaceRequest, CompileDslRequest,
+    Config as ProtoConfig, ContinueExecutionRequest, CreateDirRequest, CreateSnapshotRequest,
+    DecompileBlueprintRequest, DecompileDslResponse, DeleteChatSessionRequest,
+    DeleteFunctionRequest, Empty, ExecuteBlueprintRequest, ExecutionEvent, ExecutionList,
+    ExecutionTree, FileHistory, FileInfo, FileList, FunctionList, GetChatSessionRequest,
+    GetChatSessionResponse, GetConfigRequest, GetExecutionTreeRequest, GetExecutionUsageRequest,
+    GetFileHistoryRequest, InstallAddonRequest, InterruptRequest, ListAddonsRequest,
+    ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest, ListFilesRequest,
+    ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest, LoadFunctionRequest,
+    LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
+    ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest, ResumeRequest,
+    RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest,
+    SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo,
+    SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent,
+    WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList, WriteFileRequest,
 };
 
 pub use state::AppState;
@@ -77,8 +77,7 @@ impl Daemon for DaemonService {
         tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>;
     type ContinueExecutionStream =
         tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>;
-    type WatchWorkspaceStream =
-        tokio_stream::wrappers::ReceiverStream<Result<WatchEvent, Status>>;
+    type WatchWorkspaceStream = tokio_stream::wrappers::ReceiverStream<Result<WatchEvent, Status>>;
     type SendChatStream =
         tokio_stream::wrappers::UnboundedReceiverStream<Result<ChatEvent, Status>>;
 
@@ -184,10 +183,7 @@ impl Daemon for DaemonService {
         self.list_snapshots(request).await
     }
 
-    async fn rollback(
-        &self,
-        request: Request<RollbackRequest>,
-    ) -> Result<Response<Empty>, Status> {
+    async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<Empty>, Status> {
         self.rollback(request).await
     }
 
@@ -203,6 +199,13 @@ impl Daemon for DaemonService {
         request: Request<ContinueExecutionRequest>,
     ) -> Result<Response<Self::ContinueExecutionStream>, Status> {
         self.continue_execution(request).await
+    }
+
+    async fn get_execution_tree(
+        &self,
+        request: Request<GetExecutionTreeRequest>,
+    ) -> Result<Response<ExecutionTree>, Status> {
+        self.get_execution_tree(request).await
     }
 
     async fn get_file_history(

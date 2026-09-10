@@ -57,6 +57,7 @@ impl NodeExecutor for CallLlmExecutor {
 
         let opts = react_options_from_node(node);
         let outcome = run_react(ctx, context, &opts).await?;
+        ctx.tree_ops.push(crate::execution::TreeOp::AddTokens(outcome.usage.total_tokens));
 
         // Stream the final context composition so the audit UI can render a
         // live per-region usage bar for this CallLLM node.
@@ -143,14 +144,20 @@ mod tests {
             kind: "CallLLM".to_string(),
             position: (0.0, 0.0),
             pins: vec![
-                Pin { id: uuid::Uuid::new_v4(),
+                Pin {
+                    id: uuid::Uuid::new_v4(),
                     name: "Result".to_string(),
                     pin_type: PinType::DataOutput,
-                    data_type: DataType::String, ..Default::default() },
-                Pin { id: uuid::Uuid::new_v4(),
+                    data_type: DataType::String,
+                    ..Default::default()
+                },
+                Pin {
+                    id: uuid::Uuid::new_v4(),
                     name: "Context".to_string(),
                     pin_type: PinType::DataOutput,
-                    data_type: DataType::Json, ..Default::default() },
+                    data_type: DataType::Json,
+                    ..Default::default()
+                },
             ],
             data,
         }

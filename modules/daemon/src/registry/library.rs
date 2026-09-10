@@ -28,13 +28,9 @@ pub fn builtin_chain_of_thought() -> FunctionEntry {
     let llm_result = uuid::Uuid::new_v4();
     let exit_result = uuid::Uuid::new_v4();
 
-    let entry_pin =
-        |id: uuid::Uuid, name: &str, pin_type: PinType, data_type: DataType| Pin::data(
-            name.to_string(),
-            pin_type,
-            data_type,
-            id,
-        );
+    let entry_pin = |id: uuid::Uuid, name: &str, pin_type: PinType, data_type: DataType| {
+        Pin::data(name.to_string(), pin_type, data_type, id)
+    };
 
     FunctionEntry {
         id: fn_id,
@@ -120,8 +116,7 @@ pub fn builtin_chain_of_thought() -> FunctionEntry {
 
 /// Stores a function entry into a database under the `functions` column family.
 pub fn save(db: &Db, entry: &FunctionEntry) -> DaemonResult<()> {
-    let data =
-        serde_json::to_vec(entry).map_err(|e| DaemonError::Serialization(e.to_string()))?;
+    let data = serde_json::to_vec(entry).map_err(|e| DaemonError::Serialization(e.to_string()))?;
     db.put(crate::storage::persistence::cf::FUNCTIONS, entry.name.as_bytes(), &data)
 }
 
@@ -129,8 +124,8 @@ pub fn save(db: &Db, entry: &FunctionEntry) -> DaemonResult<()> {
 pub fn load_all(db: &Db) -> DaemonResult<Vec<FunctionEntry>> {
     let mut out = Vec::new();
     for (_, value) in db.scan(crate::storage::persistence::cf::FUNCTIONS)? {
-        let entry: FunctionEntry =
-            serde_json::from_slice(&value).map_err(|e| DaemonError::Serialization(e.to_string()))?;
+        let entry: FunctionEntry = serde_json::from_slice(&value)
+            .map_err(|e| DaemonError::Serialization(e.to_string()))?;
         out.push(entry);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));

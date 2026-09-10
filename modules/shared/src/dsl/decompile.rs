@@ -20,19 +20,53 @@ pub fn decompile(blueprint: &Blueprint) -> String {
         // for node data), so literals survive a compile round trip.
         let lit = |pin: &Pin| -> Option<String> {
             let key = pin.key.as_deref().unwrap_or(&pin.name);
-            node.data
-                .get(key)
-                .and_then(|v| if v.is_null() { None } else { Some(v.to_string()) })
+            node.data.get(key).and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            })
         };
         let args: Vec<String> = node
             .pins
             .iter()
-            .filter(|p| p.pin_type == PinType::DataInput)
+            .filter(|p| {
+                p.pin_type == PinType::DataInput
+                    || (node.kind == "Start" && p.pin_type == PinType::DataOutput)
+            })
             .filter_map(|p| {
                 let key = p.key.as_deref().unwrap_or(&p.name);
                 lit(p).map(|v| format!("{key}: {v}"))
             })
             .collect();
+        // Non-pin data entries (validator mode/regex/retry and similar node
+        // config) ride along as extra keyed items so they survive the round
+        // trip; keys already covered by a pin are skipped.
+        let mut args = args;
+        // A Switch without an explicit `cases` entry derives it from its
+        // `Case_*` outlets so the branch set survives the round trip.
+        if node.kind == "Switch" && node.data.get("cases").is_none() {
+            let cases: Vec<String> = node
+                .pins
+                .iter()
+                .filter(|p| p.pin_type == PinType::ExecOutput)
+                .filter_map(|p| p.name.strip_prefix("Case_"))
+                .map(|c| format!("\"{c}\""))
+                .collect();
+            if !cases.is_empty() {
+                // No spaces inside the array: `array_lit` is an atomic rule.
+                args.push(format!("cases: [{}]", cases.join(",")));
+            }
+        }
+        for (key, value) in node.data.as_object().into_iter().flatten() {
+            if value.is_null()
+                || node.pins.iter().any(|p| p.key.as_deref() == Some(key) || &p.name == key)
+            {
+                continue;
+            }
+            args.push(format!("{key}: {value}"));
+        }
         let head = if node.id == entry.id {
             format!("entry n{i}: {}", node.kind)
         } else {
@@ -65,10 +99,7 @@ pub fn decompile(blueprint: &Blueprint) -> String {
             out.push_str(&format!("n{src_idx}{pin} -> n{dst_idx}\n"));
         } else {
             let dst_pin = dst.pins.iter().find(|p| p.id == edge.target_pin).unwrap();
-            out.push_str(&format!(
-                "$n{dst_idx}.{} <- n{src_idx}.{}\n",
-                dst_pin.name, src_pin.name
-            ));
+            out.push_str(&format!("$n{dst_idx}.{} <- n{src_idx}.{}\n", dst_pin.name, src_pin.name));
         }
     }
     out

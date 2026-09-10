@@ -46,8 +46,15 @@ export interface NodePreset {
   outputs: Array<{ id: string; label: string; type: string; choices?: string[] }>
   hasExecIn: boolean
   hasExecOut: boolean
-  /** Extra exec output outlets (e.g. Branch's `true`/`false`), Unreal-style. */
+  /** Extra exec output outlets (e.g. Branch's `True`/`False`), Unreal-style. */
   execOutputs?: string[]
+  /** Daemon kind this preset builds (defaults to the registry key). Tool
+   *  presets reuse kind `Tool` with a prefilled `tool_name`. */
+  kind?: string
+  /** Display title in the palette and on the canvas (defaults to the kind). */
+  title?: string
+  /** Initial values by pin key (e.g. a prefilled `tool_name`). */
+  presetValues?: Record<string, string>
 }
 
 /** Builds a standard node preset: exec in/out plus labelled data pins. */
@@ -148,7 +155,44 @@ export const NODE_PRESETS: Record<string, NodePreset> = {
     outputs: [],
     hasExecIn: true,
     hasExecOut: false,
-    execOutputs: ['true', 'false'],
+    execOutputs: ['True', 'False'],
+  },
+  Switch: {
+    category: 'flow',
+    inputs: [{ id: 'case', label: 'Case', type: 'any' }],
+    outputs: [],
+    hasExecIn: true,
+    hasExecOut: false,
+    // Sample branches; edit the case list in the inspector to rebuild these.
+    execOutputs: ['Default', 'Case_a', 'Case_b'],
+  },
+  ForEach: {
+    category: 'flow',
+    inputs: [{ id: 'list', label: 'List', type: 'any' }],
+    outputs: [
+      { id: 'iteration', label: 'Iteration', type: 'any' },
+      { id: 'index', label: 'Index', type: 'int' },
+    ],
+    hasExecIn: true,
+    hasExecOut: false,
+    execOutputs: ['Body', 'Completed'],
+  },
+  VariableSet: {
+    category: 'flow',
+    inputs: [
+      { id: 'name', label: 'Name', type: 'string' },
+      { id: 'value', label: 'Value', type: 'any' },
+    ],
+    outputs: [{ id: 'value', label: 'Value', type: 'any' }],
+    hasExecIn: true,
+    hasExecOut: true,
+  },
+  VariableGet: {
+    category: 'flow',
+    inputs: [{ id: 'name', label: 'Name', type: 'string' }],
+    outputs: [{ id: 'value', label: 'Value', type: 'any' }],
+    hasExecIn: true,
+    hasExecOut: true,
   },
   FileReference: {
     category: 'module',
@@ -228,7 +272,58 @@ export const NODE_PRESETS: Record<string, NodePreset> = {
   ContextToText: un('module', 'context', 'string'),
   // Flow support.
   Delay: node('flow', [['Ms', 'int']], []),
-  RequestApproval: node('action', [['Message', 'string']], [['Allowed', 'bool']]),
+  RequestApproval: {
+    category: 'action',
+    inputs: [{ id: 'message', label: 'Message', type: 'string' }],
+    outputs: [{ id: 'allowed', label: 'Allowed', type: 'bool' }],
+    hasExecIn: true,
+    hasExecOut: true,
+    execOutputs: ['Approved', 'Denied'],
+  },
+  // Tool presets: the generic Tool node with a prefilled tool name.
+  SubAgentTool: {
+    category: 'action',
+    kind: 'Tool',
+    title: 'SubAgent',
+    presetValues: { tool_name: 'SpawnSubAgent' },
+    inputs: [
+      { id: 'tool_name', label: 'ToolName', type: 'string' },
+      { id: 'task', label: 'task', type: 'string' },
+      { id: 'system', label: 'system', type: 'string' },
+      { id: 'model', label: 'model', type: 'string' },
+      { id: 'max_iterations', label: 'max_iterations', type: 'int' },
+    ],
+    outputs: [{ id: 'result', label: 'Result', type: 'string' }],
+    hasExecIn: true,
+    hasExecOut: true,
+  },
+  LspCheckTool: {
+    category: 'action',
+    kind: 'Tool',
+    title: 'LspCheck',
+    presetValues: { tool_name: 'CheckDiagnostics' },
+    inputs: [
+      { id: 'tool_name', label: 'ToolName', type: 'string' },
+      { id: 'path', label: 'path', type: 'string' },
+    ],
+    outputs: [{ id: 'result', label: 'Result', type: 'string' }],
+    hasExecIn: true,
+    hasExecOut: true,
+  },
+  SnapshotTakeTool: {
+    category: 'action',
+    kind: 'Tool',
+    title: 'SnapshotTake',
+    presetValues: { tool_name: 'SnapshotTake' },
+    inputs: [
+      { id: 'tool_name', label: 'ToolName', type: 'string' },
+      { id: 'description', label: 'description', type: 'string' },
+      { id: 'alias', label: 'alias', type: 'string' },
+    ],
+    outputs: [{ id: 'result', label: 'Result', type: 'string' }],
+    hasExecIn: true,
+    hasExecOut: true,
+  },
 }
 
 /** Fallback preset applied to any kind not in the registry. */
@@ -282,18 +377,30 @@ export function pinsFor(preset: NodePreset): { inputs: BlueprintPin[]; outputs: 
   return { inputs, outputs }
 }
 
-/** Build a flow node from a kind, labelled with the preset's pins. */
+/** Build a flow node from a preset key, labelled with the preset's pins.
+ *
+ * `presetKey` selects the preset (pins, title, preset values); the daemon
+ * kind is the preset's `kind` override when present, else the key itself.
+ * Tool presets reuse kind `Tool` with a prefilled `tool_name`. */
 export function makeFlowNode(
   kind: string,
   position: { x: number; y: number },
   id: string,
+  presetKey: string = kind,
 ): FlowNode {
-  const preset = NODE_PRESETS[kind] ?? FALLBACK
+  const preset = NODE_PRESETS[presetKey] ?? FALLBACK
+  const daemonKind = preset.kind ?? kind
+  const { inputs, outputs } = pinsFor(preset)
+  const values: Record<string, string> = {}
+  for (const [pinKey, value] of Object.entries(preset.presetValues ?? {})) {
+    const pin = [...inputs, ...outputs].find((p) => p.key === pinKey)
+    if (pin) values[pin.id] = value
+  }
   return {
     id,
     type: 'blueprint',
     position,
-    data: { ...pinsFor(preset), title: kind, category: preset.category, values: {} },
+    data: { inputs, outputs, title: daemonKind, category: preset.category, values },
   }
 }
 

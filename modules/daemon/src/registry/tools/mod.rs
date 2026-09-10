@@ -5,6 +5,7 @@ pub mod deps;
 pub mod fs_tools;
 pub mod lsp_tools;
 pub mod replan;
+pub mod snapshot;
 pub mod subagent;
 
 use metteur_shared::Value;

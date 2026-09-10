@@ -17,12 +17,12 @@ use metteur_shared::llm::{
     ToolCall, ToolDefinition, ToolResult, ToolResultLifetime,
 };
 
-use crate::observability::anon::Anonymizer;
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
 use crate::execution::interrupt::InterruptBus;
 use crate::execution::interrupt::InterruptPriority;
 use crate::llm::{LlmClient, LlmProviderConfig, LlmResponse, MockClient, MockStep, ProviderKind};
+use crate::observability::anon::Anonymizer;
 
 /// The default maximum number of ReAct iterations.
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
@@ -97,9 +97,14 @@ impl Default for ReactOptions {
 #[derive(Debug, Clone)]
 pub enum ReactEvent {
     /// A completed assistant turn that answered without tool calls.
-    Assistant { text: String },
+    Assistant {
+        text: String,
+    },
     /// A tool invocation with its (still anonymized) textual result.
-    Tool { name: String, content: String },
+    Tool {
+        name: String,
+        content: String,
+    },
 }
 
 /// The result of a completed ReAct run.
@@ -204,12 +209,16 @@ async fn react_loop(
         // Race the LLM call against an emergency interrupt so that an
         // emergency message can abort an in-flight request. The streamed
         // variant forwards text deltas through `on_delta` as they arrive.
+        //
+        // The model sees an anonymized shadow copy; stored context keeps the
+        // original text so chat restore and audit remain readable.
         let response = {
+            let outbound = outbound_context(&context, &anonymizer).await;
             let raced = match &mut on_delta {
                 Some(delta) => {
                     race_stream(
                         client.as_ref(),
-                        &context,
+                        &outbound,
                         &params,
                         &tools,
                         &ctx.interrupts,
@@ -217,8 +226,10 @@ async fn react_loop(
                     )
                     .await
                 }
-                None => race_complete(client.as_ref(), &context, &params, &tools, &ctx.interrupts)
-                    .await,
+                None => {
+                    race_complete(client.as_ref(), &outbound, &params, &tools, &ctx.interrupts)
+                        .await
+                }
             };
             match raced {
                 Ok(LlmRace::Response(resp)) => resp,
@@ -239,7 +250,9 @@ async fn react_loop(
         if response.tool_calls.is_empty() {
             final_text = response.text;
             if let Some(cb) = on_event.as_deref_mut() {
-                cb(ReactEvent::Assistant { text: final_text.clone() });
+                cb(ReactEvent::Assistant {
+                    text: final_text.clone(),
+                });
             }
             break;
         }
@@ -254,19 +267,16 @@ async fn react_loop(
 
         // Execute each tool call and mix the results into the context.
         for call in &response.tool_calls {
-            let result = match invoke_tool(
-                ctx,
-                call,
-                opts.allowed_tools.as_ref(),
-                &anonymizer,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => return Err((err, context)),
-            };
+            let result =
+                match invoke_tool(ctx, call, opts.allowed_tools.as_ref(), &anonymizer).await {
+                    Ok(result) => result,
+                    Err(err) => return Err((err, context)),
+                };
             if let Some(cb) = on_event.as_deref_mut() {
-                cb(ReactEvent::Tool { name: call.name.clone(), content: result.clone() });
+                cb(ReactEvent::Tool {
+                    name: call.name.clone(),
+                    content: result.clone(),
+                });
             }
             let mixed = anonymizer.anonymize(&result).await;
             context.mix_in_tool_result(ToolResult {
@@ -283,6 +293,34 @@ async fn react_loop(
         context,
         usage: total_usage,
     })
+}
+
+/// Builds the outbound snapshot sent to the model.
+///
+/// System fragments, message text and tool-call arguments are anonymized
+/// through `anonymizer` (stable tokens, prefix-cache friendly). The stored
+/// context is untouched: chat restore and audit keep the original text.
+async fn outbound_context(context: &ContextManager, anonymizer: &Anonymizer) -> ContextManager {
+    if !anonymizer.is_enabled() {
+        return context.clone();
+    }
+    let mut outbound = context.clone();
+    for fragment in &mut outbound.system_fragments {
+        fragment.content = anonymizer.anonymize(&fragment.content).await;
+    }
+    for message in &mut outbound.messages {
+        for block in &mut message.content {
+            let ContentBlock::Text(text) = block;
+            *text = anonymizer.anonymize(text).await;
+        }
+        for call in &mut message.tool_calls {
+            let serialized = anonymizer.anonymize(&call.arguments.to_string()).await;
+            if let Ok(arguments) = serde_json::from_str(&serialized) {
+                call.arguments = arguments;
+            }
+        }
+    }
+    outbound
 }
 
 /// The outcome of the raced LLM call.
@@ -354,16 +392,27 @@ async fn llm_default_config(ctx: &ExecutionContext) -> LlmConfig {
     }
 }
 
-/// Billing context threaded through usage recording: currency + per-model
-/// configuration table (prices live in `llm.models`).
-pub(crate) type BillingCtx = (String, HashMap<String, LlmModelConfig>);
+/// Billing context threaded through usage recording: currency, reporting
+/// time zone (peak-window evaluation) and per-model configuration table
+/// (prices live in `llm.models`).
+pub(crate) type BillingCtx = (String, String, HashMap<String, LlmModelConfig>);
 
 /// Reads the billing section + model table of the merged workspace config.
+///
+/// The table is indexed by config key *and* by `model_id`, because the client
+/// reports the provider id (`model_id`) while configuration is keyed by the
+/// user-facing model name.
 async fn billing_config(ctx: &ExecutionContext) -> Option<BillingCtx> {
     match &ctx.config {
         Some(config) => {
             let cfg = config.read().await;
-            Some((cfg.billing.currency.clone(), cfg.llm.models.clone()))
+            let mut models = cfg.llm.models.clone();
+            for (key, model) in &cfg.llm.models {
+                if !model.model_id.is_empty() && model.model_id != *key {
+                    models.entry(model.model_id.clone()).or_insert_with(|| model.clone());
+                }
+            }
+            Some((cfg.billing.currency.clone(), cfg.billing.timezone.clone(), models))
         }
         None => None,
     }
@@ -380,7 +429,13 @@ pub(crate) async fn build_anonymizer(ctx: &ExecutionContext) -> Anonymizer {
     }
 }
 
-/// Builds an LLM client from the run options, falling back to configuration.
+/// Builds an LLM client from the run options, resolving the model table.
+///
+/// The configured model entry (`llm.models[<key>]`) is authoritative for the
+/// connection: its `api_type`, `api_endpoint`, `api_key` and `model_id` drive
+/// the request, so a caller only has to name the model. Explicit per-call
+/// `base_url`/`api_key` overrides still win, and an unconfigured model falls
+/// back to the plain provider defaults.
 fn build_client(
     ctx: &ExecutionContext,
     opts: &ReactOptions,
@@ -391,20 +446,51 @@ fn build_client(
         let delay_ms = std::time::Duration::from_millis(opts.mock_delay_ms.unwrap_or(0));
         return Ok(Arc::new(MockClient::new_delayed(vec![MockStep::Text(text)], delay_ms)));
     }
-    let kind = match opts.provider.as_str() {
-        "openai-chat" => ProviderKind::OpenAiChat,
-        "anthropic" => ProviderKind::Anthropic,
-        "openai-responses" => ProviderKind::OpenAiResponses,
-        other => return Err(DaemonError::Execution(format!("unknown llm provider '{other}'"))),
-    };
-    let model = opts
+
+    let model_key = opts
         .model
         .clone()
         .filter(|m| !m.is_empty())
         .or_else(|| defaults.default_model.clone())
+        .filter(|m| !m.is_empty());
+    let model_cfg = model_key.as_ref().and_then(|key| defaults.models.get(key));
+
+    // A configured `api_type` selects the provider; the option value is the
+    // fallback for callers that drive a bare provider without a model entry.
+    let provider = model_cfg
+        .map(|cfg| cfg.api_type.as_str())
+        .filter(|api_type| !api_type.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| opts.provider.clone());
+    let kind = match provider.as_str() {
+        "openai-chat" | "openai" => ProviderKind::OpenAiChat,
+        "anthropic" => ProviderKind::Anthropic,
+        "openai-responses" => ProviderKind::OpenAiResponses,
+        other => return Err(DaemonError::Execution(format!("unknown llm provider '{other}'"))),
+    };
+
+    let model_key = model_key.ok_or_else(|| {
+        DaemonError::Execution(
+            "no model configured; add one under Settings > LLM & Models".to_string(),
+        )
+    })?;
+    // The id sent to the provider usually differs from the config key.
+    let model = model_cfg
+        .map(|cfg| cfg.model_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(model_key);
+    let base_url = opts
+        .base_url
+        .clone()
+        .filter(|url| !url.is_empty())
+        .or_else(|| model_cfg.map(|cfg| cfg.api_endpoint.clone()).filter(|url| !url.is_empty()))
+        .unwrap_or_else(|| default_base_url(kind).to_string());
+    let api_key = opts
+        .api_key
+        .clone()
+        .filter(|key| !key.is_empty())
+        .or_else(|| model_cfg.map(|cfg| cfg.api_key.clone()).filter(|key| !key.is_empty()))
         .unwrap_or_default();
-    let base_url = opts.base_url.clone().unwrap_or_else(|| default_base_url(kind).to_string());
-    let api_key = opts.api_key.clone().unwrap_or_default();
 
     let config = LlmProviderConfig::new(kind, base_url, api_key, model);
     ctx.llm_factory.create(&config).map_err(|e| DaemonError::Llm(e.to_string()))
@@ -515,10 +601,11 @@ async fn record_usage(
         "reasoning_tokens": usage.reasoning_tokens,
         "total_tokens": usage.total_tokens,
     });
-    if let Some((currency, models)) = billing.as_ref()
+    if let Some((currency, timezone, models)) = billing.as_ref()
         && let Some(model_cfg) = models.get(client.model())
         && let Some(cost) = crate::llm::billing::cost(
-            crate::llm::billing::effective_pricing(model_cfg).as_ref(),
+            crate::llm::billing::effective_pricing_at(model_cfg, timezone, chrono::Utc::now())
+                .as_ref(),
             currency,
             usage,
         )
@@ -700,6 +787,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_model_entry_drives_the_client() {
+        use metteur_shared::config::LlmModelConfig;
+        let ctx = new_ctx();
+        let defaults = LlmConfig {
+            default_model: Some("deepseek".to_string()),
+            models: std::collections::HashMap::from([(
+                "deepseek".to_string(),
+                LlmModelConfig {
+                    api_type: "anthropic".to_string(),
+                    api_endpoint: "https://example.test/v1".to_string(),
+                    model_id: "deepseek-chat".to_string(),
+                    api_key: "sk-test".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        // The caller only names the model; provider, id and endpoint come from
+        // the configured entry.
+        let opts = ReactOptions {
+            model: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        let client = build_client(&ctx, &opts, &defaults).unwrap();
+        assert_eq!(client.provider(), "anthropic");
+        assert_eq!(client.model(), "deepseek-chat");
+
+        // An unconfigured model with no default is an actionable error.
+        let err = build_client(&ctx, &ReactOptions::default(), &LlmConfig::default())
+            .err()
+            .expect("missing model must be rejected");
+        assert!(err.to_string().contains("no model configured"));
+    }
+
+    #[tokio::test]
     async fn tool_definitions_respect_allow_list() {
         let registry = crate::registry::Registry::with_builtins();
         let all = tool_definitions(&registry, None);
@@ -725,9 +847,10 @@ mod tests {
         let mut events = Vec::new();
         let mut on_delta = |text: String| deltas.push(text);
         let mut on_event = |ev: ReactEvent| events.push(ev);
-        let outcome = run_react_streaming(&mut ctx, context, &opts, Some(&mut on_delta), &mut on_event)
-            .await
-            .unwrap();
+        let outcome =
+            run_react_streaming(&mut ctx, context, &opts, Some(&mut on_delta), &mut on_event)
+                .await
+                .unwrap();
         // The mock provider delivers the whole text as a single delta.
         assert_eq!(deltas, vec!["streamed"]);
         assert!(matches!(&events[0], ReactEvent::Assistant { text } if text == "streamed"));
@@ -746,8 +869,7 @@ mod tests {
             provider: "mock".to_string(),
             ..Default::default()
         };
-        let result =
-            run_react_streaming(&mut ctx, context, &opts, None, &mut |_| {}).await;
+        let result = run_react_streaming(&mut ctx, context, &opts, None, &mut |_| {}).await;
         let Err((err, partial)) = result else {
             panic!("expected cancellation error");
         };

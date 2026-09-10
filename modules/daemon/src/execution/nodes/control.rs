@@ -9,7 +9,7 @@ use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
 use crate::registry::NodeExecutor;
 
-use super::bool_output;
+use super::{bool_output, value_input};
 
 /// A control-flow node that selects an output branch based on a condition.
 ///
@@ -31,6 +31,34 @@ impl NodeExecutor for BranchExecutor {
     ) -> DaemonResult<HashMap<PinId, Value>> {
         let condition = read_condition(inputs, node)?;
         bool_output(node, "Result", condition)
+    }
+}
+
+/// A control-flow node that routes to a named case branch.
+///
+/// The `Case` input is echoed to the `Result` data output; the interpreter
+/// selects the `ExecOutput` pin named `Case_<value>` (falling back to
+/// `Default`) from that value.
+pub struct SwitchExecutor;
+
+#[async_trait]
+impl NodeExecutor for SwitchExecutor {
+    fn kind(&self) -> &str {
+        "Switch"
+    }
+
+    async fn execute(
+        &self,
+        node: &Node,
+        inputs: &HashMap<PinId, Value>,
+        _ctx: &mut ExecutionContext,
+    ) -> DaemonResult<HashMap<PinId, Value>> {
+        let case = value_input(node, inputs, "Case")?.clone();
+        let pin =
+            node.pins.iter().find(|p| p.name == "Result").ok_or_else(|| {
+                DaemonError::Execution("switch node missing Result pin".to_string())
+            })?;
+        Ok(HashMap::from([(pin.id, case)]))
     }
 }
 

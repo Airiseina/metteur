@@ -24,3 +24,14 @@ pub trait Tool: Send + Sync {
     /// so that file-mutating tools can record changes for rollback.
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value>;
 }
+
+/// Returns whether `name` is a valid registered tool name: PascalCase
+/// (leading uppercase, ASCII alphanumeric).
+///
+/// The same rule applies to built-in, MCP-derived, addon and DSL tools so the
+/// registry is a single enforcement point instead of per-source checks.
+pub fn is_valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().next().is_some_and(|first| first.is_ascii_uppercase())
+        && name.chars().all(|ch| ch.is_ascii_alphanumeric())
+}

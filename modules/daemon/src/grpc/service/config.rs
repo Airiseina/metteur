@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use metteur_shared::config::Config;
 use tonic::{Request, Response, Status};
 
-use crate::observability::audit::AuditWriter;
 use crate::error::DaemonError;
+use crate::observability::audit::AuditWriter;
 
+use super::super::acl::subject_from_request;
 use super::super::proto::{
     AuditEntry as ProtoAuditEntry, AuditLogList, Config as ProtoConfig, Empty, GetConfigRequest,
     ListAuditLogRequest, SetConfigRequest,
 };
-use super::super::acl::subject_from_request;
 use super::*;
 
 impl DaemonService {
@@ -21,6 +21,11 @@ impl DaemonService {
         request: Request<GetConfigRequest>,
     ) -> Result<Response<ProtoConfig>, Status> {
         let req = request.into_inner();
+        // Clients edit the two layers independently (VSCode user/workspace
+        // model), so each scope must return that layer's *raw* file content,
+        // never the merged result: a merged workspace layer would pin global
+        // values into the workspace file on the next save and make user-layer
+        // edits appear to vanish.
         let config = if req.workspace_path.is_empty() {
             self.state.global_config.read().await.clone()
         } else {
@@ -30,7 +35,7 @@ impl DaemonService {
                 .get(&PathBuf::from(&req.workspace_path))
                 .await
                 .ok_or_else(|| Status::not_found("workspace not open"))?;
-            ws.config.read().await.clone()
+            crate::config::load_workspace_config(ws.root()).map_err(to_status)?
         };
         let json = serde_json::to_string(&config).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ProtoConfig {
@@ -48,10 +53,11 @@ impl DaemonService {
             .map_err(|e| Status::invalid_argument(format!("invalid config: {e}")))?;
 
         if req.workspace_path.is_empty() {
-            // Persist to the global config file.
-            let dir = crate::config::global_config_dir().map_err(to_status)?;
-            std::fs::create_dir_all(&dir).map_err(|e| to_status(DaemonError::Io(e)))?;
-            let path = dir.join(crate::config::CONFIG_FILE);
+            // Persist to the configured global config file (honours `--config`).
+            let path = self.state.workspaces.global_config_path().map_err(to_status)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| to_status(DaemonError::Io(e)))?;
+            }
             let toml = toml::to_string(&config).map_err(|e| Status::internal(e.to_string()))?;
             std::fs::write(&path, toml).map_err(|e| to_status(DaemonError::Io(e)))?;
             *self.state.global_config.write().await = config.clone();
@@ -59,6 +65,15 @@ impl DaemonService {
             // change to subscribers.
             if let Ok(mut acl) = self.state.acl_store.write() {
                 *acl = config.acl.clone();
+            }
+            // Open workspaces hold their own merged copy; re-merge them so a
+            // global change (a new model, say) reaches running chat/executions
+            // without reopening the workspace.
+            let global_path = self.state.workspaces.global_config_path().map_err(to_status)?;
+            for ws in self.state.workspaces.list().await {
+                if let Ok(merged) = crate::config::load_merged_config(&global_path, ws.root()) {
+                    *ws.config.write().await = merged;
+                }
             }
             let _ = self.state.config_tx.send(config.clone());
             record_global_audit(

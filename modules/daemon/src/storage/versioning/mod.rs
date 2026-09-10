@@ -33,7 +33,11 @@ pub struct Snapshot {
     pub description: String,
     /// Optional alias for referencing this snapshot on rollback.
     pub alias: Option<String>,
-    /// Creation time in milliseconds since the Unix epoch.
+    /// Creation time in microseconds since the Unix epoch.
+    ///
+    /// Microsecond precision keeps the snapshot list a strict total order even
+    /// when several snapshots are created back-to-back; clients divide by
+    /// 1000 for the millisecond display value.
     pub created_at: u64,
     /// File manifest: relative path -> content hash.
     pub files: HashMap<String, String>,
@@ -93,7 +97,11 @@ impl VersionManager {
     /// their stored content hash; changed and new files are read, hashed and
     /// stored in the deduplicated blob store. Deleted files are simply absent
     /// from the new manifest.
-    pub fn create_snapshot_with(&self, description: &str, alias: Option<&str>) -> DaemonResult<Snapshot> {
+    pub fn create_snapshot_with(
+        &self,
+        description: &str,
+        alias: Option<&str>,
+    ) -> DaemonResult<Snapshot> {
         let (snapshot, _) = self.build_snapshot(description, alias)?;
         self.store_snapshot(&snapshot)?;
         Ok(snapshot)
@@ -159,7 +167,7 @@ impl VersionManager {
             id: Uuid::new_v4(),
             description: description.to_string(),
             alias: alias.map(str::to_string),
-            created_at: now_millis(),
+            created_at: now_micros(),
             files,
             file_meta,
         };
@@ -249,7 +257,8 @@ impl VersionManager {
     /// Returns an error if no snapshot has this alias (aliases are not
     /// required to be unique; the last match wins).
     pub fn rollback_by_alias(&self, alias: &str) -> DaemonResult<()> {
-        let snapshot = self.find_snapshot_by_alias(alias)?
+        let snapshot = self
+            .find_snapshot_by_alias(alias)?
             .ok_or_else(|| DaemonError::NotFound(format!("snapshot with alias {alias}")))?;
         self.rollback_snapshot(&snapshot)
     }
@@ -340,9 +349,9 @@ fn hash_content(data: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Returns the current time in milliseconds since the Unix epoch.
-fn now_millis() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+/// Returns the current time in microseconds since the Unix epoch.
+fn now_micros() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as u64).unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -7,12 +7,14 @@ pub mod collections;
 pub mod context_nodes;
 pub mod control;
 pub mod flow_nodes;
+pub mod foreach;
 pub mod function;
 pub mod judge;
 pub mod pure;
 pub mod string_ops;
 pub mod tool;
 pub mod validator;
+pub mod variables;
 
 pub use abstract_node::AbstractExecutor;
 pub use arithmetic::{AddExecutor, DivideExecutor, MultiplyExecutor, SubtractExecutor};
@@ -25,8 +27,9 @@ pub use context_nodes::{
     ContextCloneExecutor, ContextCreateExecutor, ContextFilterExecutor, ContextMergeExecutor,
     ContextToTextExecutor, ContextTrimExecutor,
 };
-pub use control::BranchExecutor;
+pub use control::{BranchExecutor, SwitchExecutor};
 pub use flow_nodes::{DelayExecutor, RequestApprovalExecutor};
+pub use foreach::ForEachExecutor;
 pub use function::{CallFunctionExecutor, FunctionEntryExecutor, FunctionExitExecutor};
 pub use judge::JudgeExecutor;
 pub use pure::{
@@ -41,6 +44,7 @@ pub use string_ops::{
 };
 pub use tool::ToolExecutor;
 pub use validator::ValidatorExecutor;
+pub use variables::{VariableGetExecutor, VariableSetExecutor};
 
 /// A terminal event node. It produces no outputs; execution ends when no exec
 /// edge leaves it.
@@ -198,9 +202,7 @@ pub(crate) fn value_input<'a>(
         .iter()
         .find(|p| p.name == name && p.pin_type == PinType::DataInput)
         .ok_or_else(|| DaemonError::Execution(format!("missing pin {name}")))?;
-    inputs
-        .get(&pin.id)
-        .ok_or_else(|| DaemonError::Execution(format!("missing input {name}")))
+    inputs.get(&pin.id).ok_or_else(|| DaemonError::Execution(format!("missing input {name}")))
 }
 
 /// Reads a data input, falling back to the node's `data` constant of the same
@@ -214,8 +216,7 @@ pub(crate) fn input_or_data(
     if let Ok(value) = value_input(node, inputs, name) {
         return Ok(value.clone());
     }
-    let find_pin =
-        || node.pins.iter().find(|p| p.name == name && p.pin_type == PinType::DataInput);
+    let find_pin = || node.pins.iter().find(|p| p.name == name && p.pin_type == PinType::DataInput);
     let data = node
         .data
         .get(name)
@@ -235,9 +236,7 @@ pub(crate) fn bool_input(
     name: &str,
 ) -> DaemonResult<bool> {
     let value = input_or_data(node, inputs, name)?;
-    value
-        .as_bool()
-        .ok_or_else(|| DaemonError::Execution(format!("input {name} is not boolean")))
+    value.as_bool().ok_or_else(|| DaemonError::Execution(format!("input {name} is not boolean")))
 }
 
 /// Reads an integer input, tolerating float values produced by math nodes.
@@ -369,7 +368,8 @@ pub(crate) mod tests {
         inputs: &[(&str, f64)],
     ) -> DaemonResult<HashMap<String, Value>> {
         let node_registry = crate::registry::NodeRegistry::with_builtins();
-        let node = node_with_float_inputs(kind, &inputs.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        let node =
+            node_with_float_inputs(kind, &inputs.iter().map(|(n, _)| *n).collect::<Vec<_>>());
         let mut values = HashMap::new();
         for (name, value) in inputs {
             let pin = node.pins.iter().find(|p| p.name == *name).unwrap();
@@ -404,7 +404,8 @@ pub(crate) mod tests {
         inputs: &[(&str, bool)],
     ) -> DaemonResult<HashMap<String, Value>> {
         let node_registry = crate::registry::NodeRegistry::with_builtins();
-        let node = node_with_float_inputs(kind, &inputs.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        let node =
+            node_with_float_inputs(kind, &inputs.iter().map(|(n, _)| *n).collect::<Vec<_>>());
         let mut values = HashMap::new();
         for (name, value) in inputs {
             let pin = node.pins.iter().find(|p| p.name == *name).unwrap();

@@ -67,10 +67,13 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
             }
             let pins: Vec<Pin> = pins_of(k)
                 .into_iter()
-                .map(|(name, pin_type)| Pin { id: Uuid::new_v4(),
+                .map(|(name, pin_type)| Pin {
+                    id: Uuid::new_v4(),
                     name,
                     pin_type,
-                    data_type: DataType::Json, ..Default::default() })
+                    data_type: DataType::Json,
+                    ..Default::default()
+                })
                 .collect();
             nodes.push(Node {
                 id: node_id,
@@ -84,16 +87,10 @@ fn any_blueprint() -> impl Strategy<Value = Blueprint> {
         // Exec chain edges node i -> i+1 (first exec output -> first exec input).
         let mut edges = Vec::new();
         for i in 0..nodes.len() - 1 {
-            let src_pin = nodes[i]
-                .pins
-                .iter()
-                .find(|p| p.pin_type == PinType::ExecOutput)
-                .map(|p| p.id);
-            let dst_pin = nodes[i + 1]
-                .pins
-                .iter()
-                .find(|p| p.pin_type == PinType::ExecInput)
-                .map(|p| p.id);
+            let src_pin =
+                nodes[i].pins.iter().find(|p| p.pin_type == PinType::ExecOutput).map(|p| p.id);
+            let dst_pin =
+                nodes[i + 1].pins.iter().find(|p| p.pin_type == PinType::ExecInput).map(|p| p.id);
             if let (Some(source_pin), Some(target_pin)) = (src_pin, dst_pin) {
                 edges.push(Edge {
                     id: Uuid::new_v4(),
@@ -151,9 +148,7 @@ fn interpreter_terminates_on_random_blueprints() {
             // graceful failure (e.g. validation). Neither may hang or panic.
             if let Ok(events) = result {
                 prop_assert!(
-                    events
-                        .iter()
-                        .any(|e| matches!(e, ExecutionEvent::NodeStarted { .. })),
+                    events.iter().any(|e| matches!(e, ExecutionEvent::NodeStarted { .. })),
                     "a completed run must have started nodes"
                 );
             }

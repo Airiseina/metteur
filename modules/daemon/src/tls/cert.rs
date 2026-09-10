@@ -90,8 +90,7 @@ pub fn generate(opts: &CertOptions) -> DaemonResult<()> {
     // Server certificate signed by the CA. DNS names and IP addresses are
     // passed separately: rcgen seeds the SAN list from the DNS names in `new`.
     let server_key = KeyPair::generate().map_err(rcgen_err)?;
-    let mut server_params =
-        CertificateParams::new(server_dns_names(opts)).map_err(rcgen_err)?;
+    let mut server_params = CertificateParams::new(server_dns_names(opts)).map_err(rcgen_err)?;
     server_params.distinguished_name.push(DnType::CommonName, opts.server_cn.clone());
     server_params.subject_alt_names.push(SanType::IpAddress("127.0.0.1".parse().map_err(ip_err)?));
     for san in &opts.server_sans {
@@ -103,8 +102,7 @@ pub fn generate(opts: &CertOptions) -> DaemonResult<()> {
 
     // Client certificate signed by the CA, identified by CN.
     let client_key = KeyPair::generate().map_err(rcgen_err)?;
-    let mut client_params =
-        CertificateParams::new(Vec::<String>::new()).map_err(rcgen_err)?;
+    let mut client_params = CertificateParams::new(Vec::<String>::new()).map_err(rcgen_err)?;
     client_params.distinguished_name.push(DnType::CommonName, opts.client_cn.clone());
     let client_cert = client_params.signed_by(&client_key, &issuer).map_err(rcgen_err)?;
 
@@ -175,7 +173,11 @@ mod tests {
     #[test]
     fn certs_are_pem_encoded() {
         let dir = temp_dir("pem");
-        generate(&CertOptions { dir: dir.clone(), ..Default::default() }).unwrap();
+        generate(&CertOptions {
+            dir: dir.clone(),
+            ..Default::default()
+        })
+        .unwrap();
         let cert = std::fs::read_to_string(dir.join(SERVER_CERT)).unwrap();
         let key = std::fs::read_to_string(dir.join(SERVER_KEY)).unwrap();
         assert!(cert.starts_with("-----BEGIN CERTIFICATE-----"));

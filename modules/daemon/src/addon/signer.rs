@@ -45,15 +45,15 @@ fn generate_key(path: &Path) -> DaemonResult<String> {
 
 /// Loads a base64-encoded 32-byte Ed25519 seed from `path`.
 fn load_key(path: Option<&Path>) -> DaemonResult<SigningKey> {
-    let path = path
-        .ok_or_else(|| DaemonError::Addon("--key-file <path> is required".to_string()))?;
+    let path =
+        path.ok_or_else(|| DaemonError::Addon("--key-file <path> is required".to_string()))?;
     let text = std::fs::read_to_string(path)
         .map_err(|err| DaemonError::NotFound(format!("cannot read key file: {err}")))?;
     let bytes = B64
         .decode(text.trim())
         .map_err(|_| DaemonError::Addon("key seed is not valid base64".to_string()))?;
-    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
-        DaemonError::Addon("key seed must encode exactly 32 bytes".to_string())
-    })?;
+    let seed: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| DaemonError::Addon("key seed must encode exactly 32 bytes".to_string()))?;
     Ok(SigningKey::from_bytes(&seed))
 }

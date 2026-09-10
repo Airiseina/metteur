@@ -7,7 +7,8 @@ use metteur_shared::llm::{ContextManager, Message, Role};
 use tonic::{Request, Response, Status};
 
 use crate::chat::session::{
-    ChatSessionRecord, delete_active, display_message_count, load_active, save_active, title_of,
+    ChatSessionRecord, delete_thread, display_message_count, list_threads, load_thread,
+    save_thread, title_of,
 };
 use crate::execution::context::ExecutionContext;
 use crate::execution::interrupt::{Interrupt, InterruptBus, InterruptPriority};
@@ -17,8 +18,8 @@ use crate::sandbox::approval::ApprovalBroker;
 
 use super::super::acl::subject_from_request;
 use super::super::proto::{
-    AbortChatRequest, ChatEvent, ChatSessionInfo, ChatSessionList, DeleteChatSessionRequest,
-    Empty, GetChatSessionRequest, GetChatSessionResponse, ListChatSessionsRequest, SendChatRequest,
+    AbortChatRequest, ChatEvent, ChatSessionInfo, ChatSessionList, DeleteChatSessionRequest, Empty,
+    GetChatSessionRequest, GetChatSessionResponse, ListChatSessionsRequest, SendChatRequest,
 };
 use super::*;
 
@@ -41,6 +42,28 @@ impl DaemonService {
         let ws_key = ws.root().to_path_buf();
         let run_id = uuid::Uuid::new_v4();
         let now = chrono::Utc::now().timestamp_millis() as u64;
+        let ws_db = ws.db.clone();
+
+        // Resolve the session before claiming the chat slot: an explicitly
+        // named session must exist and belong to this workspace; an empty id
+        // starts a fresh thread (history_json seeds its context).
+        let existing = match req.session_id.as_str() {
+            "" => None,
+            id => {
+                let session_id = uuid::Uuid::parse_str(id)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                match load_thread(&ws_db, &session_id)
+                    .map_err(|e| Status::internal(e.to_string()))?
+                {
+                    Some(record) => Some(record),
+                    None => return Err(Status::not_found(format!("chat session {id} not found"))),
+                }
+            }
+        };
+        let session_id = existing.as_ref().map(|r| r.session_id).unwrap_or_else(uuid::Uuid::new_v4);
+        let created_at = existing.as_ref().map(|r| r.created_at).unwrap_or(now);
+        let old_turns = existing.as_ref().map(|r| r.turns).unwrap_or(0);
+        let title = existing.as_ref().and_then(|r| r.title.clone());
 
         // A workspace hosts either one execution or one chat at a time.
         {
@@ -64,38 +87,24 @@ impl DaemonService {
                 cancel_requested: cancel_flag.clone(),
                 approvals: Some(broker.clone()),
                 persist: persist.clone(),
+                session_id: Some(session_id),
             },
         );
         drop(chats);
-
-        let ws_db = ws.db.clone();
-        // Resolve the session before scheduling the task: an explicitly named
-        // session must exist and belong to this workspace; an empty id reuses
-        // the active session (creating one when none exists).
-        let active = load_active(&ws_db).map_err(|e| Status::internal(e.to_string()))?;
-        let existing = match req.session_id.as_str() {
-            "" => active,
-            id => match active {
-                Some(record) if record.session_id.to_string() == id => Some(record),
-                _ => return Err(Status::not_found(format!("chat session {id} not found"))),
-            },
-        };
-        let session_id = existing.as_ref().map(|r| r.session_id).unwrap_or_else(uuid::Uuid::new_v4);
-        let created_at = existing.as_ref().map(|r| r.created_at).unwrap_or(now);
-        let old_turns = existing.as_ref().map(|r| r.turns).unwrap_or(0);
-        let title = existing.as_ref().and_then(|r| r.title.clone());
 
         let addon_fragments = match &self.state.addon_host {
             Some(host) => host.fragments_for(ws.root()).await,
             None => Vec::new(),
         };
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Result<ChatEvent, Status>>();
+        let (event_tx, event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<ChatEvent, Status>>();
         let state = self.state.clone();
         let registry = self.state.registry.clone();
         let llm_factory = self.state.llm_factory.clone();
         let root = ws.root().to_path_buf();
         let ws_config = ws.config.clone();
         let lsp = ws.lsp_manager.clone();
+        let version_manager = ws.version_manager.clone();
         let user = subject.clone();
         let message = req.message.clone();
         let history_json = req.history_json.clone();
@@ -112,6 +121,7 @@ impl DaemonService {
             ctx.approvals = Some(broker);
             ctx.workspace_db = Some(ws_db.clone());
             ctx.lsp = lsp;
+            ctx.version_manager = Some(version_manager);
             if let Some(global_db) = state.global_db.clone() {
                 ctx.global_db = Some(global_db);
             }
@@ -162,12 +172,17 @@ impl DaemonService {
             let stream_tx = event_tx.clone();
             let mut on_event = move |ev: ReactEvent| {
                 let event = match ev {
-                    ReactEvent::Assistant { text } => ChatEvent {
+                    ReactEvent::Assistant {
+                        text,
+                    } => ChatEvent {
                         kind: "assistant".to_string(),
                         content: text,
                         detail_json: String::new(),
                     },
-                    ReactEvent::Tool { name, content } => ChatEvent {
+                    ReactEvent::Tool {
+                        name,
+                        content,
+                    } => ChatEvent {
                         kind: "tool".to_string(),
                         content,
                         detail_json: serde_json::json!({ "name": name }).to_string(),
@@ -187,10 +202,8 @@ impl DaemonService {
                     // them so a resumed session remembers prior turns.
                     let mut saved_context = outcome.context.clone();
                     if !outcome.text.is_empty() {
-                        saved_context.push_message(Message::text(
-                            Role::Assistant,
-                            outcome.text.clone(),
-                        ));
+                        saved_context
+                            .push_message(Message::text(Role::Assistant, outcome.text.clone()));
                     }
                     let record = ChatSessionRecord {
                         session_id,
@@ -236,7 +249,7 @@ impl DaemonService {
             };
             if persist.load(std::sync::atomic::Ordering::SeqCst)
                 && let Some(record) = saved
-                && let Err(err) = save_active(&ws_db, &record)
+                && let Err(err) = save_thread(&ws_db, &record)
             {
                 tracing::warn!("[chat] failed to persist session: {err}");
             }
@@ -282,18 +295,22 @@ impl DaemonService {
             .get(&PathBuf::from(&req.workspace_path))
             .await
             .ok_or_else(|| Status::not_found("workspace not open"))?;
-        let sessions = match load_active(&ws.db).map_err(|e| Status::internal(e.to_string()))? {
-            Some(record) => vec![ChatSessionInfo {
+        let sessions = list_threads(&ws.db)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .into_iter()
+            .rev()
+            .map(|record| ChatSessionInfo {
                 session_id: record.session_id.to_string(),
                 created_at: record.created_at as i64,
                 updated_at: record.updated_at as i64,
                 turns: record.turns,
                 title: record.title.clone().unwrap_or_default(),
                 message_count: display_message_count(&record) as u64,
-            }],
-            None => Vec::new(),
-        };
-        Ok(Response::new(ChatSessionList { sessions }))
+            })
+            .collect();
+        Ok(Response::new(ChatSessionList {
+            sessions,
+        }))
     }
 
     pub(crate) async fn get_chat_session(
@@ -307,14 +324,17 @@ impl DaemonService {
             .get(&PathBuf::from(&req.workspace_path))
             .await
             .ok_or_else(|| Status::not_found("workspace not open"))?;
-        let record = match load_active(&ws.db).map_err(|e| Status::internal(e.to_string()))? {
-            Some(record)
-                if req.session_id.is_empty() || record.session_id.to_string() == req.session_id =>
-            {
-                record
-            }
-            _ => return Err(Status::not_found("chat session not found")),
+        // An empty id resolves to the most recently updated thread.
+        let record = if req.session_id.is_empty() {
+            let mut threads = list_threads(&ws.db).map_err(|e| Status::internal(e.to_string()))?;
+            threads.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+            threads.into_iter().next()
+        } else {
+            let session_id = uuid::Uuid::parse_str(&req.session_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            load_thread(&ws.db, &session_id).map_err(|e| Status::internal(e.to_string()))?
         };
+        let record = record.ok_or_else(|| Status::not_found("chat session not found"))?;
         Ok(Response::new(GetChatSessionResponse {
             session_id: record.session_id.to_string(),
             created_at: record.created_at as i64,
@@ -334,19 +354,41 @@ impl DaemonService {
             .await
             .ok_or_else(|| Status::not_found("workspace not open"))?;
         let ws_key = ws.root().to_path_buf();
-        // Stop a running chat and forbid its finalize from persisting, so a
-        // late write cannot resurrect the cleared session.
-        if let Some(chat) = self.state.chats.write().await.get_mut(&ws_key) {
-            chat.persist.store(false, std::sync::atomic::Ordering::SeqCst);
-            chat.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(bus) = &chat.interrupt_bus {
-                bus.send(Interrupt {
-                    priority: InterruptPriority::Emergency,
-                    message: "Aborted by user.".to_string(),
-                });
+        // An empty id targets the most recently updated thread.
+        let target = if req.session_id.is_empty() {
+            let mut threads = list_threads(&ws.db).map_err(|e| Status::internal(e.to_string()))?;
+            threads.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+            threads.first().map(|r| r.session_id)
+        } else {
+            Some(
+                uuid::Uuid::parse_str(&req.session_id)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?,
+            )
+        };
+        // Stop a running chat only when it runs on the deleted thread, and
+        // forbid its finalize from persisting so a late write cannot resurrect
+        // the cleared session. Deleting an idle thread must not abort another
+        // thread's in-flight turn.
+        if let Some(target) = target {
+            let abort = self
+                .state
+                .chats
+                .read()
+                .await
+                .get(&ws_key)
+                .is_some_and(|chat| chat.session_id == Some(target));
+            if abort && let Some(chat) = self.state.chats.write().await.get_mut(&ws_key) {
+                chat.persist.store(false, std::sync::atomic::Ordering::SeqCst);
+                chat.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(bus) = &chat.interrupt_bus {
+                    bus.send(Interrupt {
+                        priority: InterruptPriority::Emergency,
+                        message: "Aborted by user.".to_string(),
+                    });
+                }
             }
+            delete_thread(&ws.db, &target).map_err(|e| Status::internal(e.to_string()))?;
         }
-        delete_active(&ws.db).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(Empty {}))
     }
 }

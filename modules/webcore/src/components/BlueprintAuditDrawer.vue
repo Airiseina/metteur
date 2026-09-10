@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { Activity, BarChart3, CircleDot, Terminal, X } from '@lucide/vue'
+import { Activity, BarChart3, CircleDot, Network, Terminal, X } from '@lucide/vue'
 import { useExecutionStore } from '@/stores/execution'
+import ExecTreeRow from './ExecTreeRow.vue'
 import type { EventLine } from '@/stores/execution'
 
 /**
@@ -24,7 +25,7 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'update:open', open: boolean): void }>()
 
 const execution = useExecutionStore()
-const tab = ref<'log' | 'context' | 'node'>('log')
+const tab = ref<'log' | 'context' | 'node' | 'tree'>('log')
 
 const close = () => emit('update:open', false)
 
@@ -62,7 +63,11 @@ const REGION_COLOR: Record<string, string> = {
 const regionName = (r: string): string =>
   ({ system: 'System / Prompt', user: 'User prompt', assistant: 'Assistant', tool: 'Tool results' })[r] ?? r
 
-const usageList = computed(() => execution.contextUsage ?? [])
+/** The inspected node: selection wins, else the running node. */
+const inspectedId = computed(() => props.nodeId ?? execution.runningNodeId)
+
+/** Context regions for the inspected node, falling back to the latest. */
+const usageList = computed(() => execution.contextOf(inspectedId.value) ?? [])
 
 const barSegments = computed(() => {
   const total = Math.max(execution.contextTotal, 1)
@@ -78,11 +83,11 @@ const barSegments = computed(() => {
 
 /** Audit data of the node under inspection. */
 const audit = computed(() => {
-  const id = props.nodeId ?? execution.runningNodeId
+  const id = inspectedId.value
   return id ? (execution.nodeAudits.get(id) ?? null) : null
 })
 
-const auditLabel = computed(() => props.nodeId ?? execution.runningNodeId ?? 'â€”')
+const auditLabel = computed(() => inspectedId.value ?? 'â€”')
 </script>
 
 <template>
@@ -137,6 +142,15 @@ const auditLabel = computed(() => props.nodeId ?? execution.runningNodeId ?? 'â€
           @click="tab = 'node'"
         >
           <CircleDot class="h-3.5 w-3.5" />
+        </button>
+        <button
+          class="btn-icon h-6! w-6!"
+          type="button"
+          :class="tab === 'tree' ? 'bg-hover text-foreground' : ''"
+          title="Agent execution tree"
+          @click="tab = 'tree'"
+        >
+          <Network class="h-3.5 w-3.5" />
         </button>
         <button class="btn-icon h-6! w-6!" type="button" title="Close audit" @click="close">
           <X class="h-3.5 w-3.5" />
@@ -202,7 +216,7 @@ const auditLabel = computed(() => props.nodeId ?? execution.runningNodeId ?? 'â€
     </div>
 
     <!-- Node tab -->
-    <div v-else class="min-h-0 flex-1 overflow-y-auto p-3">
+    <div v-else-if="tab === 'node'" class="min-h-0 flex-1 overflow-y-auto p-3">
       <p class="panel-heading mb-1.5">{{ auditLabel }}</p>
       <div v-if="audit" class="space-y-2.5">
         <p v-if="audit.message" class="text-[11.5px] leading-relaxed text-muted-foreground">
@@ -228,6 +242,25 @@ const auditLabel = computed(() => props.nodeId ?? execution.runningNodeId ?? 'â€
       <p v-else class="text-[11.5px] text-muted-foreground">
         Select a node on the canvas to inspect its audit data.
       </p>
+    </div>
+
+    <!-- Execution-tree tab -->
+    <div v-else class="min-h-0 flex-1 overflow-y-auto p-3">
+      <p
+        v-if="!execution.tree || execution.tree.nodes.length === 0"
+        class="text-[11.5px] text-muted-foreground"
+      >
+        No execution tree yet â€” run a blueprint to build the task hierarchy.
+      </p>
+      <div v-else class="space-y-1">
+        <ExecTreeRow
+          v-for="root in execution.tree.roots"
+          :key="root"
+          :node-id="root"
+          :tree="execution.tree"
+          :depth="0"
+        />
+      </div>
     </div>
   </div>
 </template>

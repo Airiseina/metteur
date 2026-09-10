@@ -1,7 +1,14 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { gateway } from '@/core'
-import type { ApprovalRequest, ContextRegion, ExecStatus, ExecutionEvent, NodeAudit } from '@/core'
+import type {
+  ApprovalRequest,
+  ContextRegion,
+  ExecStatus,
+  ExecTreeData,
+  ExecutionEvent,
+  NodeAudit,
+} from '@/core'
 import { useWorkspaceStore } from './workspace'
 
 /** App-facing actions derived from an execution event. */
@@ -28,8 +35,12 @@ export const useExecutionStore = defineStore('execution', () => {
   /** Most recent context region breakdown (from `context` events). */
   const contextUsage = ref<ContextRegion[] | null>(null)
   const contextNode = ref<string | null>(null)
+  /** Per-node context region breakdowns, keyed by node id. */
+  const contextByNode = ref<Map<string, ContextRegion[]>>(new Map())
   /** The id of the run belonging to the current execution, if known. */
   const runId = ref<string | null>(null)
+  /** The agent execution tree of the latest run (loaded on finish). */
+  const tree = ref<ExecTreeData | null>(null)
   /** Live per-node audit facts, fed by started/finished/node_data/context. */
   const nodeAudits = ref<Map<string, NodeAudit>>(new Map())
 
@@ -45,6 +56,15 @@ export const useExecutionStore = defineStore('execution', () => {
   const contextTotal = computed(() =>
     (contextUsage.value ?? []).reduce((sum, r) => sum + r.tokens, 0),
   )
+
+  /** Context breakdown of one node: its own snapshot, else the latest. */
+  function contextOf(nodeId: string | null): ContextRegion[] | null {
+    if (nodeId) {
+      const own = contextByNode.value.get(nodeId)
+      if (own) return own
+    }
+    return contextUsage.value
+  }
 
   function ensureAudit(nodeId: string): NodeAudit {
     let a = nodeAudits.value.get(nodeId)
@@ -68,17 +88,16 @@ export const useExecutionStore = defineStore('execution', () => {
       audit.message = typeof summary === 'string' ? summary : ev.message
     }
     if (ev.kind === 'context' && Array.isArray(ev.detail?.regions)) {
-      contextUsage.value = (ev.detail.regions as unknown as ContextRegion[]).map((r) => ({
+      const regions = (ev.detail.regions as unknown as ContextRegion[]).map((r) => ({
         region: r.region,
         chars: Number(r.chars) || 0,
         tokens: Number(r.tokens) || 0,
       }))
+      contextUsage.value = regions
       contextNode.value = ev.nodeId
+      if (ev.nodeId) contextByNode.value.set(ev.nodeId, regions)
       if (audit) {
-        audit.tokens = (ev.detail.regions as unknown as ContextRegion[]).reduce(
-          (sum, r) => sum + (Number(r.tokens) || 0),
-          0,
-        )
+        audit.tokens = regions.reduce((sum, r) => sum + r.tokens, 0)
       }
     }
     if (events.value.length > limit) events.value.splice(0, events.value.length - limit)
@@ -90,7 +109,9 @@ export const useExecutionStore = defineStore('execution', () => {
     events.value = []
     contextUsage.value = null
     contextNode.value = null
+    contextByNode.value = new Map()
     nodeAudits.value = new Map()
+    tree.value = null
     status.value = 'running'
     runId.value = null
     await gateway.executeBlueprint(ws.path, blueprintId, (ev) => {
@@ -114,11 +135,17 @@ export const useExecutionStore = defineStore('execution', () => {
         }
       }
     })
-    // Capture the run id of the stream just finished for a later resume.
+    // Capture the run id of the stream just finished for a later resume, and
+    // load the execution tree of the finished run.
     const runs = await gateway.listExecutions(ws.path)
-    if (runs.ok) {
-      const active = runs.data.find((r) => r.status === 'Running') ?? runs.data[0]
-      if (active) runId.value = active.runId
+    if (runs.ok && runs.data.length > 0) {
+      // ListExecutions returns oldest first; prefer the newest run.
+      const active = runs.data.find((r) => r.status === 'Running') ?? runs.data[runs.data.length - 1]
+      if (active) {
+        runId.value = active.runId
+        const treeRes = await gateway.getExecutionTree(ws.path, active.runId)
+        if (treeRes.ok) tree.value = treeRes.data
+      }
     }
     if (!['paused', 'cancelled'].includes(status.value)) status.value = 'finished'
   }
@@ -160,8 +187,11 @@ export const useExecutionStore = defineStore('execution', () => {
     approval,
     contextUsage,
     contextNode,
+    contextByNode,
+    contextOf,
     contextTotal,
     runId,
+    tree,
     running,
     lastEvent,
     nodeAudits,

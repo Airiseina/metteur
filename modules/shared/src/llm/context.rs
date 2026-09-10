@@ -184,11 +184,7 @@ impl ContextManager {
     /// coarse `chars / 4` proxy so the UI can show a live region ratio.
     pub fn usage_report(&self) -> Vec<ContextRegion> {
         let mut chars = std::collections::HashMap::new();
-        let sys: usize = self
-            .system_fragments
-            .iter()
-            .map(|f| f.content.chars().count())
-            .sum();
+        let sys: usize = self.system_fragments.iter().map(|f| f.content.chars().count()).sum();
         if sys > 0 {
             chars.insert("system".to_string(), sys);
         }

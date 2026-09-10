@@ -284,9 +284,16 @@ function llmModelsOf(cfg: DaemonConfig): Record<string, unknown> {
   const m = sec.models
   return m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : {}
 }
-/** Effective per-model definitions (workspace layer merged over effective). */
+/** Models of the layer being edited, falling back to inherited rows.
+ *
+ * The list must reflect the *edited* layer: the daemon merge replaces a
+ * non-empty collection wholesale, so a row written to the User layer would be
+ * invisible (appearing to vanish) whenever the workspace layer also defines
+ * models. With no rows in the edited layer, inherited rows are shown so they
+ * stay discoverable and can be overridden by editing. */
 function llmModels(): Record<string, unknown> {
-  return { ...llmModelsOf(eff.value), ...llmModelsOf(wsCfg.value) }
+  const own = llmModelsOf(edition.value)
+  return Object.keys(own).length ? own : llmModelsOf(eff.value)
 }
 function modelKeys(): string[] {
   return Object.keys(llmModels())
@@ -375,6 +382,11 @@ function pricingFromValues(values: Record<string, unknown>): Record<string, unkn
 function submitModel(values: Record<string, unknown>) {
   const name = String(values.name ?? modelEditName.value).trim()
   if (!name) return
+  // Editing an inherited row must pin the whole inherited set into this layer
+  // first; otherwise a same-named row of this layer would replace it and every
+  // other inherited model would vanish from the merged config. Runs before the
+  // collection is captured below, because it may replace the object.
+  materializeModels()
   const layer = edition.value
   if (!('llm' in layer)) layer.llm = {}
   const llm = layer.llm as Record<string, unknown>
@@ -403,13 +415,27 @@ function submitModel(values: Record<string, unknown>) {
     if (bm) delete bm[modelEditName.value]
   }
   modelModal.value = false
+  void persistNow()
 }
 function removeModel(name: string) {
+  materializeModels()
   const lm = sectionOf(edition.value, 'llm').models as Record<string, unknown> | undefined
   if (lm) delete lm[name]
   // Legacy cleanup: billing.models no longer stores pricing.
   const bm = sectionOf(edition.value, 'billing').models as Record<string, unknown> | undefined
   if (bm) delete bm[name]
+  void persistNow()
+}
+
+/** Pin the effective model rows into the edited layer, so edits and deletes
+ *  apply to inherited rows instead of silently doing nothing. */
+function materializeModels() {
+  const own = llmModelsOf(edition.value)
+  if (Object.keys(own).length) return
+  const layer = edition.value
+  if (!('llm' in layer)) layer.llm = {}
+  const llm = layer.llm as Record<string, unknown>
+  llm.models = { ...llmModelsOf(eff.value) }
 }
 
 const mcpModal = ref(false)
@@ -433,22 +459,36 @@ function makeMcp() {
   if (!('mcp' in layer)) layer.mcp = {}
   if (!('servers' in (layer.mcp as Record<string, unknown>))) (layer.mcp as Record<string, unknown>).servers = {}
 }
+/** Servers of the edited layer, falling back to inherited rows (see `llmModels`). */
+function mcpServers(): Record<string, Record<string, unknown>> {
+  const own = (sectionOf(edition.value, 'mcp').servers ?? {}) as Record<string, Record<string, unknown>>
+  if (Object.keys(own).length) return own
+  return (sectionOf(eff.value, 'mcp').servers ?? {}) as Record<string, Record<string, unknown>>
+}
 function mcpKeys(): string[] {
-  return Object.keys(sectionOf(eff.value, 'mcp').servers ?? {})
+  return Object.keys(mcpServers())
 }
 function mcpField(name: string, field: string): unknown {
-  const wsS = (sectionOf(wsCfg.value, 'mcp').servers ?? {}) as Record<string, Record<string, unknown>>
-  const effS = (sectionOf(eff.value, 'mcp').servers ?? {}) as Record<string, Record<string, unknown>>
-  return wsS[name]?.[field] ?? effS[name]?.[field]
+  return mcpServers()[name]?.[field]
 }
 function mcpCommandText(name: string): string {
   const cmd = mcpField(name, 'command')
   return Array.isArray(cmd) ? (cmd as string[]).join(' ') : ''
 }
 function setMcpField(name: string, field: string, v: unknown) {
-  makeMcp()
+  materializeMcp()
   const s = sectionOf(edition.value as DaemonConfig, 'mcp').servers as Record<string, Record<string, unknown>>
   s[name] = { ...s[name], [field]: v }
+  void persistNow()
+}
+
+/** Pin the effective MCP servers into the edited layer (see `materializeModels`). */
+function materializeMcp() {
+  const own = (sectionOf(edition.value, 'mcp').servers ?? {}) as Record<string, unknown>
+  if (Object.keys(own).length) return
+  makeMcp()
+  const s = sectionOf(edition.value as DaemonConfig, 'mcp').servers as Record<string, unknown>
+  Object.assign(s, sectionOf(eff.value, 'mcp').servers ?? {})
 }
 function setMcpCommand(name: string, text: string) {
   setMcpField(name, 'command', text.split(/\s+/).filter(Boolean))
@@ -456,6 +496,8 @@ function setMcpCommand(name: string, text: string) {
 function submitMcp(values: Record<string, unknown>) {
   const name = String(values.name).trim()
   if (!name) return
+  // Materialize inherited servers first so editing one keeps its siblings.
+  materializeMcp()
   makeMcp()
   const s = sectionOf(edition.value as DaemonConfig, 'mcp').servers as Record<string, Record<string, unknown>>
   const prev = s[name] ?? {}
@@ -471,10 +513,13 @@ function submitMcp(values: Record<string, unknown>) {
     enabled: values.enabled === true,
   }
   mcpModal.value = false
+  void persistNow()
 }
 function removeMcp(name: string) {
+  materializeMcp()
   const s = sectionOf(edition.value as DaemonConfig, 'mcp').servers as Record<string, unknown> | undefined
   if (s) delete s[name]
+  void persistNow()
 }
 
 const LSP_FIELDS: ModalField[] = [
@@ -486,6 +531,8 @@ const LSP_FIELDS: ModalField[] = [
 function submitLsp(values: Record<string, unknown>) {
   const id = String(values.id).trim()
   if (!id) return
+  // Materialize inherited languages first so adding one keeps the others.
+  materializeLsp()
   makeLsp()
   const list = sectionOf(edition.value, 'lsp').languages as Array<Record<string, unknown>>
   // command argv = executable word(s) + whitespace-split args, merged.
@@ -498,6 +545,7 @@ function submitLsp(values: Record<string, unknown>) {
     ],
   })
   lspModal.value = false
+  void persistNow()
 }
 
 function makeLsp() {
@@ -505,22 +553,36 @@ function makeLsp() {
   if (!('lsp' in layer)) layer.lsp = {}
   if (!('languages' in (layer.lsp as Record<string, unknown>))) (layer.lsp as Record<string, unknown>).languages = []
 }
-function lspList(): Array<Record<string, unknown>> {
+/** Languages of the edited layer, falling back to inherited rows. */
+function lspLanguages(): Array<Record<string, unknown>> {
+  const own = (sectionOf(edition.value, 'lsp').languages as Array<Record<string, unknown>>) ?? []
+  if (own.length) return own
   return (sectionOf(eff.value, 'lsp').languages as Array<Record<string, unknown>>) ?? []
 }
+function lspList(): Array<Record<string, unknown>> {
+  return lspLanguages()
+}
 function lspField(idx: number, field: string): unknown {
-  const wsList = (sectionOf(wsCfg.value, 'lsp').languages as Array<Record<string, unknown>>) ?? []
-  const effList = (sectionOf(eff.value, 'lsp').languages as Array<Record<string, unknown>>) ?? []
-  return wsList[idx]?.[field] ?? effList[idx]?.[field]
+  return lspLanguages()[idx]?.[field]
 }
 function lspCommandText(idx: number): string {
   const cmd = lspField(idx, 'command')
   return Array.isArray(cmd) ? (cmd as string[]).join(' ') : ''
 }
 function setLspField(idx: number, field: string, v: unknown) {
-  makeLsp()
+  materializeLsp()
   const list = sectionOf(edition.value, 'lsp').languages as Array<Record<string, unknown>>
   list[idx] = { ...(list[idx] ?? {}), [field]: v }
+  void persistNow()
+}
+
+/** Pin the effective LSP languages into the edited layer (see `materializeModels`). */
+function materializeLsp() {
+  const own = (sectionOf(edition.value, 'lsp').languages as Array<Record<string, unknown>>) ?? []
+  if (own.length) return
+  makeLsp()
+  const list = sectionOf(edition.value, 'lsp').languages as Array<Record<string, unknown>>
+  list.push(...(((sectionOf(eff.value, 'lsp').languages as Array<Record<string, unknown>>) ?? [])))
 }
 function setLspCommand(idx: number, text: string) {
   setLspField(idx, 'command', text.split(/\s+/).filter(Boolean))
@@ -529,8 +591,10 @@ function setLspExts(idx: number, text: string) {
   setLspField(idx, 'extensions', text.split(',').map((s) => s.trim()).filter(Boolean))
 }
 function removeLsp(idx: number) {
+  materializeLsp()
   const list = sectionOf(edition.value, 'lsp').languages as Array<Record<string, unknown>> | undefined
   list?.splice(idx, 1)
+  void persistNow()
 }
 
 /* Open config.toml in the main editor ---------------------------------------- */
@@ -570,6 +634,16 @@ async function saveLayer() {
   const e = await config.save(settings.layer)
   if (e) feedback.toast('error', 'Failed to save settings', e)
   else feedback.toast('success', 'Settings saved')
+}
+
+/** Persist the edited layer right away.
+ *
+ * Adding or removing a model / server / language is a discrete, deliberate
+ * action: it must reach disk immediately instead of waiting for the header
+ * Save button, or a refresh silently discards it. */
+async function persistNow(): Promise<void> {
+  const e = await config.save(settings.layer)
+  if (e) feedback.toast('error', 'Failed to save settings', e)
 }
 
 async function reload() {

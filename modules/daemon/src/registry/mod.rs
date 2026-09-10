@@ -11,7 +11,7 @@ use std::sync::Arc;
 use metteur_shared::model::function::{FunctionEntry, FunctionSource};
 use parking_lot::RwLock;
 
-use crate::error::DaemonResult;
+use crate::error::{DaemonError, DaemonResult};
 
 pub use node::{NodeExecutor, NodeRegistry};
 pub use tool::Tool;
@@ -48,16 +48,35 @@ impl Registry {
             Arc::new(tools::lsp_tools::GetHover),
             Arc::new(tools::lsp_tools::FindDefinition),
             Arc::new(tools::replan::ReplanBlueprint),
+            Arc::new(tools::snapshot::SnapshotTake),
         ] {
-            registry.register_tool(tool);
+            registry.try_register_tool(tool).expect("built-in tool names are valid");
         }
         registry.register_function(library::builtin_chain_of_thought());
         registry
     }
 
     /// Registers a tool, replacing any existing one with the same name.
+    ///
+    /// Fails when the name is not PascalCase; generated MCP names use
+    /// conflict suffixes (`GitStatus_2`) that stay valid under this rule.
+    pub fn try_register_tool(&self, tool: Arc<dyn Tool>) -> DaemonResult<()> {
+        let name = tool.name().to_string();
+        if !tool::is_valid_tool_name(&name) {
+            return Err(DaemonError::Execution(format!(
+                "tool name '{name}' must be PascalCase imperative"
+            )));
+        }
+        self.tools.write().insert(name, tool);
+        Ok(())
+    }
+
+    /// Registers a tool, replacing any existing one with the same name.
+    ///
+    /// Panics when the name is not PascalCase; prefer
+    /// [`Self::try_register_tool`] in fallible paths.
     pub fn register_tool(&self, tool: Arc<dyn Tool>) {
-        self.tools.write().insert(tool.name().to_string(), tool);
+        self.try_register_tool(tool).expect("valid tool name");
     }
 
     /// Removes a tool by name, returning it when it was registered.
@@ -108,12 +127,39 @@ impl Registry {
     }
 
     /// Registers all functions stored in `db`, tagged with `source`.
-    pub fn load_functions(&self, db: &crate::storage::persistence::Db, source: FunctionSource) -> DaemonResult<()> {
+    pub fn load_functions(
+        &self,
+        db: &crate::storage::persistence::Db,
+        source: FunctionSource,
+    ) -> DaemonResult<Vec<String>> {
+        let mut names = Vec::new();
         for mut entry in crate::registry::library::load_all(db)? {
             entry.source = source;
+            names.push(entry.name.clone());
             self.register_function(entry);
         }
-        Ok(())
+        Ok(names)
+    }
+
+    /// Re-registers the stored function named `name` under `source`.
+    ///
+    /// Used when a workspace that shadowed a global function closes: the
+    /// global definition must come back into the registry. Returns whether a
+    /// stored entry was found.
+    pub fn restore_function(
+        &self,
+        db: &crate::storage::persistence::Db,
+        name: &str,
+        source: FunctionSource,
+    ) -> DaemonResult<bool> {
+        for mut entry in crate::registry::library::load_all(db)? {
+            if entry.name == name {
+                entry.source = source;
+                self.register_function(entry);
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Returns the node executor for the given kind, if registered.
@@ -170,5 +216,39 @@ mod tests {
         for name in ["ReadFile", "WriteFile", "ExecuteCommand", "SpawnSubAgent"] {
             assert!(registry.tool(name).is_some(), "{name} should be registered");
         }
+    }
+
+    #[test]
+    fn non_pascal_tool_names_are_rejected() {
+        struct BadTool(&'static str);
+
+        #[async_trait]
+        impl Tool for BadTool {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "bad"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn call(
+                &self,
+                _args: &[Value],
+                _ctx: &mut ExecutionContext,
+            ) -> DaemonResult<Value> {
+                Ok(Value::Null)
+            }
+        }
+
+        let registry = Registry::with_builtins();
+        for bad in ["snake_case", "kebab-case", "lower", "", "Has Space", "GitStatus_2"] {
+            assert!(
+                registry.try_register_tool(Arc::new(BadTool(bad))).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+        assert!(registry.tool("snake_case").is_none());
     }
 }

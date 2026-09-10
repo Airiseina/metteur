@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::{DaemonError, DaemonResult};
+use crate::registry::tool::is_valid_tool_name;
 
 /// One tool exported by an addon.
 #[derive(Debug, Clone, Deserialize)]
@@ -143,7 +144,7 @@ impl Manifest {
             )));
         }
         for tool in &self.tools {
-            if !is_pascal_case(&tool.name) {
+            if !is_valid_tool_name(&tool.name) {
                 return Err(DaemonError::Addon(format!(
                     "tool name '{}' must be PascalCase imperative",
                     tool.name
@@ -203,12 +204,6 @@ impl Manifest {
 
 /// Default plugin-call timeout when neither config nor manifest set one.
 const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
-
-fn is_pascal_case(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().next().is_some_and(|first| first.is_ascii_uppercase())
-        && name.chars().all(|ch| ch.is_ascii_alphanumeric())
-}
 
 #[cfg(test)]
 mod tests {

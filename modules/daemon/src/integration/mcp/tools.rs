@@ -225,7 +225,10 @@ pub(crate) fn pascal_case(input: &str) -> String {
 }
 
 /// Derives the registered tool name from the server alias and remote tool
-/// name, appending `_2`, `_3`, ... on conflicts with existing names.
+/// name, appending `2`, `3`, ... on conflicts with existing names.
+///
+/// The suffix is a bare digit (no separator) so generated names stay valid
+/// under the registry's PascalCase rule.
 ///
 /// Returns `(registered_name, unique)` where `unique` is true when no suffix
 /// was needed.
@@ -239,7 +242,7 @@ pub(crate) fn unique_server_tool_name(
         return (base, true);
     }
     for index in 2..u32::MAX {
-        let candidate = format!("{base}_{index}");
+        let candidate = format!("{base}{index}");
         if !taken.contains(&candidate) {
             return (candidate, false);
         }
@@ -272,12 +275,12 @@ mod tests {
         let mut taken = std::collections::HashSet::new();
         taken.insert("GitStatus".to_string());
         let (name, unique) = unique_server_tool_name("git", "status", &taken);
-        assert_eq!(name, "GitStatus_2");
+        assert_eq!(name, "GitStatus2");
         assert!(!unique);
         // The suffixed name is free for future uniqueness checks.
         taken.insert(name);
         let (name2, _) = unique_server_tool_name("git", "status", &taken);
-        assert_eq!(name2, "GitStatus_3");
+        assert_eq!(name2, "GitStatus3");
     }
 
     #[test]

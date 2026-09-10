@@ -83,8 +83,9 @@ pub fn verify(
     let signature_bytes = B64
         .decode(&file.value)
         .map_err(|_| DaemonError::Addon("signature value is not valid base64".to_string()))?;
-    let signature = Signature::from_slice(&signature_bytes)
-        .map_err(|_| DaemonError::Addon("signature is not a valid Ed25519 signature".to_string()))?;
+    let signature = Signature::from_slice(&signature_bytes).map_err(|_| {
+        DaemonError::Addon("signature is not a valid Ed25519 signature".to_string())
+    })?;
 
     let digest = canonical_digest(package_dir)?;
     let key = VerifyingKey::from_bytes(&public_key)
@@ -125,9 +126,7 @@ fn decode_key(encoded: &str) -> DaemonResult<[u8; 32]> {
     let bytes = B64
         .decode(encoded)
         .map_err(|_| DaemonError::Addon("public key is not valid base64".to_string()))?;
-    bytes
-        .try_into()
-        .map_err(|_| DaemonError::Addon("public key must be 32 bytes".to_string()))
+    bytes.try_into().map_err(|_| DaemonError::Addon("public key must be 32 bytes".to_string()))
 }
 
 fn matches_key(encoded: &str, expected: &[u8; 32]) -> bool {
@@ -260,8 +259,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_signature_when_required() {
-        let dir =
-            std::env::temp_dir().join(format!("addon-sig-nosig-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("addon-sig-nosig-{}", uuid::Uuid::new_v4()));
         let root = make_package(&dir);
         assert!(verify(&root, &[], true).is_err());
         assert!(verify(&root, &[], false).is_ok());

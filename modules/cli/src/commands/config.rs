@@ -4,8 +4,8 @@ use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::{GetConfigRequest, SetConfigRequest};
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Empty path for global scope, current workspace for `ws` scope.
 fn optional_ws(state: &SessionState, workspace: bool) -> anyhow::Result<String> {

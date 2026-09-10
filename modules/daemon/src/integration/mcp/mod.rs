@@ -56,13 +56,24 @@ pub struct McpHost {
 
 impl McpHost {
     /// Creates a host attached to the shared registry and metrics.
+    ///
+    /// The host-level resource tools (`ListMcpResources`, `ReadMcpResource`)
+    /// are registered here; they take the server alias as an argument, so one
+    /// copy serves every connected server.
     pub fn new(registry: Arc<Registry>, metrics: Arc<Metrics>) -> Arc<Self> {
-        Arc::new(Self {
-            registry,
+        let host = Arc::new(Self {
+            registry: registry.clone(),
             metrics,
             servers: RwLock::new(HashMap::new()),
             call_lock: AsyncMutex::new(()),
-        })
+        });
+        for tool in [
+            Arc::new(tools::ListMcpResources::new(host.clone())) as Arc<dyn crate::registry::Tool>,
+            Arc::new(tools::ReadMcpResource::new(host.clone())),
+        ] {
+            registry.try_register_tool(tool).expect("MCP resource tool names are valid");
+        }
+        host
     }
 
     /// Aligns live connections with the configured set of servers.
@@ -266,12 +277,12 @@ impl McpHost {
         for remote in &remote_tools {
             let (name, _) = tools::unique_server_tool_name(alias, &remote.name, &taken);
             taken.insert(name.clone());
-            self.registry.register_tool(Arc::new(tools::McpServerTool::new(
+            self.registry.try_register_tool(Arc::new(tools::McpServerTool::new(
                 self.clone(),
                 alias,
                 remote.clone(),
                 name.clone(),
-            )));
+            )))?;
             registered.push(name);
         }
 
@@ -337,4 +348,17 @@ pub enum StatusKind {
     Connected,
     Disabled,
     Failed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_registers_resource_tools() {
+        let registry = Arc::new(Registry::default());
+        let _host = McpHost::new(registry.clone(), Arc::new(Metrics::default()));
+        assert!(registry.tool("ListMcpResources").is_some());
+        assert!(registry.tool("ReadMcpResource").is_some());
+    }
 }

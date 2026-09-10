@@ -5,16 +5,16 @@
 use anyhow::Context;
 use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::{
-    Blueprint, CancelRequest, CompileDslRequest, ContinueExecutionRequest, DecompileBlueprintRequest,
-    Edge, ExecuteBlueprintRequest, GetExecutionUsageRequest, InterruptRequest,
-    ListExecutionsRequest, LoadBlueprintRequest, Node, PauseRequest, Pin, ResumeRequest,
-    SaveBlueprintRequest,
+    Blueprint, CancelRequest, CompileDslRequest, ContinueExecutionRequest,
+    DecompileBlueprintRequest, Edge, ExecuteBlueprintRequest, GetExecutionTreeRequest,
+    GetExecutionUsageRequest, InterruptRequest, ListExecutionsRequest, LoadBlueprintRequest, Node,
+    PauseRequest, Pin, ResumeRequest, SaveBlueprintRequest,
 };
 use serde_json::{Value, json};
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Handles `save-bp <file.json> [id]`.
 pub(crate) async fn handle_save_bp(
@@ -130,6 +130,24 @@ pub(crate) async fn handle_runs(
         .map_err(status)?
         .into_inner();
     Ok(Outcome::Printed(print::executions(&list)))
+}
+
+/// Handles `tree <run_id>`: shows the agent execution tree of a run.
+pub(crate) async fn handle_tree(
+    client: &mut DaemonClient<Channel>,
+    state: &SessionState,
+    run_id: String,
+) -> anyhow::Result<Outcome> {
+    let ws = require_ws(state)?;
+    let tree = client
+        .get_execution_tree(GetExecutionTreeRequest {
+            workspace_path: ws,
+            run_id,
+        })
+        .await
+        .map_err(status)?
+        .into_inner();
+    Ok(Outcome::Printed(print::execution_tree(&tree)))
 }
 
 /// Handles `cancel`.
@@ -365,10 +383,13 @@ fn parse_node(node: &Value) -> anyhow::Result<Node> {
 }
 
 fn parse_pin(pin: &Value) -> anyhow::Result<Pin> {
-    Ok(Pin { id: uuid_field(pin, "id")?,
+    Ok(Pin {
+        id: uuid_field(pin, "id")?,
         name: str_field(pin, "name"),
         pin_type: str_field(pin, "pin_type"),
-        data_type: str_field(pin, "data_type"), ..Default::default() })
+        data_type: str_field(pin, "data_type"),
+        ..Default::default()
+    })
 }
 
 fn parse_edge(edge: &Value) -> anyhow::Result<Edge> {

@@ -81,12 +81,20 @@ export const useConfigStore = defineStore('config', () => {
 
   /** Fetch both layers from the daemon (no-op fail keeps last values). */
   async function load(): Promise<void> {
+    const activePath = workspace.active?.path
     const [u, w] = await Promise.all([
       read(gateway.getConfig('')),
-      workspace.active ? read(gateway.getConfig(workspace.active.path)) : Promise.resolve(null),
+      activePath ? read(gateway.getConfig(activePath)) : Promise.resolve(null),
     ])
     if (u) user.value = u
-    if (w) ws.value = w
+    // Clear the workspace layer when there is no workspace (or its read
+    // failed) so a previous workspace's values cannot leak into this one.
+    if (activePath) {
+      if (w) ws.value = w
+      else ws.value = {}
+    } else {
+      ws.value = {}
+    }
     loaded.value = true
   }
 

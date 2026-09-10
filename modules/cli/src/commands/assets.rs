@@ -7,9 +7,9 @@ use metteur_proto::proto::{
 };
 use tonic::transport::Channel;
 
-use crate::print;
 use super::blueprint::{from_json, to_json};
 use super::*;
+use crate::print;
 
 /// Reads the workspace path for a function command, when scoped to `ws`.
 fn func_ws(state: &SessionState, workspace: bool) -> anyhow::Result<String> {
@@ -50,10 +50,7 @@ pub(crate) async fn handle_func_save(
         .await
         .map_err(status)?
         .into_inner();
-    Ok(Outcome::Printed(format!(
-        "function saved: {}",
-        resp.info.map(|f| f.name).unwrap_or(name)
-    )))
+    Ok(Outcome::Printed(format!("function saved: {}", resp.info.map(|f| f.name).unwrap_or(name))))
 }
 
 /// Handles `func list [ws|global]`.
@@ -112,9 +109,7 @@ pub(crate) async fn handle_func_load(
         .await
         .map_err(status)?
         .into_inner();
-    let body = loaded
-        .body
-        .ok_or_else(|| anyhow::anyhow!("function has no body"))?;
+    let body = loaded.body.ok_or_else(|| anyhow::anyhow!("function has no body"))?;
     Ok(Outcome::Printed(to_json(&body)?))
 }
 

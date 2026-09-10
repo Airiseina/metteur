@@ -45,6 +45,8 @@ impl NodeRegistry {
         registry.register(Box::new(n::MultiplyExecutor));
         registry.register(Box::new(n::DivideExecutor));
         registry.register(Box::new(n::BranchExecutor));
+        registry.register(Box::new(n::SwitchExecutor));
+        registry.register(Box::new(n::ForEachExecutor));
         registry.register(Box::new(n::CallLlmExecutor));
         registry.register(Box::new(n::ToolExecutor));
         registry.register(Box::new(n::ValidatorExecutor));
@@ -104,6 +106,9 @@ impl NodeRegistry {
         // Flow support.
         registry.register(Box::new(n::DelayExecutor));
         registry.register(Box::new(n::RequestApprovalExecutor));
+        // Frame-scoped variables.
+        registry.register(Box::new(n::VariableSetExecutor));
+        registry.register(Box::new(n::VariableGetExecutor));
         registry
     }
 

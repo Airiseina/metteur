@@ -130,6 +130,14 @@ const LEGACY_PIN_NAMES: Record<string, string> = {
   tool_name: 'ToolName',
   command: 'Command',
   result: 'Result',
+  cond: 'Condition',
+  case: 'Case',
+  iteration: 'Iteration',
+  name: 'Name',
+  task: 'Task',
+  description: 'Description',
+  alias: 'Alias',
+  max_iterations: 'MaxIterations',
 }
 
 /** Renamed node kinds: older canvases used a single `Arithmetic` entry where

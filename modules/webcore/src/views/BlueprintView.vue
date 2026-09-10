@@ -690,7 +690,7 @@ const paletteGroups = computed<MenuGroup[]>(() => {
     color: ACCENT[cat.key],
     items: kindList
       .filter((k) => NODE_PRESETS[k].category === cat.key)
-      .map((k) => ({ id: k, label: k })),
+      .map((k) => ({ id: k, label: NODE_PRESETS[k].title ?? k })),
   }))
   const fns = store.functions
   if (fns.length > 0) {
@@ -724,7 +724,7 @@ const paletteMenuGroups = computed<MenuGroup[]>(() => {
     color: ACCENT[cat.key],
     items: kindList
       .filter((k) => NODE_PRESETS[k].category === cat.key && compatible(k))
-      .map((k) => ({ id: k, label: k })),
+      .map((k) => ({ id: k, label: NODE_PRESETS[k].title ?? k })),
   })).filter((g) => g.items.length > 0)
 })
 
@@ -901,7 +901,7 @@ function addNodeAt(pos: { x: number; y: number }, kind: string): string | null {
     : undefined
   // Node ids must be UUIDs: the daemon model keys nodes/edges/pins by `Uuid`.
   const id = uuid()
-  const node = entry ? makeCallFunctionNode(entry, pos, id) : makeFlowNode(kind, pos, id)
+  const node = entry ? makeCallFunctionNode(entry, pos, id) : makeFlowNode(NODE_PRESETS[kind]?.kind ?? kind, pos, id, kind)
   flowNodes.value = [...flowNodes.value, node]
   selectedId.value = id
   selectedEdgeId.value = null
@@ -961,15 +961,39 @@ function copyNode(id: string) {
   clipboard.value = src ? [src] : []
 }
 
+/** Rebuild a Switch node's `Case_*` outlets from its edited case list. */
+function recaseNode(id: string, cases: string[]) {
+  const node = flowNodes.value.find((n) => n.id === id)
+  const outputs = node?.data?.outputs
+  if (!node || !outputs) return
+  commit()
+  const wanted = new Set(cases.map((c) => `Case_${c}`))
+  const kept = outputs.filter(
+    (p: BlueprintPin) => p.kind !== 'exec-out' || p.name === 'Default' || wanted.has(p.name),
+  )
+  const existing = new Set(kept.map((p) => p.name))
+  const added: BlueprintPin[] = cases
+    .filter((c) => !existing.has(`Case_${c}`))
+    .map((c) => ({ id: uuid(), key: `x-out-Case_${c}`, name: `Case_${c}`, kind: 'exec-out' as const }))
+  node.data.outputs = [...kept, ...added]
+  // Drop wires from removed outlets.
+  const live = new Set(node.data.outputs.map((p) => p.id))
+  flowEdges.value = flowEdges.value.filter(
+    (e) => !(e.source === id && e.sourceHandle && !live.has(e.sourceHandle)),
+  )
+  dirty.value = true
+}
+
 /** Append another exec output outlet to a node (Unreal-style add-on outputs). */
 function addExecOutput(id: string) {
   const node = flowNodes.value.find((n) => n.id === id)
-  if (!node?.data?.outputs) return
+  const outputs = node?.data?.outputs
+  if (!node || !outputs) return
   commit()
-  const count = node.data.outputs.filter((p: { kind: string }) => p.kind === 'exec-out').length
+  const count = outputs.filter((p: BlueprintPin) => p.kind === 'exec-out').length
   node.data.outputs = [
-    ...node.data.outputs,
-    { id: uuid(), key: `x-out-extra-${count}`, name: `Exec ${count}`, kind: 'exec-out' },
+    ...outputs,
+    { id: uuid(), key: `x-out-extra-${count}`, name: `Exec ${count}`, kind: 'exec-out' as const },
   ]
   dirty.value = true
 }
@@ -1565,6 +1589,7 @@ function openVersionPanel() {
         :node="selectedNodeData"
         @close="selectedId = null"
         @change="dirty = true"
+        @recase="(cases: string[]) => selectedId && recaseNode(selectedId, cases)"
       />
     </div>
 

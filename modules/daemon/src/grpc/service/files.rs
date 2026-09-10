@@ -6,8 +6,8 @@ use tonic::{Request, Response, Status};
 
 use super::super::proto::{
     CreateDirRequest, Empty, FileEntry, FileInfo, FileList, ListFilesRequest, ReadFileRequest,
-    ReadFileResponse, RemoveFileRequest, RenameFileRequest, RevealInExplorerRequest, StatFileRequest,
-    WatchEvent, WatchWorkspaceRequest, WriteFileRequest,
+    ReadFileResponse, RemoveFileRequest, RenameFileRequest, RevealInExplorerRequest,
+    StatFileRequest, WatchEvent, WatchWorkspaceRequest, WriteFileRequest,
 };
 use super::*;
 
@@ -43,10 +43,16 @@ impl DaemonService {
                 continue;
             }
             let is_dir = entry.file_type().map_err(io_status)?.is_dir();
-            entries.push(FileEntry { name, path: rel, is_dir });
+            entries.push(FileEntry {
+                name,
+                path: rel,
+                is_dir,
+            });
         }
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-        Ok(Response::new(FileList { entries }))
+        Ok(Response::new(FileList {
+            entries,
+        }))
     }
 
     pub(crate) async fn read_file(
@@ -64,7 +70,9 @@ impl DaemonService {
         let bytes = std::fs::read(&path).map_err(io_status)?;
         let content = String::from_utf8(bytes)
             .map_err(|_| Status::invalid_argument("file is not valid utf-8"))?;
-        Ok(Response::new(ReadFileResponse { content }))
+        Ok(Response::new(ReadFileResponse {
+            content,
+        }))
     }
 
     pub(crate) async fn write_file(
@@ -184,10 +192,8 @@ impl DaemonService {
     pub(crate) async fn watch_workspace(
         &self,
         request: Request<WatchWorkspaceRequest>,
-    ) -> Result<
-        Response<tokio_stream::wrappers::ReceiverStream<Result<WatchEvent, Status>>>,
-        Status,
-    > {
+    ) -> Result<Response<tokio_stream::wrappers::ReceiverStream<Result<WatchEvent, Status>>>, Status>
+    {
         let req = request.into_inner();
         let ws = self
             .state

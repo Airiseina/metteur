@@ -37,11 +37,7 @@ impl NodeExecutor for JudgeExecutor {
             matches_success_criteria(node, &result)?
         } else {
             let score = numeric_input(inputs, node, "Score")?;
-            let threshold = node
-                .data
-                .get("threshold")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0);
+            let threshold = node.data.get("threshold").and_then(|v| v.as_f64()).unwrap_or(1.0);
             score >= threshold
         };
         bool_output(node, "Success", success)
@@ -55,11 +51,10 @@ impl NodeExecutor for JudgeExecutor {
 /// - `regex`: the result's string form matches `success_criteria.pattern`.
 /// - `equals`: the result's JSON form equals `success_criteria.expected`.
 fn matches_success_criteria(node: &Node, result: &Value) -> DaemonResult<bool> {
-    let criteria = node
-        .data
-        .get("success_criteria")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| DaemonError::Execution("success_criteria must be a JSON object".to_string()))?;
+    let criteria =
+        node.data.get("success_criteria").and_then(|v| v.as_object()).ok_or_else(|| {
+            DaemonError::Execution("success_criteria must be a JSON object".to_string())
+        })?;
     let kind = criteria
         .get("type")
         .and_then(|v| v.as_str())
@@ -68,27 +63,20 @@ fn matches_success_criteria(node: &Node, result: &Value) -> DaemonResult<bool> {
     match kind {
         "non_empty" | "not_empty" => Ok(!is_empty(result)),
         "regex" => {
-            let pattern = criteria
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    DaemonError::Execution(
-                        "success_criteria regex requires .pattern".to_string(),
-                    )
-                })?;
+            let pattern = criteria.get("pattern").and_then(|v| v.as_str()).ok_or_else(|| {
+                DaemonError::Execution("success_criteria regex requires .pattern".to_string())
+            })?;
             let re = regex::Regex::new(pattern)
                 .map_err(|e| DaemonError::Execution(format!("invalid regex: {e}")))?;
             Ok(re.is_match(&value_to_string(result)))
         }
         "equals" => {
-            let expected = criteria
-                .get("expected")
-                .ok_or_else(|| DaemonError::Execution("success_criteria equals requires .expected".to_string()))?;
+            let expected = criteria.get("expected").ok_or_else(|| {
+                DaemonError::Execution("success_criteria equals requires .expected".to_string())
+            })?;
             Ok(value_to_json(result) == *expected)
         }
-        other => Err(DaemonError::Execution(format!(
-            "unknown success criteria type '{other}'"
-        ))),
+        other => Err(DaemonError::Execution(format!("unknown success criteria type '{other}'"))),
     }
 }
 

@@ -231,9 +231,7 @@ impl NodeExecutor for JsonSetExecutor {
         };
         let segments: Vec<&str> = path.split('.').collect();
         if !json_set_path(&mut root, &segments, value) {
-            return Err(DaemonError::Execution(
-                "JsonSet path traverses a non-object".to_string(),
-            ));
+            return Err(DaemonError::Execution("JsonSet path traverses a non-object".to_string()));
         }
         let pin = node.pins.iter().find(|p| p.name == "Result").unwrap();
         Ok(HashMap::from([(pin.id, Value::Json(root))]))

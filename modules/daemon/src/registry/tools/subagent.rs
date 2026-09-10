@@ -90,7 +90,7 @@ impl Tool for SpawnSubAgent {
                 }]
             })
             .unwrap_or_default();
-        let context = ContextManager::new_from_prompt(fragments, task);
+        let context = ContextManager::new_from_prompt(fragments, task.clone());
 
         let opts = ReactOptions {
             provider,
@@ -103,7 +103,37 @@ impl Tool for SpawnSubAgent {
         };
 
         let mut child = ctx.child_nested();
-        let outcome = run_react(&mut child, context, &opts).await?;
+        // `task` moves into the child context below; keep a label copy first.
+        let label: String = task.chars().take(80).collect();
+        ctx.tree_ops.push(crate::execution::TreeOp::SpawnChild {
+            kind: crate::execution::TreeNodeKind::SubAgent,
+            label,
+        });
+        if let Some(tx) = &ctx.events {
+            let _ = tx.send(crate::execution::ExecutionEvent::Message {
+                node_id: ctx.current_node,
+                message: format!("subagent started (depth {})", child.depth),
+            });
+        }
+        let outcome = match run_react(&mut child, context, &opts).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                ctx.tree_ops.push(crate::execution::TreeOp::FinishCurrent {
+                    status: crate::execution::TreeNodeStatus::Failed(err.to_string()),
+                });
+                return Err(err);
+            }
+        };
+        ctx.tree_ops.push(crate::execution::TreeOp::AddTokens(outcome.usage.total_tokens));
+        ctx.tree_ops.push(crate::execution::TreeOp::FinishCurrent {
+            status: crate::execution::TreeNodeStatus::Done,
+        });
+        if let Some(tx) = &ctx.events {
+            let _ = tx.send(crate::execution::ExecutionEvent::Message {
+                node_id: ctx.current_node,
+                message: "subagent finished".to_string(),
+            });
+        }
         ctx.audit(
             "subagent.run",
             serde_json::json!({

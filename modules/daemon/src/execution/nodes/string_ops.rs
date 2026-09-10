@@ -147,7 +147,8 @@ impl NodeExecutor for SubstringExecutor {
         let length = int_input(node, inputs, "Length")?.max(0) as usize;
         let end = text.len().min(start.saturating_add(length));
         let chars: Vec<char> = text.chars().collect();
-        let slice: String = chars.get(start..end.min(chars.len())).unwrap_or_default().iter().collect();
+        let slice: String =
+            chars.get(start..end.min(chars.len())).unwrap_or_default().iter().collect();
         string_output(node, "Result", slice)
     }
 }
@@ -186,9 +187,7 @@ macro_rules! convert_node {
 }
 
 convert_node!(ToStringExecutor, "ToString", |v: &Value| Some(super::value_to_string(v).into()));
-convert_node!(ToJsonExecutor, "ToJson", |v: &Value| {
-    Some(Value::Json(super::value_to_json(v)))
-});
+convert_node!(ToJsonExecutor, "ToJson", |v: &Value| { Some(Value::Json(super::value_to_json(v))) });
 convert_node!(ToIntExecutor, "ToInt", |v: &Value| match v {
     Value::Int(i) => Some(Value::Int(*i)),
     Value::Float(f) => Some(Value::Int(*f as i64)),

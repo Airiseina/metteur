@@ -40,9 +40,7 @@ pub fn install(env: &AutostartEnv) -> DaemonResult<()> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        Err(DaemonError::Internal(
-            "autostart is not supported on this platform".to_string(),
-        ))
+        Err(DaemonError::Internal("autostart is not supported on this platform".to_string()))
     }
 }
 
@@ -62,9 +60,7 @@ pub fn uninstall() -> DaemonResult<()> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        Err(DaemonError::Internal(
-            "autostart is not supported on this platform".to_string(),
-        ))
+        Err(DaemonError::Internal("autostart is not supported on this platform".to_string()))
     }
 }
 
@@ -114,43 +110,37 @@ fn flag_arg(flag: &str, value: Option<&std::path::Path>) -> String {
 
 #[cfg(target_os = "windows")]
 fn install_windows(env: &AutostartEnv) -> DaemonResult<()> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let run_key = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    let (key, _) =
-        RegKey::predef(HKEY_CURRENT_USER).create_subkey(run_key).map_err(|e| {
-            DaemonError::Internal(format!("cannot open Run key {run_key}: {e}"))
-        })?;
-    key.set_value(ENTRY_NAME, &windows_command_line(env)).map_err(|e| {
-        DaemonError::Internal(format!("cannot write autostart value: {e}"))
-    })?;
+    let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey(run_key)
+        .map_err(|e| DaemonError::Internal(format!("cannot open Run key {run_key}: {e}")))?;
+    key.set_value(ENTRY_NAME, &windows_command_line(env))
+        .map_err(|e| DaemonError::Internal(format!("cannot write autostart value: {e}")))?;
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn uninstall_windows() -> DaemonResult<()> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS};
 
     let _ = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            KEY_ALL_ACCESS,
-        )
+        .open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Run", KEY_ALL_ACCESS)
         .and_then(|key| key.delete_value(ENTRY_NAME));
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn is_installed_windows() -> bool {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
-    match RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
-        r"Software\Microsoft\Windows\CurrentVersion\Run",
-        KEY_READ,
-    ) {
+    match RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Run", KEY_READ)
+    {
         Ok(key) => key.get_value::<String, _>(ENTRY_NAME).is_ok(),
         Err(_) => false,
     }
@@ -164,10 +154,16 @@ fn macos_plist(env: &AutostartEnv) -> String {
         xml_escape(&env.exe.to_string_lossy())
     );
     if let Some(config) = &env.config {
-        args.push_str(&format!("<string>--config</string><string>{}</string>", xml_escape(&config.to_string_lossy())));
+        args.push_str(&format!(
+            "<string>--config</string><string>{}</string>",
+            xml_escape(&config.to_string_lossy())
+        ));
     }
     if let Some(data_dir) = &env.data_dir {
-        args.push_str(&format!("<string>--data-dir</string><string>{}</string>", xml_escape(&data_dir.to_string_lossy())));
+        args.push_str(&format!(
+            "<string>--data-dir</string><string>{}</string>",
+            xml_escape(&data_dir.to_string_lossy())
+        ));
     }
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -198,9 +194,7 @@ fn linux_desktop(env: &AutostartEnv) -> String {
 
 #[cfg(target_os = "macos")]
 fn launch_agents_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     home.join("Library").join("LaunchAgents")
 }
 
@@ -235,13 +229,11 @@ fn is_installed_macos() -> bool {
 
 #[cfg(target_os = "linux")]
 fn autostart_dir() -> PathBuf {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".config"))
-                .unwrap_or_else(std::env::temp_dir)
-        });
+    let config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".config"))
+            .unwrap_or_else(std::env::temp_dir)
+    });
     config_home.join("autostart")
 }
 
@@ -277,11 +269,7 @@ fn is_installed_linux() -> bool {
 /// Escapes a value for inclusion in a plist `<string>` element.
 #[cfg(any(target_os = "macos", test))]
 fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -289,7 +277,11 @@ mod tests {
     use super::*;
 
     fn env(exe: &str) -> AutostartEnv {
-        AutostartEnv { exe: PathBuf::from(exe), config: None, data_dir: None }
+        AutostartEnv {
+            exe: PathBuf::from(exe),
+            config: None,
+            data_dir: None,
+        }
     }
 
     #[test]

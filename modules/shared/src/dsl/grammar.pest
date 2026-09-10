@@ -49,5 +49,6 @@ literal    = { string_lit | bool_lit | number_lit | array_lit | object_lit }
 string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 bool_lit   = @{ "true" | "false" }
 number_lit = @{ ("-" | "+")? ~ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? | "." ~ ASCII_DIGIT+) ~ (("e" | "E") ~ ("-" | "+")? ~ ASCII_DIGIT+)? }
-array_lit  = @{ "[" ~ (literal ~ ("," ~ literal)*)? ~ "]" }
-object_lit = @{ "{" ~ (string_lit ~ ":" ~ literal ~ ("," ~ string_lit ~ ":" ~ literal)*)? ~ "}" }
+// Compound (whitespace-tolerant) so elements may be spaced freely.
+array_lit  = { "[" ~ (literal ~ ("," ~ literal)*)? ~ "]" }
+object_lit = { "{" ~ (string_lit ~ ":" ~ literal ~ ("," ~ string_lit ~ ":" ~ literal)*)? ~ "}" }

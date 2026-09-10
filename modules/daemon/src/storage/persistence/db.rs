@@ -25,6 +25,8 @@ pub mod cf {
     pub const FUNCTIONS: &str = "functions";
     /// Stores the workspace's active chat session.
     pub const CHAT_SESSIONS: &str = "chat_sessions";
+    /// Stores chat threads keyed by session id.
+    pub const CHAT_THREADS: &str = "chat_threads";
 }
 
 /// A thin wrapper around a RocksDB instance with typed column families.
@@ -51,6 +53,7 @@ impl Db {
             ColumnFamilyDescriptor::new(cf::GRANTS, rocksdb::Options::default()),
             ColumnFamilyDescriptor::new(cf::FUNCTIONS, rocksdb::Options::default()),
             ColumnFamilyDescriptor::new(cf::CHAT_SESSIONS, rocksdb::Options::default()),
+            ColumnFamilyDescriptor::new(cf::CHAT_THREADS, rocksdb::Options::default()),
         ];
 
         // RocksDB on Windows rejects the `\\?\` extended-length path prefix

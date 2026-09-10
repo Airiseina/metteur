@@ -1,11 +1,11 @@
 //! Audit log command handlers.
 
-use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::ListAuditLogRequest;
+use metteur_proto::proto::daemon_client::DaemonClient;
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Handles `audit ws`.
 pub(crate) async fn handle_audit_ws(
@@ -24,7 +24,9 @@ pub(crate) async fn handle_audit_ws(
 }
 
 /// Handles `audit global`.
-pub(crate) async fn handle_audit_global(client: &mut DaemonClient<Channel>) -> anyhow::Result<Outcome> {
+pub(crate) async fn handle_audit_global(
+    client: &mut DaemonClient<Channel>,
+) -> anyhow::Result<Outcome> {
     let list = client
         .list_audit_log(ListAuditLogRequest {
             workspace_path: String::new(),

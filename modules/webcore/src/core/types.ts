@@ -71,9 +71,15 @@ export interface ChatMessage {
   pending?: boolean
 }
 
+/** Token usage reported for a completed chat turn. */
+export interface ChatUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
 /** Sampling parameters for a ReAct chat turn, adjustable from the chat panel. */
-export interface ChatOptions {
-  model?: string
+export interface ChatOptions {  model?: string
   system?: string
   temperature?: number
   top_p?: number
@@ -294,6 +300,27 @@ export interface NodeAudit {
   tokens: number
   /** Latest message produced by the node. */
   message: string
+}
+
+/** One node of the agent execution tree. */
+export interface ExecTreeNode {
+  id: string
+  /** run | node:<kind> | subagent | function:<name> */
+  kind: string
+  label: string
+  parent: string
+  children: string[]
+  /** running | done | failed:<reason> */
+  status: string
+  tokens: number
+  startedAt: number
+  finishedAt: number
+}
+
+/** The agent execution tree of one run. */
+export interface ExecTreeData {
+  nodes: ExecTreeNode[]
+  roots: string[]
 }
 
 // --- Layered configuration (mirrors `metteur_shared::config::Config`) --------

@@ -4,8 +4,8 @@ use metteur_proto::proto::daemon_client::DaemonClient;
 use metteur_proto::proto::{CloseWorkspaceRequest, Empty, OpenWorkspaceRequest};
 use tonic::transport::Channel;
 
-use crate::print;
 use super::*;
+use crate::print;
 
 /// Handles `open <path>`.
 pub(crate) async fn handle_open(

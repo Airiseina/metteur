@@ -56,13 +56,11 @@ pub async fn connect_daemon(cli: &Cli) -> Result<DaemonClient<Channel>> {
                 .await
                 .context("connecting to daemon over TLS")?
         }
-        None => {
-            Channel::from_shared(format!("http://{}", cli.daemon_addr))
-                .context("invalid daemon address")?
-                .connect()
-                .await
-                .context("connecting to daemon")?
-        }
+        None => Channel::from_shared(format!("http://{}", cli.daemon_addr))
+            .context("invalid daemon address")?
+            .connect()
+            .await
+            .context("connecting to daemon")?,
     };
     Ok(DaemonClient::new(channel))
 }
