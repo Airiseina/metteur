@@ -48,6 +48,10 @@ impl Tool for SpawnSubAgent {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Tool names the sub-agent may call; defaults to all except SpawnSubAgent."
+                },
+                "inherit_context": {
+                    "type": "boolean",
+                    "description": "Pass the recent conversation (and the system prompt) to the sub-agent. Costs tokens; use it when the task depends on what was already discussed."
                 }
             },
             "required": ["task"]
@@ -65,6 +69,7 @@ impl Tool for SpawnSubAgent {
         let mock_text = a.string("mock_text", 4);
         let max_iterations = a.int("max_iterations", 5).map(|v| v as usize);
         let allowed_tools = allowed_tools_arg(&a);
+        let inherit_context = a.bool("inherit_context", 7).unwrap_or(false);
 
         if ctx.depth >= MAX_SUBAGENT_DEPTH {
             return Err(DaemonError::Execution("subagent depth limit exceeded".to_string()));
@@ -72,6 +77,10 @@ impl Tool for SpawnSubAgent {
 
         // Model chain: explicit -> configured subagent default -> global default.
         let model = resolve_model(ctx, explicit_model).await;
+        let inherit_tokens = match &ctx.config {
+            Some(config) => config.read().await.llm.subagent_inherit_tokens as usize,
+            None => 4096,
+        };
         let default_tools: HashSet<String> = ctx
             .registry
             .tools()
@@ -81,16 +90,24 @@ impl Tool for SpawnSubAgent {
             .collect();
         let allowed_tools = allowed_tools.unwrap_or(default_tools);
 
-        let fragments = system
-            .map(|content| {
-                vec![SystemFragment {
-                    priority: 0,
-                    scope: "subagent".to_string(),
-                    content,
-                }]
-            })
-            .unwrap_or_default();
-        let context = ContextManager::new_from_prompt(fragments, task.clone());
+        // A fresh sub-agent still needs to know where it works: the harness
+        // sections (identity, rules, environment) travel with it either way.
+        let mut fragments = crate::harness::HarnessPrompt::fragments(ctx).await;
+        if let Some(content) = system {
+            fragments.push(SystemFragment {
+                priority: crate::harness::sections::PRIORITY_NODE,
+                scope: "subagent".to_string(),
+                content,
+            });
+        }
+        let mut context =
+            inherited_context(ctx, inherit_context, inherit_tokens).unwrap_or_default();
+        // A nested sub-agent must not inherit its caller's task instruction:
+        // its own replaces it. `apply` then installs the harness sections in
+        // place of the copies an inherited context already carries.
+        context.system_fragments.retain(|fragment| fragment.scope != "subagent");
+        crate::harness::HarnessPrompt::apply(&mut context, fragments);
+        push_user_turn(&mut context, task.clone());
 
         let opts = ReactOptions {
             provider,
@@ -141,13 +158,61 @@ impl Tool for SpawnSubAgent {
                 "depth": child.depth,
             }),
         );
-        Ok(Value::String(outcome.text))
+        // The result is a summary of a whole nested run; a short header lets
+        // the caller judge it without re-reading the transcript, and the byte
+        // cap keeps one subagent from flooding the parent context.
+        let header = format!(
+            "[subagent: model={} tokens={} iterations<= {}]",
+            opts.model.clone().unwrap_or_else(|| "default".to_string()),
+            outcome.usage.total_tokens,
+            opts.max_iterations,
+        );
+        let text = format!("{header}\n{}", outcome.text);
+        let capped = super::result::truncate_result(&text, self.max_result_bytes());
+        Ok(Value::String(capped))
     }
 }
 
 impl SpawnSubAgent {
     /// The tool excluded from the default tool set to prevent self-recursion.
     const EXCLUDED_TOOL: &'static str = "SpawnSubAgent";
+}
+
+/// Builds the seed context of a sub-agent that inherits the caller's
+/// conversation.
+///
+/// Only the system prompt and the recent *prose* turns travel: an assistant
+/// turn that carries tool calls cannot be replayed without its responses, so
+/// tool traffic is dropped rather than half-copied. The tail is bounded by
+/// `[llm].subagent_inherit_tokens`.
+fn inherited_context(
+    ctx: &ExecutionContext,
+    inherit: bool,
+    inherit_tokens: usize,
+) -> Option<ContextManager> {
+    if !inherit {
+        return None;
+    }
+    let mut context = ctx.parent_context.clone()?;
+    let history = context.text_history(inherit_tokens);
+    context.messages = history;
+    context.tool_results.clear();
+    Some(context)
+}
+
+/// Appends the task as a user turn, extending a trailing user message instead
+/// of starting a second one in a row (providers require alternating roles).
+fn push_user_turn(context: &mut ContextManager, task: String) {
+    use metteur_shared::llm::{Message, Role};
+    let trailing_user = context.messages.last().map(|message| message.role) == Some(Role::User);
+    let text = match trailing_user {
+        true => {
+            let previous = context.messages.pop().map(|m| m.text_content()).unwrap_or_default();
+            format!("{previous}\n\n{task}")
+        }
+        false => task,
+    };
+    context.push_message(Message::text(Role::User, text));
 }
 
 /// Resolves the sub-agent model from configuration when not explicit.
@@ -230,7 +295,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out, Value::String("sub agent answer".to_string()));
+        // The answer is prefixed with a metadata header the caller can audit.
+        let Value::String(text) = out else {
+            panic!("expected a string result");
+        };
+        assert!(text.starts_with("[subagent:"), "{text}");
+        assert!(text.ends_with("sub agent answer"), "{text}");
     }
 
     #[tokio::test]
@@ -250,9 +320,8 @@ mod tests {
         let config = Config {
             llm: LlmConfig {
                 default_model: Some("fallback-model".to_string()),
-                temperature: None,
                 subagent_default_model: Some("sub-model".to_string()),
-                models: Default::default(),
+                ..Default::default()
             },
             ..Default::default()
         };

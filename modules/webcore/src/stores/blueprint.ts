@@ -91,7 +91,7 @@ function seedGraph(): GraphData {
 }
 
 /** The on-disk name of a blueprint derived from its file path. */
-function fileNameOf(filePath: string): string {
+export function fileNameOf(filePath: string): string {
   return filePath.split(/[\\/]/).pop()?.replace(/\.blueprint$/i, '') || 'blueprint'
 }
 

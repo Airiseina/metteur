@@ -32,7 +32,7 @@ import type { Blueprint, BlueprintEdge, BlueprintNode, BlueprintPin, NodeCategor
 import { gateway } from '@/core'
 import { useFeedbackStore } from '@/stores/feedback'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { useBlueprintStore } from '@/stores/blueprint'
+import { fileNameOf, useBlueprintStore } from '@/stores/blueprint'
 import { useExecutionStore } from '@/stores/execution'
 import { useTabsStore } from '@/stores/tabs'
 import { useRightPanelStore } from '@/stores/right-panel'
@@ -975,12 +975,14 @@ function recaseNode(id: string, cases: string[]) {
   const added: BlueprintPin[] = cases
     .filter((c) => !existing.has(`Case_${c}`))
     .map((c) => ({ id: uuid(), key: `x-out-Case_${c}`, name: `Case_${c}`, kind: 'exec-out' as const }))
-  node.data.outputs = [...kept, ...added]
-  // Drop wires from removed outlets.
-  const live = new Set(node.data.outputs.map((p) => p.id))
-  flowEdges.value = flowEdges.value.filter(
-    (e) => !(e.source === id && e.sourceHandle && !live.has(e.sourceHandle)),
-  )
+  if (node?.data) {
+    node.data.outputs = [...kept, ...added]
+    // Drop wires from removed outlets.
+    const live = new Set(node.data.outputs.map((p) => p.id))
+    flowEdges.value = flowEdges.value.filter(
+      (e) => !(e.source === id && e.sourceHandle && !live.has(e.sourceHandle)),
+    )
+  }
   dirty.value = true
 }
 
@@ -991,10 +993,12 @@ function addExecOutput(id: string) {
   if (!node || !outputs) return
   commit()
   const count = outputs.filter((p: BlueprintPin) => p.kind === 'exec-out').length
-  node.data.outputs = [
-    ...outputs,
-    { id: uuid(), key: `x-out-extra-${count}`, name: `Exec ${count}`, kind: 'exec-out' as const },
-  ]
+  if (node?.data) {
+    node.data.outputs = [
+      ...outputs,
+      { id: uuid(), key: `x-out-extra-${count}`, name: `Exec ${count}`, kind: 'exec-out' as const },
+    ]
+  }
   dirty.value = true
 }
 
@@ -1273,13 +1277,22 @@ async function handleSave() {
 async function handleRun() {
   const ws = workspace.active
   if (!ws) return
-  // Persist the canvas first so the executed blueprint matches what the user
-  // sees, then run it in place with the audit drawer open.
+  // Persist the canvas first so a later reload sees it, then run the in-memory
+  // graph. The graph is handed to the daemon directly, so a failed mirror
+  // cannot make Run execute a stale blueprint.
   await handleSave()
   const id = store.uuidFor(fileKey.value) ?? uuid()
+  const blueprint: Blueprint = {
+    id,
+    // The name matches what `save` mirrors, so both agree on the identity.
+    name: fileNameOf(fileKey.value),
+    entryNodeId: entryNodeIdOf(),
+    nodes: store.nodes,
+    edges: store.edges,
+  }
   auditOpen.value = true
   try {
-    await execution.run(id)
+    await execution.run(id, blueprint)
   } catch (err) {
     feedback.toast('error', 'Run failed', String(err))
   }

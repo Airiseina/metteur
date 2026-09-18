@@ -203,14 +203,26 @@ pub fn usage(summary: &UsageSummary) -> String {
         return "(no usage recorded)".to_string();
     }
     let mut out = String::from(
-        "MODEL                            CALLS         INPUT        OUTPUT    REASONING          COST\n",
+        "MODEL                            CALLS         INPUT        CACHED       OUTPUT    REASONING          COST\n",
     );
     for model in &summary.models {
+        // The hit rate is the signal users tune prompts for; show the share of
+        // input served from cache next to the raw count.
+        let cached = if model.input_tokens > 0 {
+            format!(
+                "{} ({:.0}%)",
+                model.cached_input_tokens,
+                model.cached_input_tokens as f64 / model.input_tokens as f64 * 100.0
+            )
+        } else {
+            model.cached_input_tokens.to_string()
+        };
         out.push_str(&format!(
-            "{:<32} {:>5} {:>13} {:>13} {:>13}  {:>10}\n",
+            "{:<32} {:>5} {:>13} {:>13} {:>13} {:>13}  {:>10}\n",
             model.model,
             model.calls,
             model.input_tokens,
+            cached,
             model.output_tokens,
             model.reasoning_tokens,
             micros(model.cost_micros)
@@ -362,6 +374,7 @@ mod tests {
                     output_tokens: 2_000,
                     reasoning_tokens: 100,
                     cost_micros: 10_000_000,
+                    ..Default::default()
                 },
                 ModelUsage {
                     model: "claude-haiku".to_string(),
@@ -370,6 +383,7 @@ mod tests {
                     output_tokens: 60,
                     reasoning_tokens: 0,
                     cost_micros: 2_750_500,
+                    ..Default::default()
                 },
             ],
         }

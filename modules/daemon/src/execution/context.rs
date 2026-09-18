@@ -205,6 +205,18 @@ pub struct ForEachState {
     pub count: u32,
 }
 
+/// A context mutation requested by a tool and applied by the ReAct loop.
+///
+/// Tools cannot reach the conversation context directly — it lives in the loop
+/// that owns the turn. A tool that changes the context queues an operation
+/// here, and the loop drains the queue after the tool batch and before the next
+/// model call, so a release never targets the result that requested it.
+#[derive(Debug, Clone)]
+pub enum ContextOp {
+    /// Release the tool results selected by the query.
+    Release(metteur_shared::llm::ReleaseQuery),
+}
+
 /// Shared capabilities available to node executors during execution.
 ///
 /// This is created once per execution and passed by mutable reference to each
@@ -265,6 +277,39 @@ pub struct ExecutionContext {
     pub tree_ops: Vec<super::tree::TreeOp>,
     /// The workspace version manager, enabling snapshot tools.
     pub version_manager: Option<Arc<crate::storage::versioning::VersionManager>>,
+    /// Background commands of this workspace.
+    ///
+    /// A fresh manager is created per context so tools always work; the daemon
+    /// swaps in the workspace-wide instance when it spawns a run or a chat, so
+    /// job ids stay valid across runs and can be listed per workspace.
+    pub jobs: Arc<super::jobs::JobManager>,
+    /// Paths read by tools since the last drain; the ReAct loop records them
+    /// on the tool result so the context manager can expire stale content.
+    pub read_paths: Vec<std::path::PathBuf>,
+    /// Paths *fully* read by tools since the last drain (a windowed read is
+    /// excluded); the ReAct loop supersedes earlier full reads of the same
+    /// paths.
+    pub read_paths_full: Vec<std::path::PathBuf>,
+    /// Context mutations requested by tools, drained by the ReAct loop.
+    pub context_ops: Vec<ContextOp>,
+    /// Whether a ReAct loop currently drives this context.
+    ///
+    /// A tool that only queues a context operation (`ReleaseContext`) has no
+    /// effect outside such a loop, because a blueprint pin value has no single
+    /// conversation to mutate; the tool refuses instead of promising something
+    /// it cannot deliver.
+    pub in_react_loop: bool,
+    /// The caller's conversation, present only while a tool that declares
+    /// interest in it (`SpawnSubAgent`) is running.
+    pub parent_context: Option<metteur_shared::llm::ContextManager>,
+    /// Paths mutated by tools since the last drain; the ReAct loop drains them
+    /// to invalidate earlier reads of the same files.
+    pub mutated_paths: Vec<std::path::PathBuf>,
+    /// The agent's task list for this context.
+    ///
+    /// A nested context (SubAgent) inherits a copy: its own plan must not
+    /// rewrite the parent's.
+    pub todos: Vec<metteur_shared::llm::TodoItem>,
 }
 
 impl ExecutionContext {
@@ -274,6 +319,7 @@ impl ExecutionContext {
         llm_factory: LlmClientFactory,
         workspace_root: std::path::PathBuf,
     ) -> Self {
+        let jobs = Arc::new(super::jobs::JobManager::new(workspace_root.clone()));
         Self {
             registry,
             llm_factory,
@@ -301,7 +347,49 @@ impl ExecutionContext {
             variables: vec![HashMap::new()],
             tree_ops: Vec::new(),
             version_manager: None,
+            jobs,
+            read_paths: Vec::new(),
+            read_paths_full: Vec::new(),
+            context_ops: Vec::new(),
+            in_react_loop: false,
+            parent_context: None,
+            mutated_paths: Vec::new(),
+            todos: Vec::new(),
         }
+    }
+
+    /// Declares that the running tool read these workspace paths.
+    ///
+    /// Paths are recorded relative to the workspace root so the context
+    /// manager can match them against later mutations.
+    pub fn note_read_paths(&mut self, paths: impl IntoIterator<Item = std::path::PathBuf>) {
+        for path in paths {
+            self.read_paths.push(self.relative_path(path));
+        }
+    }
+
+    /// Declares that the running tool mutated this workspace path.
+    pub fn note_file_mutation(&mut self, path: impl AsRef<std::path::Path>) {
+        self.mutated_paths.push(self.relative_path(path.as_ref().to_path_buf()));
+    }
+
+    /// Declares that the running tool read these paths in full.
+    ///
+    /// A full read supersedes an earlier full read of the same paths; a
+    /// windowed read only re-registers the path for staleness tracking.
+    pub fn note_full_read(&mut self, paths: impl IntoIterator<Item = std::path::PathBuf>) {
+        for path in paths {
+            let relative = self.relative_path(path);
+            self.read_paths.push(relative.clone());
+            self.read_paths_full.push(relative);
+        }
+    }
+
+    /// Normalizes a path to a workspace-relative form (falls back to the
+    /// input when it lies outside the workspace).
+    fn relative_path(&self, path: std::path::PathBuf) -> std::path::PathBuf {
+        let root = &self.workspace_root;
+        path.strip_prefix(root).map(|p| p.to_path_buf()).unwrap_or(path)
     }
 
     /// Returns the innermost variable frame for writing, if any.
@@ -353,6 +441,9 @@ impl ExecutionContext {
         child.addon_fragments = self.addon_fragments.clone();
         child.blueprint = self.blueprint.clone();
         child.version_manager = self.version_manager.clone();
+        // The child works from the parent's plan but keeps its own copy, so a
+        // sub-agent's updates cannot rewrite the caller's list.
+        child.todos = self.todos.clone();
         child.depth = self.depth + 1;
         child
     }

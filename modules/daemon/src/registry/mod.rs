@@ -39,9 +39,16 @@ impl Registry {
         for tool in [
             Arc::new(tools::fs_tools::ReadFile) as Arc<dyn Tool>,
             Arc::new(tools::fs_tools::WriteFile),
+            Arc::new(tools::edit::EditFile),
             Arc::new(tools::fs_tools::ListDirectory),
             Arc::new(tools::fs_tools::SearchFile),
+            Arc::new(tools::search::Grep),
+            Arc::new(tools::search::Glob),
             Arc::new(tools::command::ExecuteCommand),
+            Arc::new(tools::command::StartCommand),
+            Arc::new(tools::command::JobStatus),
+            Arc::new(tools::command::WaitJob),
+            Arc::new(tools::command::KillJob),
             Arc::new(tools::deps::GetDependencies),
             Arc::new(tools::subagent::SpawnSubAgent),
             Arc::new(tools::lsp_tools::CheckDiagnostics),
@@ -49,6 +56,10 @@ impl Registry {
             Arc::new(tools::lsp_tools::FindDefinition),
             Arc::new(tools::replan::ReplanBlueprint),
             Arc::new(tools::snapshot::SnapshotTake),
+            Arc::new(tools::blueprint::DraftBlueprint),
+            Arc::new(tools::todo::TodoWrite),
+            Arc::new(tools::todo::TodoRead),
+            Arc::new(tools::context::ReleaseContext),
         ] {
             registry.try_register_tool(tool).expect("built-in tool names are valid");
         }
@@ -89,14 +100,22 @@ impl Registry {
         self.tools.read().get(name).cloned()
     }
 
-    /// Returns all registered tools.
+    /// Returns all registered tools, sorted by name.
+    ///
+    /// Sorted output is what makes the request body stable across calls: an
+    /// unordered iteration would reshuffle the tool array and defeat the
+    /// provider's prefix cache.
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.read().values().cloned().collect()
+        let mut tools: Vec<Arc<dyn Tool>> = self.tools.read().values().cloned().collect();
+        tools.sort_by(|a, b| a.name().cmp(b.name()));
+        tools
     }
 
-    /// Returns all registered tool names.
+    /// Returns all registered tool names, sorted.
     pub fn tool_names(&self) -> Vec<String> {
-        self.tools.read().keys().cloned().collect()
+        let mut names: Vec<String> = self.tools.read().keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Registers a function, replacing any existing one with the same name.

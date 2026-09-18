@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { GitBranch, Redo2, Save, TriangleAlert, Undo2, Workflow } from '@lucide/vue'
+import {
+  Eye,
+  FileCode2,
+  GitBranch,
+  GitCompare,
+  Redo2,
+  Save,
+  TriangleAlert,
+  Undo2,
+  Workflow,
+} from '@lucide/vue'
 import { gateway } from '@/core'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useTabsStore } from '@/stores/tabs'
@@ -13,6 +23,8 @@ import BlueprintView from './BlueprintView.vue'
 import FileVersionPanel from '@/components/FileVersionPanel.vue'
 import { dirOf } from '@/lib/path'
 import { fileRoute, pathByFileParam } from '@/lib/file-token'
+import { renderMarkdown } from '@/lib/markdown'
+import FileDiffView from '@/components/FileDiffView.vue'
 import { wurl } from '@/lib/workspace-url'
 
 const route = useRoute()
@@ -23,9 +35,13 @@ const rightPanel = useRightPanelStore()
 const fileWatch = useFileWatchStore()
 const feedback = useFeedbackStore()
 
-/** The file path comes from the `?f=` hash, resolved via the persisted
+/** An explicit path renders this pane as the split view's right-hand side. */
+const props = defineProps<{ filePath?: string }>()
+
+/** The route-driven path comes from the `?f=` hash, resolved via the persisted
  *  hash→path map — never from raw URL bytes (no path traversal surface). */
-const filePath = computed(() => pathByFileParam(String(route.query.f ?? '')))
+const routePath = computed(() => pathByFileParam(String(route.query.f ?? '')))
+const filePath = computed(() => props.filePath || routePath.value)
 const isBlueprint = computed(() => filePath.value.endsWith('.blueprint'))
 /** A `.mbp` file is a text-drawn blueprint (the DSL); a toolbar action can
  *  compile it straight into a visual blueprint file. */
@@ -37,12 +53,81 @@ const loaded = ref(false)
 const error = ref('')
 /** Whether the current file is shown as dirty (drives save + tab dot). */
 const dirty = computed(() => tabs.isDirty(filePath.value))
+watch(filePath, () => {
+  preview.value = false
+  diffing.value = false
+  baseline.value = ''
+  baselineSnapshot.value = ''
+  compareSnapshot.value = ''
+})
 /** Last content observed on disk, kept for the conflict banner's reload. */
 const onDiskContent = ref('')
 /** Whether the active file changed on disk while local edits are pending. */
 const conflicted = computed(() => tabs.isConflict(filePath.value))
 
 const editorRef = ref<InstanceType<typeof CodeEditor>>()
+/** Whether markdown is shown rendered instead of as source. */
+const preview = ref(false)
+/** Markdown source (`.md` / `.markdown`) can be read rendered. */
+const isMarkdown = computed(() => /\.(md|markdown)$/i.test(filePath.value))
+/** Rendered preview HTML, recomputed only when the text changes. */
+const previewHtml = computed(() => (preview.value ? renderMarkdown(content.value) : ''))
+
+/** Side-by-side comparison with a snapshot's recorded content. */
+const diffing = ref(false)
+const baseline = ref('')
+const baselineSnapshot = ref('')
+/** Snapshot chosen for the comparison (empty = the latest one). */
+const compareSnapshot = ref('')
+const snapshots = ref<Array<{ id: string; alias: string; description: string }>>([])
+
+/** Loads the baseline text for the comparison view. */
+async function loadBaseline() {
+  const ws = workspace.active
+  if (!ws) return
+  const r = await gateway.getFileAtSnapshot(
+    ws.path,
+    filePath.value,
+    compareSnapshot.value || undefined,
+  )
+  if (!r.ok) {
+    feedback.toast('error', 'Compare failed', r.error)
+    diffing.value = false
+    return
+  }
+  // A file the snapshot did not track compares against nothing, which reads as
+  // "everything here is new" — the useful answer, not an error.
+  baseline.value = r.data.content
+  baselineSnapshot.value = r.data.snapshotId
+}
+
+/** Toggles the comparison, loading the snapshot list on first use. */
+async function toggleDiff() {
+  const ws = workspace.active
+  if (!ws) return
+  if (diffing.value) {
+    diffing.value = false
+    return
+  }
+  if (!snapshots.value.length) {
+    const r = await gateway.listSnapshots(ws.path)
+    if (r.ok) {
+      snapshots.value = r.data.map((s) => ({
+        id: s.id,
+        alias: s.alias ?? '',
+        // `message` is the snapshot's description on the wire.
+        description: s.message,
+      }))
+    }
+  }
+  await loadBaseline()
+  if (baselineSnapshot.value || baseline.value) diffing.value = true
+}
+
+watch(compareSnapshot, () => {
+  if (diffing.value) void loadBaseline()
+})
+
 const fileName = computed(() => {
   const seg = filePath.value.split(/[\\/]/).filter(Boolean)
   return seg[seg.length - 1] ?? filePath.value
@@ -299,6 +384,30 @@ async function compileToBlueprint() {
         >
           <GitBranch class="h-4 w-4" />
         </button>
+        <button
+          class="editor-tool-icon"
+          :class="diffing ? 'text-primary' : ''"
+          type="button"
+          :title="diffing ? 'Hide comparison' : 'Compare with snapshot'"
+          :aria-label="diffing ? 'Hide comparison' : 'Compare with snapshot'"
+          :aria-pressed="diffing"
+          @click="toggleDiff"
+        >
+          <GitCompare class="h-4 w-4" />
+        </button>
+        <button
+          v-if="isMarkdown"
+          class="editor-tool-icon"
+          :class="preview ? 'text-primary' : ''"
+          type="button"
+          :title="preview ? 'Show markdown source' : 'Preview markdown'"
+          :aria-label="preview ? 'Show markdown source' : 'Preview markdown'"
+          :aria-pressed="preview"
+          @click="preview = !preview"
+        >
+          <Eye v-if="!preview" class="h-4 w-4" />
+          <FileCode2 v-else class="h-4 w-4" />
+        </button>
       </div>
 
       <!-- Conflict banner: local edits + disk changed → resolve manually. -->
@@ -313,7 +422,35 @@ async function compileToBlueprint() {
         <button class="shrink-0 underline underline-offset-2 hover:opacity-80" type="button" @click="handleSave">Overwrite</button>
       </div>
 
-      <div class="min-h-0 flex-1 overflow-hidden">
+      <div
+        v-if="diffing"
+        class="flex min-h-0 flex-1 flex-col"
+      >
+        <div
+          class="flex shrink-0 items-center gap-2 border-b border-divider px-3 py-1.5 text-[11.5px] text-subtle"
+        >
+          <span>Compare with</span>
+          <select v-model="compareSnapshot" class="input h-6! py-0! text-[11.5px]">
+            <option value="">latest snapshot</option>
+            <option v-for="snapshot in snapshots" :key="snapshot.id" :value="snapshot.id">
+              {{ snapshot.alias || snapshot.description || snapshot.id.slice(0, 8) }}
+            </option>
+          </select>
+          <span v-if="!snapshots.length">no snapshots yet — showing an empty baseline</span>
+        </div>
+        <div class="min-h-0 flex-1">
+          <FileDiffView
+            :file-path="filePath"
+            :original="baseline"
+            :modified="content"
+            :snapshot-id="baselineSnapshot"
+          />
+        </div>
+      </div>
+      <div v-else-if="preview" class="min-h-0 flex-1 overflow-auto px-6 py-5">
+        <div class="md-body mx-auto max-w-3xl text-[13.5px] leading-6 text-foreground" v-html="previewHtml" />
+      </div>
+      <div v-else class="min-h-0 flex-1 overflow-hidden">
         <CodeEditor
           :key="filePath"
           ref="editorRef"

@@ -43,6 +43,36 @@ export interface FileInfo {
   len: number
 }
 
+/** One background command of a workspace. */
+export interface JobInfo {
+  id: string
+  command: string
+  /** Working directory, relative to the workspace root. */
+  cwd: string
+  state: 'running' | 'exited' | 'failed' | 'killed'
+  /** Process exit code; -1 when the job has none. */
+  exitCode: number
+  /** The run that started the job. */
+  runId: string
+  startedAt: number
+  finishedAt: number
+  outputBytes: number
+  /** Trailing output, for a quick look without subscribing. */
+  tail: string
+}
+
+/** A streamed job notice (`started` / `output` / `finished`). */
+export interface JobNotice {
+  jobId: string
+  kind: 'started' | 'output' | 'finished'
+  /** New output text for `output` notices. */
+  chunk: string
+  state: JobInfo['state']
+  exitCode: number
+  /** One-line summary for lifecycle notices. */
+  summary: string
+}
+
 /** A live file-system change pushed from the daemon. */
 export interface WatchEvent {
   /** Workspace-relative path using `/` as the separator. */
@@ -60,7 +90,7 @@ export interface FileContent {
 /** One turn in the ReAct conversation shown by the chat surface. */
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'tool'
+  role: 'user' | 'assistant' | 'tool' | 'error' | 'notice'
   /** Role header for tool messages, e.g. the tool name. */
   actor?: string
   content: string
@@ -69,13 +99,32 @@ export interface ChatMessage {
   createdAt: number
   /** Set while this message is still streaming in. */
   pending?: boolean
+  /** Reasoning that preceded the answer (streamed, then settled). */
+  reasoning?: string
+  /** Set while the reasoning block is still streaming. */
+  reasoningPending?: boolean
 }
 
 /** Token usage reported for a completed chat turn. */
+/** State of one agent task-list entry. */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+/** One entry of the agent's task list. */
+export interface TodoItem {
+  content: string
+  status: TodoStatus
+  /** Present-continuous phrasing shown while the item is in progress. */
+  activeForm?: string
+}
+
 export interface ChatUsage {
   inputTokens: number
   outputTokens: number
   totalTokens: number
+  /** Input tokens served from the provider's prompt cache (0 when unreported). */
+  cachedInputTokens: number
+  /** Input tokens written into the provider's prompt cache. */
+  cacheWriteInputTokens: number
 }
 
 /** Sampling parameters for a ReAct chat turn, adjustable from the chat panel. */
@@ -100,6 +149,8 @@ export interface ChatSessionInfo {
 
 /** A persisted session's messages, loaded to restore the conversation UI. */
 export interface ChatSessionSnapshot {
+  /** The agent's task list at the end of the last turn. */
+  todos?: TodoItem[]
   sessionId: string
   createdAt: number
   /** User/assistant messages reconstructed from the daemon history. */
@@ -191,6 +242,7 @@ export interface ExecutionEvent {
     | 'approval_request'
     | 'context'
     | 'error'
+    | 'todos'
   message: string
   /** Structured payload for `approval_request` / `message` / `context`. */
   detail?: Record<string, unknown>
@@ -248,6 +300,10 @@ export interface UsageSummary {
     outputTokens: number
     reasoningTokens: number
     costMicros: number
+    /** Input tokens served from the provider's prompt cache. */
+    cachedInputTokens: number
+    /** Input tokens written into the provider's prompt cache. */
+    cacheWriteInputTokens: number
   }>
 }
 

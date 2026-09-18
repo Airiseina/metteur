@@ -166,6 +166,81 @@ impl NodeExecutor for ContextTrimExecutor {
     }
 }
 
+/// Releases tool results from a context (deterministic counterpart of the
+/// `ReleaseContext` tool): `Context + selector -> Result + Released + Freed`.
+pub struct ContextReleaseExecutor;
+
+#[async_trait]
+impl NodeExecutor for ContextReleaseExecutor {
+    fn kind(&self) -> &str {
+        "ContextRelease"
+    }
+
+    async fn execute(
+        &self,
+        node: &Node,
+        inputs: &HashMap<PinId, Value>,
+        _ctx: &mut ExecutionContext,
+    ) -> DaemonResult<HashMap<PinId, Value>> {
+        let mut context = context_input(node, inputs, "Context")?;
+        let query = release_query(node, inputs)?;
+        let report = context.release(&query);
+        let mut outputs = context_output(node, context)?;
+        for (name, value) in [
+            ("Released", report.released as i64),
+            ("Freed", report.estimated_tokens as i64),
+        ] {
+            if let Some(pin) = node.pins.iter().find(|p| p.name == name) {
+                outputs.insert(pin.id, Value::Int(value));
+            }
+        }
+        Ok(outputs)
+    }
+}
+
+/// Reads the release selector from connected inputs, falling back to `node.data`.
+fn release_query(
+    node: &Node,
+    inputs: &HashMap<PinId, Value>,
+) -> DaemonResult<metteur_shared::llm::ReleaseQuery> {
+    use metteur_shared::llm::ReleaseQuery;
+    /// A connected list input wins; otherwise the inline `data` value is used.
+    fn list(node: &Node, inputs: &HashMap<PinId, Value>, pin: &str, key: &str) -> Vec<String> {
+        let from_pin: Option<Vec<String>> = match super::value_input(node, inputs, pin).ok() {
+            Some(Value::List(items)) => Some(
+                items.iter().filter_map(|item| item.as_str().map(String::from)).collect(),
+            ),
+            Some(Value::String(single)) if !single.is_empty() => Some(vec![single.clone()]),
+            _ => None,
+        };
+        if let Some(values) = from_pin {
+            return values;
+        }
+        node.data
+            .get(key)
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items.iter().filter_map(|item| item.as_str().map(String::from)).collect()
+            })
+            .unwrap_or_default()
+    }
+
+    let query = ReleaseQuery {
+        paths: list(node, inputs, "Paths", "paths"),
+        patterns: list(node, inputs, "Patterns", "patterns"),
+        tools: list(node, inputs, "Tools", "tools"),
+        all: node.data.get("all").and_then(|value| value.as_bool()).unwrap_or(false),
+        keep_recent: node.data.get("keep_recent").and_then(|value| value.as_u64()).unwrap_or(0)
+            as usize,
+    };
+    if !query.selects_anything() {
+        return Err(crate::error::DaemonError::Execution(
+            "ContextRelease needs one of: Paths, Patterns, Tools, all".to_string(),
+        ));
+    }
+    Ok(query)
+}
+
 /// Dumps a context's messages as text for inspection.
 pub struct ContextToTextExecutor;
 

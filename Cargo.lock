@@ -2678,7 +2678,9 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "extism",
+ "globset",
  "http",
+ "ignore",
  "libc",
  "lsp-types",
  "metteur-proto",
@@ -2699,6 +2701,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "similar",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
@@ -2732,6 +2735,7 @@ dependencies = [
 name = "metteur-shared"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "pest",
  "pest_derive",
  "proptest",
@@ -4400,6 +4404,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4503,6 +4513,15 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "siphasher"
@@ -5399,6 +5418,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

@@ -220,6 +220,33 @@ impl VersionManager {
         Ok(hash)
     }
 
+    /// Reads a file's content as recorded by a snapshot.
+    ///
+    /// `None` means either the snapshot does not exist or it did not track the
+    /// file (a file added afterwards compares against nothing).
+    pub fn file_at_snapshot(
+        &self,
+        snapshot_id: Uuid,
+        rel: &str,
+    ) -> DaemonResult<Option<(Uuid, String)>> {
+        let snapshot = match self.list_snapshots()?.into_iter().find(|s| s.id == snapshot_id) {
+            Some(snapshot) => snapshot,
+            None => return Ok(None),
+        };
+        let Some(hash) = snapshot.files.get(rel) else {
+            return Ok(None);
+        };
+        let Some(data) = self.db.get(cf::FILE_BLOBS, hash.as_bytes())? else {
+            return Ok(None);
+        };
+        Ok(Some((snapshot.id, String::from_utf8_lossy(&data).to_string())))
+    }
+
+    /// The id of the most recent snapshot, if any.
+    pub fn latest_snapshot_id(&self) -> DaemonResult<Option<Uuid>> {
+        Ok(self.latest_snapshot()?.map(|snapshot| snapshot.id))
+    }
+
     /// Lists all snapshots for the workspace, ordered by creation time.
     pub fn list_snapshots(&self) -> DaemonResult<Vec<Snapshot>> {
         let mut out = Vec::new();

@@ -9,7 +9,12 @@ use serde::{Deserialize, Serialize};
 pub use acl::{AclConfig, AclRule};
 
 /// LLM-related configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// The manual [`Default`] mirrors the serde defaults of every field: a config
+/// built in code (tests, or a run without a loaded configuration) must behave
+/// exactly like one parsed from an empty file. A derived `Default` would leave
+/// every tuned scalar at zero and silently disable the features behind it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// Default model identifier.
     #[serde(default)]
@@ -26,6 +31,187 @@ pub struct LlmConfig {
     /// billing section, which only drives cost *display*).
     #[serde(default)]
     pub models: HashMap<String, LlmModelConfig>,
+    /// Run read-only tool calls of one turn concurrently.
+    #[serde(default = "default_true")]
+    pub parallel_read_tools: bool,
+    /// Fallback byte cap for a single tool result (`0` = unlimited).
+    #[serde(default = "default_max_tool_result_bytes")]
+    pub max_tool_result_bytes: u64,
+    /// Tool results retained in a context before eviction (`0` = unbounded).
+    #[serde(default = "default_max_tool_results")]
+    pub max_tool_results: u64,
+    /// Consecutive tool failures tolerated before the run aborts (`0` = off).
+    #[serde(default = "default_tool_error_limit")]
+    pub tool_error_limit: u32,
+    /// Identical tool invocations tolerated before the run aborts (`0` = off).
+    #[serde(default = "default_repeat_call_limit")]
+    pub repeat_call_limit: u32,
+    /// Replace reads of files modified afterwards with a stale marker.
+    #[serde(default = "default_true")]
+    pub stale_result_placeholders: bool,
+    /// Compress when estimated tokens reach this fraction of the window
+    /// (`0` disables window-driven compression).
+    #[serde(default = "default_compress_at_ratio")]
+    pub compress_at_ratio: f64,
+    /// Token budget kept verbatim at the tail when compressing.
+    #[serde(default = "default_compress_keep_tokens")]
+    pub compress_keep_tokens: u64,
+    /// Emit explicit prompt-cache breakpoints where the provider requires them.
+    #[serde(default = "default_true")]
+    pub prompt_cache: bool,
+    /// Extended-thinking budget in tokens (`0` disables thinking).
+    #[serde(default)]
+    pub thinking_budget_tokens: u64,
+    /// Anonymize thinking text; drops its signature, so providers that verify
+    /// signatures reject the replayed block.
+    #[serde(default)]
+    pub anonymize_thinking: bool,
+    /// Load a project instruction file into the harness system prompt.
+    #[serde(default = "default_true")]
+    pub project_instructions: bool,
+    /// Project instruction file names probed at the workspace root, in order;
+    /// the first one that exists wins.
+    #[serde(default = "default_project_instruction_files")]
+    pub project_instruction_files: Vec<String>,
+    /// Byte cap for the project instruction file (`0` = no cap).
+    #[serde(default = "default_project_instructions_max_bytes")]
+    pub project_instructions_max_bytes: u64,
+    /// Extra instructions appended after every other fragment.
+    #[serde(default)]
+    pub system_prompt_append: Option<String>,
+    /// Warn the model when the iteration budget runs low.
+    #[serde(default = "default_true")]
+    pub budget_notice: bool,
+    /// Extra tool-free turns granted to produce a final answer once the
+    /// iteration budget is exhausted (`0` restores the old silent stop).
+    #[serde(default = "default_wrap_up_iterations")]
+    pub wrap_up_iterations: u32,
+    /// Provider retry attempts for retryable failures (`0` disables retries).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Base delay of the exponential retry backoff.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub retry_base_delay_ms: u64,
+    /// Upper bound of the retry backoff delay.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub retry_max_delay_ms: u64,
+    /// Model keys tried in order once retries are exhausted.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+    /// Model used for context summarization; defaults to the active model.
+    #[serde(default)]
+    pub compress_model: Option<String>,
+    /// Release the oldest tool results before falling back to LLM
+    /// compression when the context crowds the window.
+    #[serde(default = "default_true")]
+    pub auto_release: bool,
+    /// Tool results kept when the automatic release runs.
+    #[serde(default = "default_auto_release_keep_results")]
+    pub auto_release_keep_results: u64,
+    /// Replace an earlier full read of the same paths when a file is read
+    /// again.
+    #[serde(default = "default_true")]
+    pub dedup_reads: bool,
+    /// Token cap for the conversation a SubAgent inherits.
+    #[serde(default = "default_subagent_inherit_tokens")]
+    pub subagent_inherit_tokens: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            default_model: None,
+            temperature: None,
+            subagent_default_model: None,
+            models: HashMap::new(),
+            parallel_read_tools: default_true(),
+            max_tool_result_bytes: default_max_tool_result_bytes(),
+            max_tool_results: default_max_tool_results(),
+            tool_error_limit: default_tool_error_limit(),
+            repeat_call_limit: default_repeat_call_limit(),
+            stale_result_placeholders: default_true(),
+            compress_at_ratio: default_compress_at_ratio(),
+            compress_keep_tokens: default_compress_keep_tokens(),
+            prompt_cache: default_true(),
+            thinking_budget_tokens: 0,
+            anonymize_thinking: false,
+            project_instructions: default_true(),
+            project_instruction_files: default_project_instruction_files(),
+            project_instructions_max_bytes: default_project_instructions_max_bytes(),
+            system_prompt_append: None,
+            budget_notice: default_true(),
+            wrap_up_iterations: default_wrap_up_iterations(),
+            max_retries: default_max_retries(),
+            retry_base_delay_ms: default_retry_base_delay_ms(),
+            retry_max_delay_ms: default_retry_max_delay_ms(),
+            fallback_models: Vec::new(),
+            compress_model: None,
+            auto_release: default_true(),
+            auto_release_keep_results: default_auto_release_keep_results(),
+            dedup_reads: default_true(),
+            subagent_inherit_tokens: default_subagent_inherit_tokens(),
+        }
+    }
+}
+
+fn default_max_tool_result_bytes() -> u64 {
+    16 * 1024
+}
+
+fn default_max_tool_results() -> u64 {
+    24
+}
+
+fn default_tool_error_limit() -> u32 {
+    5
+}
+
+fn default_repeat_call_limit() -> u32 {
+    3
+}
+
+fn default_compress_at_ratio() -> f64 {
+    0.8
+}
+
+fn default_compress_keep_tokens() -> u64 {
+    8192
+}
+
+fn default_project_instruction_files() -> Vec<String> {
+    vec!["METTEUR.md".to_string(), "AGENTS.md".to_string()]
+}
+
+fn default_project_instructions_max_bytes() -> u64 {
+    8192
+}
+
+fn default_wrap_up_iterations() -> u32 {
+    1
+}
+
+fn default_max_retries() -> u32 {
+    2
+}
+
+fn default_retry_base_delay_ms() -> u64 {
+    500
+}
+
+fn default_retry_max_delay_ms() -> u64 {
+    8000
+}
+
+fn default_auto_release_keep_results() -> u64 {
+    8
+}
+
+fn default_subagent_inherit_tokens() -> u64 {
+    4096
 }
 
 /// Pricing of a single model: input/output/cache prices per million tokens.
@@ -95,6 +281,22 @@ pub struct ModelPricingStrategy {
 
 fn default_pricing_kind() -> String {
     "default".to_string()
+}
+
+/// Merges a workspace boolean over a global value, treating `default` as
+/// "not set" (the layers expose no presence information for scalars).
+fn merge_bool(workspace: bool, global: bool, default: bool) -> bool {
+    if workspace == default { global } else { workspace }
+}
+
+/// Merges a workspace `u64` over a global value, treating `default` as unset.
+fn merge_u64(workspace: u64, global: u64, default: u64) -> u64 {
+    if workspace == default { global } else { workspace }
+}
+
+/// Merges a workspace `u32` over a global value, treating `default` as unset.
+fn merge_u32(workspace: u32, global: u32, default: u32) -> u32 {
+    if workspace == default { global } else { workspace }
 }
 
 /// A complete model definition: connection, advanced options and pricing.
@@ -249,6 +451,22 @@ pub struct LspConfig {
     /// Language server definitions.
     #[serde(default)]
     pub languages: Vec<LspLanguageConfig>,
+    /// Merge window for repeated document syncs of the same file, in
+    /// milliseconds (`0` syncs every revision).
+    ///
+    /// Agents edit in bursts; merging intermediate revisions keeps the
+    /// language server from re-checking text that is about to change again.
+    /// Explicit diagnostic requests always bypass the window.
+    #[serde(default = "default_lsp_debounce_ms")]
+    pub debounce_ms: u64,
+    /// Run a diagnostics pass when a node finishes mutating files.
+    #[serde(default)]
+    pub check_on_node_end: bool,
+}
+
+/// Default document sync merge window.
+fn default_lsp_debounce_ms() -> u64 {
+    300
 }
 
 /// Versioning configuration.
@@ -320,7 +538,7 @@ impl<'de> Deserialize<'de> for AutostartMode {
 }
 
 /// Execution-engine configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionConfig {
     /// Consecutive validator/judge failures that trip the circuit breaker
     /// (`0` disables the breaker).
@@ -333,6 +551,45 @@ pub struct ExecutionConfig {
     /// Maximum body entries of one ForEach loop (`0` disables the guard).
     #[serde(default = "default_foreach_max_iterations")]
     pub foreach_max_iterations: u32,
+    /// Default timeout of a blocking command in seconds (`0` = no limit).
+    #[serde(default)]
+    pub command_timeout_secs: u64,
+    /// Output bytes retained per job (`0` = the built-in default).
+    #[serde(default = "default_job_output_max_bytes")]
+    pub job_output_max_bytes: u64,
+    /// Trailing output lines shown for a job (`0` = the built-in default).
+    #[serde(default = "default_job_tail_lines")]
+    pub job_tail_lines: u64,
+    /// Whether a ReAct turn parks until a running job finishes instead of
+    /// ending, so the engine wakes the model with the result.
+    #[serde(default = "default_true")]
+    pub job_auto_wake: bool,
+}
+
+/// The manual [`Default`] mirrors the serde defaults field by field: a config
+/// built in code must behave exactly like one parsed from an empty file.
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            circuit_break_after: 0,
+            validation_max_attempts: default_validation_max_attempts(),
+            foreach_max_iterations: default_foreach_max_iterations(),
+            command_timeout_secs: 0,
+            job_output_max_bytes: default_job_output_max_bytes(),
+            job_tail_lines: default_job_tail_lines(),
+            job_auto_wake: true,
+        }
+    }
+}
+
+/// Default retained output per job.
+fn default_job_output_max_bytes() -> u64 {
+    256 * 1024
+}
+
+/// Default trailing lines shown for a job.
+fn default_job_tail_lines() -> u64 {
+    80
 }
 
 /// Default validator retry budget.
@@ -433,6 +690,137 @@ impl Config {
                 } else {
                     workspace.llm.models.clone()
                 },
+                // Scalars cannot distinguish "unset" from "default", so a
+                // workspace layer only overrides when it differs from the
+                // built-in default (matching the boolean handling above).
+                parallel_read_tools: merge_bool(
+                    workspace.llm.parallel_read_tools,
+                    self.llm.parallel_read_tools,
+                    default_true(),
+                ),
+                max_tool_result_bytes: merge_u64(
+                    workspace.llm.max_tool_result_bytes,
+                    self.llm.max_tool_result_bytes,
+                    default_max_tool_result_bytes(),
+                ),
+                max_tool_results: merge_u64(
+                    workspace.llm.max_tool_results,
+                    self.llm.max_tool_results,
+                    default_max_tool_results(),
+                ),
+                tool_error_limit: merge_u32(
+                    workspace.llm.tool_error_limit,
+                    self.llm.tool_error_limit,
+                    default_tool_error_limit(),
+                ),
+                repeat_call_limit: merge_u32(
+                    workspace.llm.repeat_call_limit,
+                    self.llm.repeat_call_limit,
+                    default_repeat_call_limit(),
+                ),
+                stale_result_placeholders: merge_bool(
+                    workspace.llm.stale_result_placeholders,
+                    self.llm.stale_result_placeholders,
+                    default_true(),
+                ),
+                compress_at_ratio: if workspace.llm.compress_at_ratio == default_compress_at_ratio() {
+                    self.llm.compress_at_ratio
+                } else {
+                    workspace.llm.compress_at_ratio
+                },
+                compress_keep_tokens: merge_u64(
+                    workspace.llm.compress_keep_tokens,
+                    self.llm.compress_keep_tokens,
+                    default_compress_keep_tokens(),
+                ),
+                prompt_cache: merge_bool(
+                    workspace.llm.prompt_cache,
+                    self.llm.prompt_cache,
+                    default_true(),
+                ),
+                thinking_budget_tokens: if workspace.llm.thinking_budget_tokens == 0 {
+                    self.llm.thinking_budget_tokens
+                } else {
+                    workspace.llm.thinking_budget_tokens
+                },
+                anonymize_thinking: workspace.llm.anonymize_thinking,
+                project_instructions: merge_bool(
+                    workspace.llm.project_instructions,
+                    self.llm.project_instructions,
+                    default_true(),
+                ),
+                project_instruction_files: if workspace.llm.project_instruction_files
+                    == default_project_instruction_files()
+                {
+                    self.llm.project_instruction_files.clone()
+                } else {
+                    workspace.llm.project_instruction_files.clone()
+                },
+                project_instructions_max_bytes: merge_u64(
+                    workspace.llm.project_instructions_max_bytes,
+                    self.llm.project_instructions_max_bytes,
+                    default_project_instructions_max_bytes(),
+                ),
+                system_prompt_append: workspace
+                    .llm
+                    .system_prompt_append
+                    .clone()
+                    .or_else(|| self.llm.system_prompt_append.clone()),
+                budget_notice: merge_bool(
+                    workspace.llm.budget_notice,
+                    self.llm.budget_notice,
+                    default_true(),
+                ),
+                wrap_up_iterations: merge_u32(
+                    workspace.llm.wrap_up_iterations,
+                    self.llm.wrap_up_iterations,
+                    default_wrap_up_iterations(),
+                ),
+                max_retries: merge_u32(
+                    workspace.llm.max_retries,
+                    self.llm.max_retries,
+                    default_max_retries(),
+                ),
+                retry_base_delay_ms: merge_u64(
+                    workspace.llm.retry_base_delay_ms,
+                    self.llm.retry_base_delay_ms,
+                    default_retry_base_delay_ms(),
+                ),
+                retry_max_delay_ms: merge_u64(
+                    workspace.llm.retry_max_delay_ms,
+                    self.llm.retry_max_delay_ms,
+                    default_retry_max_delay_ms(),
+                ),
+                fallback_models: if workspace.llm.fallback_models.is_empty() {
+                    self.llm.fallback_models.clone()
+                } else {
+                    workspace.llm.fallback_models.clone()
+                },
+                compress_model: workspace
+                    .llm
+                    .compress_model
+                    .clone()
+                    .or_else(|| self.llm.compress_model.clone()),
+                auto_release: merge_bool(
+                    workspace.llm.auto_release,
+                    self.llm.auto_release,
+                    default_true(),
+                ),
+                auto_release_keep_results: merge_u64(
+                    workspace.llm.auto_release_keep_results,
+                    self.llm.auto_release_keep_results,
+                    default_auto_release_keep_results(),
+                ),
+                dedup_reads: merge_bool(
+                    workspace.llm.dedup_reads,
+                    self.llm.dedup_reads,
+                    default_true(),
+                ),
+                subagent_inherit_tokens: merge_u64(
+                    workspace.llm.subagent_inherit_tokens,
+                    self.llm.subagent_inherit_tokens,
+                    default_subagent_inherit_tokens(),
+                ),
             },
             billing: BillingConfig {
                 currency: if workspace.billing.currency.is_empty() {
@@ -505,6 +893,12 @@ impl Config {
                 } else {
                     workspace.lsp.languages.clone()
                 },
+                debounce_ms: merge_u64(
+                    workspace.lsp.debounce_ms,
+                    self.lsp.debounce_ms,
+                    default_lsp_debounce_ms(),
+                ),
+                check_on_node_end: workspace.lsp.check_on_node_end,
             },
             versioning: VersioningConfig {
                 auto_snapshot: workspace.versioning.auto_snapshot || self.versioning.auto_snapshot,
@@ -525,6 +919,26 @@ impl Config {
                 } else {
                     self.execution.foreach_max_iterations
                 },
+                command_timeout_secs: if workspace.execution.command_timeout_secs != 0 {
+                    workspace.execution.command_timeout_secs
+                } else {
+                    self.execution.command_timeout_secs
+                },
+                job_output_max_bytes: merge_u64(
+                    workspace.execution.job_output_max_bytes,
+                    self.execution.job_output_max_bytes,
+                    default_job_output_max_bytes(),
+                ),
+                job_tail_lines: merge_u64(
+                    workspace.execution.job_tail_lines,
+                    self.execution.job_tail_lines,
+                    default_job_tail_lines(),
+                ),
+                job_auto_wake: merge_bool(
+                    workspace.execution.job_auto_wake,
+                    self.execution.job_auto_wake,
+                    default_true(),
+                ),
             },
             daemon: DaemonConfig {
                 autostart: if workspace.daemon.autostart != AutostartMode::Off {
@@ -582,6 +996,7 @@ mod tests {
                 temperature: Some(0.7),
                 subagent_default_model: None,
                 models: HashMap::new(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -591,6 +1006,7 @@ mod tests {
                 temperature: None,
                 subagent_default_model: None,
                 models: HashMap::new(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -669,6 +1085,7 @@ mod tests {
                         ..Default::default()
                     },
                 )]),
+                ..Default::default()
             },
             billing: BillingConfig {
                 currency: "USD".to_string(),
@@ -715,6 +1132,7 @@ mod tests {
                     command: vec!["rust-analyzer".to_string()],
                     extensions: vec!["rs".to_string()],
                 }],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -742,6 +1160,7 @@ mod tests {
             lsp: LspConfig {
                 enabled: true,
                 languages: Vec::new(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -838,6 +1257,7 @@ extensions = ["rs"]
                 circuit_break_after: 3,
                 validation_max_attempts: 2,
                 foreach_max_iterations: 100,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -846,6 +1266,7 @@ extensions = ["rs"]
                 circuit_break_after: 0,
                 validation_max_attempts: 1,
                 foreach_max_iterations: 1000,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -858,6 +1279,7 @@ extensions = ["rs"]
                 circuit_break_after: 7,
                 validation_max_attempts: 5,
                 foreach_max_iterations: 50,
+                ..Default::default()
             },
             ..Default::default()
         };

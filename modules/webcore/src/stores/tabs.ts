@@ -72,6 +72,11 @@ export const useTabsStore = defineStore('tabs', () => {
   /** Disk-change conflict per file path (file edited both locally and on disk). */
   const conflicts = ref<Record<string, boolean>>({})
 
+  /** Workspace-relative path shown in the right-hand editor pane, if split. */
+  const splitPath = ref<string | null>(null)
+  /** Fraction of the editor area given to the primary pane. */
+  const splitRatio = ref(0.5)
+
   const byId = computed(() => new Map(items.value.map((t) => [t.id, t])))
   /** The active file tab, if any. */
   const activeItem = computed<TabItem | null>(() => byId.value.get(activeId.value) ?? null)
@@ -143,6 +148,8 @@ export const useTabsStore = defineStore('tabs', () => {
       const rest = items.value
       activeId.value = rest.length ? rest[rest.length - 1].id : HOME_ID
     }
+    // A split still showing a file whose tab closed would be a dead pane.
+    if (path && splitPath.value === path) splitPath.value = null
   }
 
   function closeOthers(id: string) {
@@ -164,6 +171,21 @@ export const useTabsStore = defineStore('tabs', () => {
     const [moved] = items.value.splice(from, 1)
     const target = items.value.findIndex((t) => t.id === toId)
     items.value.splice(target < 0 ? items.value.length : target, 0, moved)
+  }
+
+  /** Show `path` in the right-hand pane, opening the split when needed. */
+  function openInSplit(path: string) {
+    splitPath.value = path
+  }
+
+  /** Close the right-hand pane. */
+  function closeSplit() {
+    splitPath.value = null
+  }
+
+  /** Set the divider position from a drag, clamped to a usable range. */
+  function setSplitRatio(ratio: number) {
+    splitRatio.value = Math.min(0.85, Math.max(0.15, ratio))
   }
 
   /** Set the unsaved flag for a file (drive the label's blue dot). */
@@ -198,6 +220,11 @@ export const useTabsStore = defineStore('tabs', () => {
     activeId,
     activeItem,
     activeFilePath,
+    splitPath,
+    splitRatio,
+    setSplitRatio,
+    openInSplit,
+    closeSplit,
     homeId: HOME_ID,
     openFile,
     openConfigDoc,

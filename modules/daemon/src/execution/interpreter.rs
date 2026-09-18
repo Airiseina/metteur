@@ -65,6 +65,24 @@ pub enum ExecutionEvent {
         node_id: NodeId,
         regions: Vec<metteur_shared::llm::ContextRegion>,
     },
+    /// The agent's task list changed.
+    Todos {
+        node_id: NodeId,
+        todos: Vec<metteur_shared::llm::TodoItem>,
+    },
+    /// A background command changed state.
+    ///
+    /// Emitted when a job is started and when its completion is observed (by a
+    /// wait, or by the engine waking a parked turn); a job that finishes while
+    /// nobody is looking is reported the next time it is observed.
+    Job {
+        node_id: NodeId,
+        job_id: String,
+        /// `started` or `finished`.
+        state: String,
+        /// One-line summary: job id, state, duration, size, command.
+        summary: String,
+    },
 }
 
 /// Executes a blueprint against the given registry.
@@ -91,6 +109,7 @@ pub struct Interpreter {
     lsp: Option<Arc<crate::integration::lsp::LspManager>>,
     addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
     version_manager: Option<Arc<crate::storage::versioning::VersionManager>>,
+    jobs: Option<Arc<crate::execution::JobManager>>,
     shared_blueprint: Option<SharedBlueprint>,
     circuit_failures: u32,
     tree: super::tree::ExecTree,
@@ -100,6 +119,9 @@ pub struct Interpreter {
     frame_trees: Vec<String>,
     /// Tree id of the node currently executing, if any.
     current_tree: Option<String>,
+    /// Task list restored from a checkpoint, applied to the first context built
+    /// for the resumed run (the list lives on the context, not the scheduler).
+    resume_todos: Vec<metteur_shared::llm::TodoItem>,
 }
 
 impl Interpreter {
@@ -131,12 +153,14 @@ impl Interpreter {
             lsp: None,
             addon_fragments: Vec::new(),
             version_manager: None,
+            jobs: None,
             shared_blueprint: None,
             circuit_failures: 0,
             tree: super::tree::ExecTree::new(),
             tree_root: None,
             frame_trees: Vec::new(),
             current_tree: None,
+            resume_todos: Vec::new(),
         }
     }
 
@@ -226,6 +250,15 @@ impl Interpreter {
         version_manager: Arc<crate::storage::versioning::VersionManager>,
     ) -> Self {
         self.version_manager = Some(version_manager);
+        self
+    }
+
+    /// Shares the workspace's background-command manager with the run.
+    ///
+    /// Job ids stay valid across runs of the workspace, and the manager can be
+    /// asked to clean up everything a run started.
+    pub fn with_jobs(mut self, jobs: Arc<crate::execution::JobManager>) -> Self {
+        self.jobs = Some(jobs);
         self
     }
 
@@ -323,6 +356,9 @@ impl Interpreter {
         self.events.clear();
         self.blueprint_id = resume.blueprint_id;
         self.started_at = resume.started_at;
+        // The task list lives on the execution context (not the scheduler
+        // state), so it is carried into the resumed run separately.
+        self.resume_todos = resume.todos.clone();
         self.circuit_failures = 0;
         self.tree = resume.exec_tree.clone();
         self.tree_root = resume.exec_tree.roots.first().cloned();
@@ -364,6 +400,9 @@ impl Interpreter {
         self.tree_root = Some(root);
         self.frame_trees.clear();
         self.current_tree = None;
+        // A fresh run starts with an empty task list; a stale one would leak
+        // into `make_context` (which seeds the list from this field).
+        self.resume_todos.clear();
     }
 
     /// Creates the per-run execution context.
@@ -402,6 +441,10 @@ impl Interpreter {
         ctx.addon_fragments = self.addon_fragments.clone();
         ctx.blueprint = self.shared_blueprint.clone();
         ctx.version_manager = self.version_manager.clone();
+        if let Some(jobs) = &self.jobs {
+            ctx.jobs = Arc::clone(jobs);
+        }
+        ctx.todos = self.resume_todos.clone();
         ctx
     }
 
@@ -451,6 +494,7 @@ impl Interpreter {
             validation_marks: self.state.validation_marks.clone(),
             variables: ctx.variables.clone(),
             foreach_stack: self.state.foreach_stack.clone(),
+            todos: ctx.todos.clone(),
             exec_tree: self.tree.clone(),
             frame_trees: self.frame_trees.clone(),
             error,
@@ -734,7 +778,9 @@ impl Interpreter {
         outputs: &HashMap<PinId, Value>,
         ctx: &mut ExecutionContext,
     ) -> DaemonResult<bool> {
-        if node.kind != "Validator" {
+        // `LspCheck` is a deterministic validation node: a failing check
+        // retries the segment exactly like a failing `Validator`.
+        if !matches!(node.kind.as_str(), "Validator" | "LspCheck") {
             return Ok(false);
         }
         let failed = circuit_failed(node, outputs);
@@ -1555,15 +1601,18 @@ impl Interpreter {
     }
 }
 
-/// Returns whether a validator/judge node output reports failure.
+/// Returns whether a validation node's output reports failure.
+///
+/// `LspCheck` participates here so that a failing deterministic language-server
+/// check gets the same rollback/retry and circuit-breaker treatment as a
+/// `Validator`: the edit that broke the code is rolled back and retried.
 fn circuit_failed(node: &Node, outputs: &HashMap<PinId, Value>) -> bool {
-    if !matches!(node.kind.as_str(), "Validator" | "Judge") {
+    if !matches!(node.kind.as_str(), "Validator" | "Judge" | "LspCheck") {
         return false;
     }
-    let result_pin = if node.kind == "Validator" {
-        "Passed"
-    } else {
-        "Success"
+    let result_pin = match node.kind.as_str() {
+        "Validator" | "LspCheck" => "Passed",
+        _ => "Success",
     };
     outputs.iter().any(|(id, v)| {
         node.pins.iter().any(|p| p.id == *id && p.name == result_pin) && v.as_bool() == Some(false)
@@ -2245,6 +2294,7 @@ mod tests {
             attempt_counts: HashMap::new(),
             validation_marks: HashMap::new(),
             variables: vec![HashMap::new(), HashMap::new()],
+            todos: Vec::new(),
             exec_tree: crate::execution::tree::ExecTree::new(),
             frame_trees: Vec::new(),
             foreach_stack: Vec::new(),
@@ -2277,6 +2327,7 @@ mod tests {
                 circuit_break_after: 1,
                 validation_max_attempts: 1,
                 foreach_max_iterations: 1000,
+                ..Default::default()
             },
             ..Default::default()
         }));
@@ -2718,6 +2769,7 @@ mod tests {
             attempt_counts: HashMap::new(),
             validation_marks: HashMap::new(),
             variables: vec![HashMap::new()],
+            todos: Vec::new(),
             exec_tree: crate::execution::tree::ExecTree::new(),
             frame_trees: Vec::new(),
             foreach_stack: Vec::new(),
@@ -2881,8 +2933,13 @@ mod tests {
         };
         let (s_ex, w_exin, w_exout, w_path, w_res) =
             (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let (r_exin, r_exout, r_path, r_res) =
-            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (r_exin, r_exout, r_path, r_res, r_rawnum) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
         let (v_exin, v_exout, v_actual, v_expected, v_passed) =
             (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let e_exin = Uuid::new_v4();
@@ -2899,7 +2956,21 @@ mod tests {
                     data: serde_json::Value::Null,
                 },
                 tool_node(write, "FlakyWrite", w_exin, w_exout, w_path, w_res),
-                tool_node(read, "ReadFile", r_exin, r_exout, r_path, r_res),
+                // Raw content: this blueprint validates the file text itself,
+                // so the read must not carry line-number prefixes.
+                {
+                    let mut node = tool_node(read, "ReadFile", r_exin, r_exout, r_path, r_res);
+                    node.pins.push(Pin {
+                        default: Some(serde_json::json!(false)),
+                        ..Pin::data(
+                            "line_numbers",
+                            PinType::DataInput,
+                            DataType::Bool,
+                            r_rawnum,
+                        )
+                    });
+                    node
+                },
                 Node {
                     id: validator,
                     node_type: NodeType::Function,
@@ -3035,6 +3106,7 @@ mod tests {
                 circuit_break_after: 1,
                 validation_max_attempts: 1,
                 foreach_max_iterations: 1000,
+                ..Default::default()
             },
             ..Default::default()
         }));
@@ -3966,6 +4038,7 @@ mod tests {
                 circuit_break_after: 0,
                 validation_max_attempts: 1,
                 foreach_max_iterations: 2,
+                ..Default::default()
             },
             ..Default::default()
         }));

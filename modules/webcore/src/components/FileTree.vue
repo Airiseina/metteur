@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ClipboardPaste,
   FilePlus2,
@@ -23,6 +23,7 @@ import TreeItem from '@/components/TreeItem.vue'
 import ContextMenu, { type MenuGroup, type MenuItem } from '@/components/ContextMenu.vue'
 import FilePropertiesModal from '@/components/FilePropertiesModal.vue'
 import { dirOf } from '@/lib/path'
+import { wurl } from '@/lib/workspace-url'
 
 /**
  * Left-side resource explorer.
@@ -39,6 +40,7 @@ const tabs = useTabsStore()
 const chat = useChatStore()
 const blueprint = useBlueprintStore()
 const router = useRouter()
+const route = useRoute()
 const feedback = useFeedbackStore()
 const fileWatch = useFileWatchStore()
 
@@ -393,6 +395,7 @@ function menuGroupsOf(node: FileTreeNode | null): MenuGroup[] {
   const main: MenuItem[] = []
   if (isFile) {
     main.push({ id: 'open', label: 'Open' })
+    main.push({ id: 'open-split', label: 'Open in Split View' })
     main.push({ id: 'add-to-chat', label: 'Add to Conversation' })
     main.push({ id: 'add-to-blueprint', label: 'Add to Blueprint' })
   } else {
@@ -419,6 +422,30 @@ function menuGroupsOf(node: FileTreeNode | null): MenuGroup[] {
     { label: 'Clipboard', items: clipboard },
     { label: 'Actions', items: actions },
   ]
+}
+
+/**
+ * Open a file in the split view's right-hand pane.
+ *
+ * The split lives in the editor area, so a surface route (Chat, Settings) is
+ * first replaced by the explorer: otherwise the pane would be created off
+ * screen. An already-open file is left in the primary pane, which is what
+ * makes the split useful for comparing two files.
+ */
+function openInSplit(path: string) {
+  if (!isEditorRoute()) openExplorer()
+  tabs.openInSplit(path)
+}
+
+/** Whether the current route renders the editor area. */
+function isEditorRoute(): boolean {
+  const name = String(route.name ?? '')
+  return name === 'explorer' || name === 'file'
+}
+
+/** Route the primary pane to the explorer (empty editor) state. */
+function openExplorer() {
+  void router.push(wurl('/explorer'))
 }
 
 async function onMenuSelect(id: string) {
@@ -463,6 +490,9 @@ async function onMenuSelect(id: string) {
   switch (id) {
     case 'open':
       openFile(node)
+      break
+    case 'open-split':
+      openInSplit(node.path)
       break
     case 'add-to-chat':
       chat.attach(node.path)

@@ -27,6 +27,8 @@ impl DaemonService {
             }
             Err(err) => tracing::warn!("failed to load workspace functions: {err}"),
         }
+        // A newly opened workspace may declare MCP servers of its own.
+        self.state.resync_mcp().await;
         record_global_audit(
             &self.state,
             &subject,
@@ -88,6 +90,8 @@ impl DaemonService {
                 let _ = self.state.registry.restore_function(db, &name, FunctionSource::Global);
             }
         }
+        // Servers declared only by the closed workspace are shut down here.
+        self.state.resync_mcp().await;
         record_global_audit(&self.state, &subject, "workspace.close", serde_json::json!({}));
         self.state.metrics.workspaces_active.store(
             self.state.workspaces.list().await.len() as u64,

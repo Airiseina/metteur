@@ -139,15 +139,9 @@ fn regex_matches(node: &Node, actual: &Value) -> DaemonResult<bool> {
     Ok(re.is_match(&value_to_string(actual)))
 }
 
-/// Looks up an input value by pin name.
+/// Looks up an input value by pin name, falling back to the node's inline
+/// constant of the same name (DSL literals and canvas-authored values live in
+/// `node.data`, not on a connected edge).
 fn get_input(inputs: &HashMap<PinId, Value>, node: &Node, name: &str) -> DaemonResult<Value> {
-    let pin = node
-        .pins
-        .iter()
-        .find(|p| p.name == name)
-        .ok_or_else(|| DaemonError::Execution(format!("missing pin {name}")))?;
-    inputs
-        .get(&pin.id)
-        .cloned()
-        .ok_or_else(|| DaemonError::Execution(format!("missing input {name}")))
+    super::input_or_data(node, inputs, name)
 }

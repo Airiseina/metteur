@@ -3,12 +3,17 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   TriangleAlert,
+  ArrowDown,
   Bot,
+  Brain,
+  Pencil,
+  RotateCcw,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
   FileCode,
+  ListChecks,
   Loader2,
   MessageSquarePlus,
   Paperclip,
@@ -25,6 +30,7 @@ import { useChatStore } from '@/stores/chat'
 import { useConfigStore } from '@/stores/config'
 import { useTabsStore } from '@/stores/tabs'
 import { fileRoute } from '@/lib/file-token'
+import { highlightRevision, onHighlightReady, renderMarkdown, warmHighlighter } from '@/lib/markdown'
 import type { ChatOptions, FileTreeNode, LlmModelConfig } from '@/core'
 
 const chat = useChatStore()
@@ -51,6 +57,51 @@ const modelKeys = computed(() => {
 
 /** Whether a usable model exists; drives the "configure a model" state. */
 const hasModel = computed(() => modelKeys.value.length > 0)
+
+/** Progress line for the plan strip above the composer. */
+const chatTodoProgress = computed(() => {
+  const list = chat.todos
+  const completed = list.filter((t) => t.status === 'completed').length
+  return `${completed}/${list.length}`
+})
+
+/**
+ * Prompt-cache hit rate of the last turn, as a percentage label.
+ *
+ * Empty when the provider reports no cache traffic (most non-Anthropic
+ * endpoints count it themselves and expose only the token totals).
+ */
+/**
+ * Estimated cost of the last turn, when the model has flat pricing.
+ *
+ * The daemon computes the authoritative figure (it also evaluates peak/tiered
+ * rules and currency); this is the client-side estimate for the common case,
+ * and it stays silent when the pricing strategy is not flat.
+ */
+const turnCost = computed<string | null>(() => {
+  const usage = chat.lastUsage
+  const pricing = modelTable.value[model.value]?.pricing
+  if (!usage || !pricing || (pricing.kind ?? 'default') !== 'default' || !pricing.prices) {
+    return null
+  }
+  const prices = pricing.prices
+  const uncached = Math.max(0, usage.inputTokens - usage.cachedInputTokens - usage.cacheWriteInputTokens)
+  const perMillion = (tokens: number, price: number | undefined) =>
+    (tokens * (price ?? 0)) / 1_000_000
+  const total =
+    perMillion(uncached, prices.input_per_mtok) +
+    perMillion(usage.cachedInputTokens, prices.cache_hit_per_mtok ?? prices.input_per_mtok) +
+    perMillion(usage.cacheWriteInputTokens, prices.cache_write_per_mtok ?? prices.input_per_mtok) +
+    perMillion(usage.outputTokens, prices.output_per_mtok)
+  if (!Number.isFinite(total) || total <= 0) return null
+  return total < 0.01 ? `$${total.toFixed(4)}` : `$${total.toFixed(3)}`
+})
+
+const cacheHitLabel = computed(() => {
+  const usage = chat.lastUsage
+  if (!usage || usage.cachedInputTokens <= 0 || usage.inputTokens <= 0) return ''
+  return `${Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)}%`
+})
 
 /** Human label for a model key (display name when set). */
 function modelLabel(key: string): string {
@@ -81,6 +132,7 @@ const modelOpen = ref(false)
 
 /** Collapsed/expanded tool-call cards, keyed by message id. */
 const expandedTools = ref<Set<string>>(new Set())
+const expandedThinking = ref<Set<string>>(new Set())
 
 /* Flattened file list (attach + @-mention) ------------------------------ */
 
@@ -182,6 +234,57 @@ function isToolOpen(id: string): boolean {
   return expandedTools.value.has(id)
 }
 
+/**
+ * Rendered markdown per message, cached by content.
+ *
+ * Re-rendering on every scroll or stream tick would be wasteful, and keying by
+ * revision lets the view pick up highlighted code once Shiki finishes loading.
+ */
+const markdownCache = new Map<string, string>()
+
+function markdownOf(source: string | undefined): string {
+  const text = source ?? ''
+  if (!text) return ''
+  const key = `r${highlightRevision()}:${text}`
+  const cached = markdownCache.get(key)
+  if (cached !== undefined) return cached
+  const html = renderMarkdown(text)
+  // The cache is per-session and small; growing past a bound, drop it wholesale
+  // rather than pinning every streaming revision in memory.
+  if (markdownCache.size > 200) markdownCache.clear()
+  markdownCache.set(key, html)
+  return html
+}
+
+function isThinkingOpen(id: string): boolean {
+  return expandedThinking.value.has(id)
+}
+
+function toggleThinking(id: string) {
+  const next = new Set(expandedThinking.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedThinking.value = next
+}
+
+/** Whether a tool result looks like a unified diff (an edit result). */
+function isDiffLike(content: string): boolean {
+  return /^(diff --git |--- a|@@ )/m.test(content)
+}
+
+/** Splits a unified diff into lines with a colour class. */
+function diffLines(content: string): Array<{ text: string; tone: string }> {
+  return content.split(/\r?\n/).map((line) => {
+    let tone = ''
+    if (line.startsWith('@@')) tone = 'diff-hunk'
+    else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff ')) {
+      tone = 'diff-meta'
+    } else if (line.startsWith('+')) tone = 'diff-add'
+    else if (line.startsWith('-')) tone = 'diff-del'
+    return { text: line, tone }
+  })
+}
+
 /** Split a user message into a mix of `@file` chips and plain text lines. */
 function renderUserContent(content: string): Array<{ kind: 'text'; text: string } | { kind: 'file'; path: string }> {
   const parts: Array<{ kind: 'text'; text: string } | { kind: 'file'; path: string }> = []
@@ -230,6 +333,38 @@ function scrollToBottom() {
   nextTick(() => scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight }))
 }
 
+/** Whether the view is pinned to the newest message. */
+const atBottom = ref(true)
+
+function onThreadScroll() {
+  const el = scrollEl.value
+  if (!el) return
+  // A small slack keeps "at the bottom" true while a streamed line grows.
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+}
+
+/**
+ * Follows the conversation while it streams.
+ *
+ * Scrolling is only forced when the reader is already at the bottom: yanking
+ * the view down while someone reads earlier messages is worse than missing an
+ * update, and the jump button covers that case.
+ */
+watch(
+  () => chat.messages.map((m) => m.content.length + (m.reasoning?.length ?? 0)).join(),
+  () => {
+    if (atBottom.value) scrollToBottom()
+  },
+)
+
+watch(
+  () => chat.sessionId,
+  () => {
+    atBottom.value = true
+    scrollToBottom()
+  },
+)
+
 function openFile(path: string | undefined) {
   if (!path) return
   tabs.openFile(path)
@@ -265,6 +400,34 @@ async function copyMessage(content: string) {
   await navigator.clipboard.writeText(content)
 }
 
+/**
+ * Puts a message back in the composer.
+ *
+ * "Retry"/"Edit" are the same gesture here: the turn is not replayed
+ * server-side (that would append a duplicate turn to the session), so the
+ * text lands in the input where it can be adjusted before sending.
+ */
+function resend(content: string) {
+  draft.value = content
+  closeMenus()
+  nextTick(() => {
+    textarea?.focus()
+    autosize()
+  })
+}
+
+/** Re-sends the user turn that produced this assistant reply. */
+function retryTurn(assistantId: string) {
+  const index = chat.messages.findIndex((m) => m.id === assistantId)
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = chat.messages[i]
+    if (candidate.role === 'user') {
+      resend(candidate.content)
+      return
+    }
+  }
+}
+
 /** Short relative timestamp for message headers. */
 function timeOf(ms: number): string {
   const d = new Date(ms)
@@ -274,6 +437,12 @@ function timeOf(ms: number): string {
 onMounted(() => {
   void chat.loadFiles()
   void chat.loadAddons()
+  // Grammars load in the background; the first render shows plain code and the
+  // view re-renders once highlighting is available.
+  warmHighlighter()
+  onHighlightReady(() => {
+    markdownCache.clear()
+  })
   nextTick(autosize)
 })
 </script>
@@ -495,7 +664,7 @@ onMounted(() => {
     </header>
 
     <!-- ── Thread ──────────────────────────────────────────────────────── -->
-    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto">
+    <div ref="scrollEl" class="relative min-h-0 flex-1 overflow-y-auto" @scroll.passive="onThreadScroll">
       <div class="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 py-6">
         <!-- Empty state -->
         <div v-if="!chat.messages.length" class="flex flex-col items-center pt-10 text-center">
@@ -519,7 +688,7 @@ onMounted(() => {
               :key="c.label"
               class="panel-muted flex items-start gap-2.5 px-3 py-2.5 text-left transition-colors duration-150 hover:bg-hover"
               type="button"
-              @click="draft = c.label + ' '; textarea?.focus()"
+              @click="draft = c.label + ' '; (textarea as (HTMLTextAreaElement | null))?.focus()"
             >
               <span class="mono mt-0.5 shrink-0 text-[11.5px]" style="color: var(--primary)">{{ c.label }}</span>
               <span class="text-[11.5px] leading-snug text-muted-foreground">{{ c.desc }}</span>
@@ -541,6 +710,23 @@ onMounted(() => {
         </div>
 
         <template v-for="m in chat.messages" :key="m.id">
+          <!-- Turn failure: the reason a turn stopped is part of the record. -->
+          <div v-if="m.role === 'error'" class="flex justify-center">
+            <div
+              class="max-w-[85%] rounded-xl border px-3 py-2 text-[12px] leading-relaxed"
+              style="border-color: color-mix(in oklab, var(--danger) 40%, transparent); background: var(--danger-soft); color: var(--danger)"
+            >
+              <span class="mr-1.5 font-semibold">Turn failed</span>{{ m.content }}
+            </div>
+          </div>
+
+          <!-- Engine notice (retry, job progress, context release). -->
+          <div v-else-if="m.role === 'notice'" class="flex justify-center">
+            <p class="max-w-[85%] px-3 text-center text-[11.5px] leading-relaxed text-subtle">
+              {{ m.content }}
+            </p>
+          </div>
+
           <!-- User turn -->
           <div v-if="m.role === 'user'" class="group flex flex-col items-end gap-1">
             <div
@@ -574,6 +760,15 @@ onMounted(() => {
               >
                 <Copy class="h-3 w-3" />
               </button>
+              <button
+                class="rounded p-0.5 opacity-0 transition-opacity duration-150 hover:text-foreground group-hover:opacity-100"
+                type="button"
+                title="Edit and send again"
+                aria-label="Edit and resend"
+                @click="resend(m.content)"
+              >
+                <Pencil class="h-3 w-3" />
+              </button>
             </div>
           </div>
 
@@ -590,8 +785,31 @@ onMounted(() => {
                 <span class="font-medium text-foreground/80">Agent</span>
                 <span>{{ timeOf(m.createdAt) }}</span>
               </div>
-              <div class="whitespace-pre-wrap text-[13.5px] leading-6 text-foreground">{{ m.content }}</div>
-              <span v-if="m.pending" class="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse align-middle" style="background: var(--primary)" />
+              <!-- Reasoning: collapsed by default, streamed while it runs. -->
+              <div v-if="m.reasoning" class="mb-1.5">
+                <button
+                  class="flex items-center gap-1.5 text-[11px] text-subtle transition-colors duration-150 hover:text-foreground"
+                  type="button"
+                  :aria-expanded="isThinkingOpen(m.id)"
+                  @click="toggleThinking(m.id)"
+                >
+                  <ChevronRight
+                    class="h-3 w-3 shrink-0 transition-transform duration-150"
+                    :class="isThinkingOpen(m.id) ? 'rotate-90' : ''"
+                  />
+                  <Brain class="h-3 w-3 shrink-0" />
+                  <span>{{ m.reasoningPending ? 'Thinking…' : 'Thought process' }}</span>
+                </button>
+                <div
+                  v-if="isThinkingOpen(m.id)"
+                  class="mt-1 max-h-64 overflow-auto rounded-lg border-l-2 py-2 pl-3 pr-2 text-[12px] leading-5 text-muted-foreground"
+                  style="border-color: var(--divider); background: var(--surface-muted)"
+                >
+                  <div class="md-body md-body-quiet" v-html="markdownOf(m.reasoning)" />
+                </div>
+              </div>
+              <div v-if="m.content" class="md-body text-[13.5px] leading-6 text-foreground" v-html="markdownOf(m.content)" />
+              <span v-if="m.pending && !m.content" class="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse align-middle" style="background: var(--primary)" />
               <div v-if="m.detail && m.detail.model" class="mt-1 text-[10.5px] text-subtle">
                 {{ m.detail.model }}
               </div>
@@ -604,6 +822,15 @@ onMounted(() => {
                   @click="copyMessage(m.content)"
                 >
                   <Copy class="h-3 w-3" /> Copy
+                </button>
+                <button
+                  class="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-subtle opacity-0 transition-opacity duration-150 hover:bg-hover hover:text-foreground group-hover:opacity-100"
+                  type="button"
+                  title="Ask again with the same text"
+                  aria-label="Retry"
+                  @click="retryTurn(m.id)"
+                >
+                  <RotateCcw class="h-3 w-3" /> Retry
                 </button>
               </div>
             </div>
@@ -642,7 +869,26 @@ onMounted(() => {
                       open file
                     </button>
                   </div>
-                  <pre class="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-foreground/90">{{ m.content }}</pre>
+                  <pre
+                    v-if="!isDiffLike(m.content)"
+                    class="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-foreground/90"
+                  >{{ m.content }}</pre>
+                  <!-- Edit results are unified diffs: colour them line by line.
+                       One block per line keeps the layout independent of how the
+                       template compiler treats newlines inside a <pre>. -->
+                  <div
+                    v-else
+                    class="max-h-72 overflow-auto font-mono text-[11.5px] leading-relaxed"
+                  >
+                    <div
+                      v-for="(line, i) in diffLines(m.content)"
+                      :key="i"
+                      class="whitespace-pre"
+                      :class="line.tone"
+                    >
+                      {{ line.text || ' ' }}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -655,11 +901,63 @@ onMounted(() => {
           Agent is working…
         </div>
       </div>
+
+      <!-- Jump back to the newest message when the reader scrolled up. -->
+      <button
+        v-if="!atBottom"
+        class="glass sticky bottom-4 left-1/2 z-10 flex h-8 -translate-x-1/2 items-center gap-1.5 rounded-full px-3 text-[11.5px] text-foreground shadow-popover"
+        type="button"
+        @click="scrollToBottom"
+      >
+        <ArrowDown class="h-3.5 w-3.5" />
+        Latest
+      </button>
     </div>
 
     <!-- ── Composer ────────────────────────────────────────────────────── -->
     <div class="shrink-0 px-4 pb-4">
       <div class="mx-auto w-full max-w-3xl">
+        <!-- The agent's plan, above the input so it stays visible while typing. -->
+        <div
+          v-if="chat.todos.length"
+          class="mb-2 rounded-xl px-3 py-2"
+          style="background: var(--surface); box-shadow: inset 0 0 0 1px var(--divider)"
+        >
+          <p class="mb-1 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+            <ListChecks class="h-3 w-3" /> Plan · {{ chatTodoProgress }}
+          </p>
+          <ul class="space-y-0.5">
+            <li
+              v-for="(todo, index) in chat.todos"
+              :key="index"
+              class="flex items-center gap-1.5 text-[11.5px] leading-4"
+            >
+              <Check
+                v-if="todo.status === 'completed'"
+                class="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400"
+              />
+              <span
+                v-else-if="todo.status === 'in_progress'"
+                class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary"
+              />
+              <span v-else class="h-3 w-3 shrink-0 rounded-full border border-border" />
+              <span
+                :class="
+                  todo.status === 'completed'
+                    ? 'text-muted-foreground line-through'
+                    : todo.status === 'in_progress'
+                      ? 'font-medium'
+                      : 'text-muted-foreground'
+                "
+                class="truncate"
+              >
+                {{
+                  todo.status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content
+                }}
+              </span>
+            </li>
+          </ul>
+        </div>
         <div class="composer relative rounded-2xl p-2.5" style="background: var(--surface); box-shadow: var(--shadow-card), inset 0 0 0 1px var(--divider)">
           <!-- @ / slash menu -->
           <div v-if="mentionOpen || commandOpen" class="menu-card absolute bottom-full left-2 mb-2 max-h-64 w-80 overflow-y-auto">
@@ -794,11 +1092,18 @@ onMounted(() => {
           <span v-if="hasModel" class="flex items-center gap-1">
             <Settings2 class="h-3 w-3" /> Enter to send · Shift+Enter for newline
           </span>
-          <span v-if="chat.lastUsage" class="ml-auto tabular-nums">
-            {{ chat.lastUsage.totalTokens.toLocaleString() }} tokens
-            <span class="text-subtle/70">
-              ({{ chat.lastUsage.inputTokens.toLocaleString() }} in ·
-              {{ chat.lastUsage.outputTokens.toLocaleString() }} out)
+          <span v-if="chat.lastUsage" class="ml-auto flex items-center gap-2 tabular-nums">
+            <span v-if="turnCost" :title="`Estimated cost of the last turn (${chat.lastUsage.totalTokens.toLocaleString()} tokens)`">
+              {{ turnCost }}
+            </span>
+            <span>
+              {{ chat.lastUsage.totalTokens.toLocaleString() }} tokens
+              <span class="text-subtle/70">
+                ({{ chat.lastUsage.inputTokens.toLocaleString() }} in ·
+                {{ chat.lastUsage.outputTokens.toLocaleString() }} out<span v-if="cacheHitLabel">
+                  · {{ cacheHitLabel }} cached</span
+                >)
+              </span>
             </span>
           </span>
           <span v-else-if="hasModel" class="ml-auto mono">{{ modelLabel(model) }}</span>

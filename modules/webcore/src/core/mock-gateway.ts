@@ -20,13 +20,16 @@ import type {
   FileHistoryEntry,
   FileInfo,
   FileTreeNode,
+  FunctionItem,
   McpServerInfo,
   Result,
   SnapshotInfo,
+  TodoItem,
   UsageSummary,
-  WorkspaceInfo,
-  FunctionItem,
+  JobInfo,
+  JobNotice,
   WatchEvent,
+  WorkspaceInfo,
 } from './types'
 import { err, ok } from './types'
 import { configScopeOf, configToToml, isConfigDoc, tryParseToml } from '@/lib/toml'
@@ -190,10 +193,17 @@ const DEMO_USAGE: UsageSummary = {
   currency: 'USD',
   totalCostMicros: 3_210_000,
   models: [
-    { model: 'claude-4', calls: 18, inputTokens: 1_100_000, outputTokens: 550_000, reasoningTokens: 0, costMicros: 2_400_000 },
-    { model: 'deepseek-v4', calls: 24, inputTokens: 668_500, outputTokens: 100_000, reasoningTokens: 0, costMicros: 810_000 },
+    { model: 'claude-4', calls: 18, inputTokens: 1_100_000, outputTokens: 550_000, reasoningTokens: 0, costMicros: 2_400_000, cachedInputTokens: 820_000, cacheWriteInputTokens: 140_000 },
+    { model: 'deepseek-v4', calls: 24, inputTokens: 668_500, outputTokens: 100_000, reasoningTokens: 0, costMicros: 810_000, cachedInputTokens: 410_000, cacheWriteInputTokens: 0 },
   ],
 }
+
+/** Demo task list shown by the mock gateway. */
+const DEMO_TODOS: TodoItem[] = [
+  { content: 'Read the existing parser', status: 'completed' },
+  { content: 'Add the fallback branch', status: 'in_progress', activeForm: 'Adding the fallback branch' },
+  { content: 'Run the test suite', status: 'pending' },
+]
 
 const DEMO_MCP: McpServerInfo[] = [
   { name: 'filesystem', status: 'Connected', toolCount: 2, error: '' },
@@ -235,22 +245,54 @@ const DEMO_TREE: FileTreeNode[] = [
   },
 ]
 
-/** Mutable demo file contents keyed by path so edits persist for the session. */
+/**
+ * Demo "recorded" file contents for the snapshot diff view.
+ *
+ * The working tree holds the current text (see `DEMO_FILES`); these are the
+ * versions a snapshot would carry, so a comparison shows real changes without
+ * a daemon behind the mock.
+ */
+const DEMO_SNAPSHOT_FILES = new Map<string, string>([
+  [
+    // An older revision than the working copy, so the comparison shows changes.
+    'metrics/src/api.ts',
+    `const url = "/v1/metrics";
+export async function fetchMetrics() {
+  return fetch(url).then((r) => r.json())
+}
+`,
+  ],
+  [
+    'metrics/README.md',
+    `# Metrics
+
+A tiny telemetry workspace.
+`,
+  ],
+])
+
+/**
+ * Mutable demo file contents keyed by path so edits persist for the session.
+ *
+ * The keys mirror the tree paths (workspace-relative, including the demo
+ * folder): the explorer hands back exactly those paths, so a key without the
+ * folder prefix would make every demo file unopenable.
+ */
 const DEMO_FILES = new Map<string, string>([
   [
-    'package.json',
+    'metrics/package.json',
     `{\n  "name": "metrics",\n  "scripts": {\n    "build": "tsc && vite build"\n  },\n  "dependencies": {}\n}\n`,
   ],
   [
-    'README.md',
+    'metrics/README.md',
     `# Metrics\n\nA tiny Playwright-driven telemetry workspace used to exercise Metteur.\n\n## Blueprints\n\nOpen a \`.blueprint\` file to design an agent graph.\n`,
   ],
   [
-    'src/api.ts',
+    'metrics/src/api.ts',
     `const url = "/v2/metrics";\nexport async function fetchMetrics() {\n  return fetch(url).then((r) => r.json());\n}\n`,
   ],
   [
-    'src/parser.ts',
+    'metrics/src/parser.ts',
     `export function parseLine(line: string): number {\n  return Number.parseInt(line.trim(), 10);\n}\n`,
   ],
 ])
@@ -320,6 +362,24 @@ const STEPS: Array<
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+/** Approximate size of one streamed chunk (a real provider sends a few tokens). */
+const STREAM_CHUNK = 24
+
+/**
+ * Splits streamed text into chunks without breaking surrogate pairs.
+ *
+ * Streaming per character would be closer to "typing", but a hidden or busy
+ * tab throttles timers hard enough to stretch a short answer into minutes —
+ * chunked delivery keeps the demo (and its e2e checks) responsive.
+ */
+function* streamChunks(text: string | undefined): Generator<string> {
+  if (!text) return
+  const chars = Array.from(text)
+  for (let index = 0; index < chars.length; index += STREAM_CHUNK) {
+    yield chars.slice(index, index + STREAM_CHUNK).join('')
+  }
+}
+
 /** Deep clone a JSON-able value so config layers stay immutable per read. */
 function deepClone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T
@@ -342,6 +402,8 @@ export class MockGateway implements DaemonGateway {
   private approved = new Map<string, boolean>()
   /** Workspaces with an abort requested for an in-flight chat response. */
   private chatAbort = new Set<string>()
+  /** Demo jobs, so the job panel has something to list outside a real run. */
+  private jobs = new Map<string, JobInfo>()
   /** Open workspaces in memory so the tab strip can switch/close real entries. */
   private openWs = new Set<string>([DEMO_WS])
 
@@ -485,6 +547,126 @@ export class MockGateway implements DaemonGateway {
     return ok({ path, isDir, len: isDir ? 0 : (DEMO_FILES.get(key)?.length ?? 0) })
   }
 
+  /** Demo jobs, oldest first, as the real daemon reports them. */
+  private jobList(): JobInfo[] {
+    return [...this.jobs.values()].sort((a, b) => a.startedAt - b.startedAt)
+  }
+
+  // Background commands (jobs) ---------------------------------------------------
+  async listJobs(_ws: string): Promise<Result<JobInfo[]>> {
+    await delay(60)
+    return ok(this.jobList())
+  }
+
+  async watchJobs(
+    _ws: string,
+    onEvent: (e: JobNotice) => void,
+    signal?: AbortSignal,
+  ): Promise<Result<void>> {
+    // A demo job that runs once per subscription so the job panel has live
+    // content to show: a short build that prints lines and then exits.
+    const id = `demo${Math.floor(Math.random() * 9000 + 1000)}`
+    const started = Date.now()
+    const script = [
+      '$ pnpm build',
+      'vite v8 building for production...',
+      'transforming...',
+      '✓ 191 modules transformed.',
+      'dist/assets/index.js  148.20 kB │ gzip: 46.10 kB',
+      '✓ built in 2.41s',
+    ]
+    const push = (notice: JobNotice) => {
+      const job = this.jobs.get(id)
+      if (job) {
+        if (notice.kind === 'output') job.tail += notice.chunk
+        job.state = notice.state
+        job.exitCode = notice.exitCode
+      }
+      onEvent(notice)
+    }
+    this.jobs.set(id, {
+      id,
+      command: 'pnpm build',
+      cwd: 'metrics',
+      state: 'running',
+      exitCode: -1,
+      runId: 'demo-run',
+      startedAt: started,
+      finishedAt: 0,
+      outputBytes: 0,
+      tail: '',
+    })
+    push({
+      jobId: id,
+      kind: 'started',
+      chunk: '',
+      state: 'running',
+      exitCode: -1,
+      summary: `${id} | running | 0.0s | 0 bytes | pnpm build`,
+    })
+    for (const line of script) {
+      if (signal?.aborted) return ok(undefined)
+      await delay(900)
+      push({
+        jobId: id,
+        kind: 'output',
+        chunk: `${line}
+`,
+        state: 'running',
+        exitCode: -1,
+        summary: '',
+      })
+    }
+    await delay(600)
+    if (signal?.aborted) return ok(undefined)
+    const job = this.jobs.get(id)
+    if (job) {
+      job.finishedAt = Date.now()
+      job.outputBytes = job.tail.length
+    }
+    push({
+      jobId: id,
+      kind: 'finished',
+      chunk: '',
+      state: 'exited',
+      exitCode: 0,
+      summary: `${id} | exit 0 | 6.0s | ${job?.tail.length ?? 0} bytes | pnpm build`,
+    })
+    return new Promise((resolve) => {
+      signal?.addEventListener('abort', () => resolve(ok(undefined)), { once: true })
+      if (signal?.aborted) resolve(ok(undefined))
+    })
+  }
+
+  async killJob(_ws: string, jobId: string): Promise<Result<{ killed: boolean; state: string }>> {
+    await delay(60)
+    const job = this.jobs.get(jobId)
+    if (!job) return err(`job ${jobId} not found`)
+    const killed = job.state === 'running'
+    if (killed) {
+      job.state = 'killed'
+      job.exitCode = -1
+      job.finishedAt = Date.now()
+      // The streaming loop notices the state change and stops.
+      void this.jobKillers
+    }
+    return ok({ killed, state: job.state })
+  }
+
+  async getFileAtSnapshot(
+    _ws: string,
+    path: string,
+    snapshotId?: string,
+  ): Promise<Result<{ found: boolean; content: string; snapshotId: string }>> {
+    await delay(60)
+    // Demo history: the snapshot holds the "before" text, the working tree the
+    // current one, so the diff view always has something to show.
+    const id = snapshotId || 'demo-snapshot'
+    const recorded = DEMO_SNAPSHOT_FILES.get(path.replace(/^[/]+/, ''))
+    if (recorded === undefined) return ok({ found: false, content: '', snapshotId: id })
+    return ok({ found: true, content: recorded, snapshotId: id })
+  }
+
   async watchWorkspace(
     _ws: string,
     _onEvent: (e: WatchEvent) => void,
@@ -507,6 +689,7 @@ export class MockGateway implements DaemonGateway {
     onSession?: (sessionId: string) => void,
     _sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
+    onTodos?: (todos: TodoItem[]) => void,
   ): Promise<Result<void>> {
     this.chatAbort.delete(ws)
     onSession?.(`mock-${ws}`)
@@ -515,14 +698,19 @@ export class MockGateway implements DaemonGateway {
     const steps: Array<{
       role: ChatMessage['role']
       text: string
+      /** Streamed before the answer, shown as a collapsible thinking block. */
+      reasoning?: string
       actor?: string
       detail?: Record<string, unknown>
     }> = [
       {
         role: 'assistant',
+        reasoning: wantBlueprint
+          ? 'The request mentions a blueprint, so the answer should describe the graph shape rather than act on files. Keep the exec path single-output and branch only where a decision changes the flow.'
+          : 'Break the request into steps, run the read-only tools first, then report what changed. Keep the answer short and point at the files that matter.',
         text: wantBlueprint
-          ? `I'll wire up a blueprint that ${content.trim() || 'runs a small agent'}. Let me trace the control flow, keep the exec path single, and fan out with a Branch where data depends on a decision.`
-          : `Got it — ${content.trim() || 'tell me more about what to build.'}\n\nI'll break this into steps, run the relevant tools inside the sandbox, and keep you updated here.`,
+          ? `I'll wire up a blueprint that ${content.trim() || 'runs a small agent'}.\n\n**Plan**\n\n1. Read the target files\n2. Draft the graph\n3. Verify with a \`Validator\`\n\nEach step is a node; the LLM only runs inside \`CallLLM\`.`
+          : `Got it — ${content.trim() || 'tell me more about what to build.'}\n\nI'll break this into steps:\n\n- explore the workspace\n- run the relevant tools in the sandbox\n- report what changed\n\nThe shape of a call looks like this:\n\n\`\`\`ts\nexport async function fetchMetrics() {\n  return fetch('/v2/metrics').then((r) => r.json())\n}\n\`\`\`\n\nAsk me to run a step and I'll keep you updated here.`,
         detail: {
           model,
           temperature: options?.temperature,
@@ -533,6 +721,13 @@ export class MockGateway implements DaemonGateway {
       },
     ]
     if (wantBlueprint) {
+      steps.push({
+        role: 'tool',
+        actor: 'EditFile',
+        // A unified diff, so the transcript exercises diff colouring.
+        text: '--- a/metrics/src/api.ts\n+++ b/metrics/src/api.ts\n@@ -1,4 +1,6 @@\n const url = "/v2/metrics";\n+const retries = 3;\n export async function fetchMetrics() {\n   return fetch(url).then((r) => r.json())\n }\n',
+        detail: { tool: 'EditFile', file: 'metrics/src/api.ts' },
+      })
       steps.push({
         role: 'tool',
         actor: 'blueprint.write',
@@ -549,24 +744,52 @@ export class MockGateway implements DaemonGateway {
       if (this.chatAbort.has(ws)) return ok(undefined)
       const base = { actor: step.actor, detail: step.detail }
       const id = msgId()
-      // Stream a character at a time so the bubble visibly fills in.
-      for (let j = 0; j < step.text.length; j++) {
+      // Reasoning streams first on its own channel, then the answer text.
+      for (const chunk of streamChunks(step.reasoning)) {
         if (this.chatAbort.has(ws)) return ok(undefined)
         onMessage({
           id,
           role: step.role,
           ...base,
-          content: step.text[j],
+          content: '',
+          reasoning: chunk,
+          reasoningPending: true,
           createdAt: Date.now(),
           pending: true,
         })
-        await delay(12)
+        await delay(16)
       }
+      // Stream the answer in small chunks so the bubble visibly fills in.
+      for (const chunk of streamChunks(step.text)) {
+        if (this.chatAbort.has(ws)) return ok(undefined)
+        onMessage({
+          id,
+          role: step.role,
+          ...base,
+          content: chunk,
+          createdAt: Date.now(),
+          pending: true,
+        })
+        await delay(16)
+      }
+      // Settle the bubble with the complete text, exercising the replace path.
+      onMessage({
+        id,
+        role: step.role,
+        ...base,
+        content: step.text,
+        reasoning: step.reasoning,
+        reasoningPending: false,
+        createdAt: Date.now(),
+      })
     }
+    onTodos?.(DEMO_TODOS)
     onUsage?.({
       inputTokens: history.length * 120,
       outputTokens: content.length * 2,
       totalTokens: history.length * 120 + content.length * 2,
+      cachedInputTokens: Math.round(history.length * 120 * 0.6),
+      cacheWriteInputTokens: 0,
     })
     this.chatAbort.delete(ws)
     return ok(undefined)
@@ -581,8 +804,10 @@ export class MockGateway implements DaemonGateway {
     return ok([])
   }
 
+  /** Returns a demo snapshot so the mock exercises session restore, including
+   *  the task list the chat surface renders above the composer. */
   async getChatSession(_ws: string, _sessionId?: string): Promise<Result<ChatSessionSnapshot>> {
-    return err('no chat session')
+    return ok({ sessionId: 'demo', createdAt: Date.now(), history: [], todos: DEMO_TODOS })
   }
 
   async deleteChatSession(_ws: string, _sessionId?: string): Promise<Result<void>> {
@@ -648,6 +873,7 @@ export class MockGateway implements DaemonGateway {
     ws: string,
     _id: string,
     onEvent: (e: ExecutionEvent) => void,
+    _blueprint?: Blueprint,
   ): Promise<Result<void>> {
     const state = this.state(ws)
     state.onEvent = onEvent

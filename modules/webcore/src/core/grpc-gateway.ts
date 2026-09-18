@@ -26,7 +26,10 @@ import type {
   McpServerInfo,
   Result,
   SnapshotInfo,
+  TodoItem,
   UsageSummary,
+  JobInfo,
+  JobNotice,
   WatchEvent,
   WorkspaceInfo,
 } from './types'
@@ -44,6 +47,18 @@ function toErr(e: unknown): Result<never> {
 /** Map a UI node type to the daemon kind (`Arithmetic` wraps `Add`). */
 function daemonKindOf(kind: string): string {
   return kind === 'Arithmetic' ? 'Add' : kind
+}
+
+/** Narrows the daemon's job-state string to the UI union. */
+function jobStateOf(raw: string): JobInfo['state'] {
+  return raw === 'running' || raw === 'exited' || raw === 'failed' || raw === 'killed'
+    ? raw
+    : 'failed'
+}
+
+/** Narrows the daemon's job-notice kind to the UI union. */
+function jobNoticeKindOf(raw: string): JobNotice['kind'] {
+  return raw === 'started' || raw === 'output' || raw === 'finished' ? raw : 'output'
 }
 
 /** Map a UI category to the daemon node-type string. */
@@ -525,6 +540,82 @@ export class GrpcGateway implements DaemonGateway {
     }
   }
 
+  // Background commands (jobs) ---------------------------------------------------
+  async listJobs(workspacePath: string): Promise<Result<JobInfo[]>> {
+    try {
+      const res = await this.client.listJobs({ workspacePath })
+      return ok(
+        res.jobs.map((job) => ({
+          id: job.id,
+          command: job.command,
+          cwd: job.cwd,
+          state: jobStateOf(job.state),
+          exitCode: job.exitCode,
+          runId: job.runId,
+          startedAt: Number(job.startedAt),
+          finishedAt: Number(job.finishedAt),
+          outputBytes: Number(job.outputBytes),
+          tail: job.tail,
+        })),
+      )
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async watchJobs(
+    workspacePath: string,
+    onEvent: (e: JobNotice) => void,
+    signal?: AbortSignal,
+  ): Promise<Result<void>> {
+    try {
+      for await (const event of this.client.watchJobs({ workspacePath }, { signal })) {
+        onEvent({
+          jobId: event.jobId,
+          kind: jobNoticeKindOf(event.kind),
+          chunk: event.chunk,
+          state: jobStateOf(event.state),
+          exitCode: event.exitCode,
+          summary: event.summary,
+        })
+      }
+      return ok(undefined)
+    } catch (e) {
+      // Aborting the subscription is not a failure.
+      if (signal?.aborted) return ok(undefined)
+      return toErr(e)
+    }
+  }
+
+  async killJob(
+    workspacePath: string,
+    jobId: string,
+  ): Promise<Result<{ killed: boolean; state: string }>> {
+    try {
+      const res = await this.client.killJob({ workspacePath, jobId })
+      return ok({ killed: res.killed, state: res.state })
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async getFileAtSnapshot(
+    workspacePath: string,
+    path: string,
+    snapshotId?: string,
+  ): Promise<Result<{ found: boolean; content: string; snapshotId: string }>> {
+    try {
+      const res = await this.client.getFileAtSnapshot({
+        workspacePath,
+        path,
+        snapshotId: snapshotId ?? '',
+      })
+      return ok({ found: res.found, content: res.content, snapshotId: res.snapshotId })
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
   // ReAct chat --------------------------------------------------------------------
   async sendChat(
     workspacePath: string,
@@ -535,6 +626,7 @@ export class GrpcGateway implements DaemonGateway {
     onSession?: (sessionId: string) => void,
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
+    onTodos?: (todos: TodoItem[]) => void,
   ): Promise<Result<void>> {
     try {
       let seq = 0
@@ -571,14 +663,48 @@ export class GrpcGateway implements DaemonGateway {
             createdAt: Date.now(),
             pending: true,
           })
-        } else if (ev.kind === 'assistant') {
+        } else if (ev.kind === 'reasoning_delta') {
+          // The model's thinking streams separately from the answer; it is
+          // shown in a collapsible block, never mixed into the answer text.
           if (!turnId) turnId = `a-${Date.now()}-${seq++}`
           onMessage({
             id: turnId,
             role: 'assistant',
+            content: '',
+            reasoning: ev.content,
+            reasoningPending: true,
+            createdAt: Date.now(),
+            pending: true,
+          })
+        } else if (ev.kind === 'assistant') {
+          if (!turnId) turnId = `a-${Date.now()}-${seq++}`
+          let reasoning = ''
+          if (ev.detailJson) {
+            try {
+              reasoning = String(JSON.parse(ev.detailJson).reasoning ?? '')
+            } catch {
+              reasoning = ''
+            }
+          }
+          onMessage({
+            id: turnId,
+            role: 'assistant',
             content: ev.content,
+            // The final reasoning text settles the collapsible block; when the
+            // model produced none the streamed thinking (if any) stays.
+            reasoning: reasoning || undefined,
+            reasoningPending: false,
             createdAt: Date.now(),
           })
+        } else if (ev.kind === 'todos') {
+          // The agent's plan, streamed while the turn runs.
+          let detail: Record<string, unknown> = {}
+          try {
+            detail = JSON.parse(ev.detailJson || '{}')
+          } catch {
+            detail = {}
+          }
+          if (Array.isArray(detail.todos)) onTodos?.(detail.todos as TodoItem[])
         } else if (ev.kind === 'tool') {
           let toolName = ''
           if (ev.detailJson) {
@@ -608,6 +734,18 @@ export class GrpcGateway implements DaemonGateway {
             inputTokens: Number(usage.input_tokens) || 0,
             outputTokens: Number(usage.output_tokens) || 0,
             totalTokens: Number(usage.total_tokens) || 0,
+            cachedInputTokens: Number(usage.cached_input_tokens) || 0,
+            cacheWriteInputTokens: Number(usage.cache_write_input_tokens) || 0,
+          })
+        } else if (ev.kind === 'notice') {
+          // Engine notices (retries, job progress, context releases) are part
+          // of the transcript: they explain pauses the user would otherwise
+          // read as a stall.
+          onMessage({
+            id: `n-${Date.now()}-${seq++}`,
+            role: 'notice',
+            content: ev.content,
+            createdAt: Date.now(),
           })
         } else if (ev.kind === 'error') {
           return err(ev.content)
@@ -661,7 +799,13 @@ export class GrpcGateway implements DaemonGateway {
       } catch {
         history = []
       }
-      return ok({ sessionId: res.sessionId, createdAt: Number(res.createdAt), history })
+      let todos: TodoItem[] = []
+      try {
+        todos = JSON.parse(res.todosJson || '[]')
+      } catch {
+        todos = []
+      }
+      return ok({ sessionId: res.sessionId, createdAt: Number(res.createdAt), history, todos })
     } catch (e) {
       return toErr(e)
     }
@@ -754,9 +898,17 @@ export class GrpcGateway implements DaemonGateway {
     workspacePath: string,
     blueprintId: string,
     onEvent: (e: ExecutionEvent) => void,
+    blueprint?: Blueprint,
   ): Promise<Result<void>> {
     try {
-      for await (const ev of this.client.executeBlueprint({ workspacePath, blueprintId })) {
+      // Sending the canvas makes Run independent of the stored mirror, which
+      // may lag behind (or have failed to update) after an edit.
+      const blueprintJson = blueprint ? JSON.stringify(toProtoBlueprint(blueprint)) : ''
+      for await (const ev of this.client.executeBlueprint({
+        workspacePath,
+        blueprintId,
+        blueprintJson,
+      })) {
         onEvent(fromProtoEvent(ev))
       }
       return ok(undefined)
@@ -973,6 +1125,8 @@ export class GrpcGateway implements DaemonGateway {
           outputTokens: Number(m.outputTokens),
           reasoningTokens: Number(m.reasoningTokens),
           costMicros: Number(m.costMicros),
+          cachedInputTokens: Number(m.cachedInputTokens),
+          cacheWriteInputTokens: Number(m.cacheWriteInputTokens),
         })),
       })
     } catch (e) {

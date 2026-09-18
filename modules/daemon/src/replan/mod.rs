@@ -247,14 +247,13 @@ pub async fn run_plan_agent(
     task: &str,
     mock_text: Option<String>,
 ) -> DaemonResult<serde_json::Value> {
-    let context = ContextManager::new_from_prompt(
-        vec![metteur_shared::llm::SystemFragment {
-            priority: 0,
-            scope: "plan_agent".to_string(),
-            content: PLAN_AGENT_SYSTEM.to_string(),
-        }],
-        task,
-    );
+    let mut system = crate::harness::HarnessPrompt::fragments(ctx).await;
+    system.push(metteur_shared::llm::SystemFragment {
+        priority: crate::harness::sections::PRIORITY_NODE,
+        scope: "plan_agent".to_string(),
+        content: PLAN_AGENT_SYSTEM.to_string(),
+    });
+    let context = ContextManager::new_from_prompt(system, task);
     let opts = ReactOptions {
         provider: if mock_text.is_some() {
             "mock".to_string()

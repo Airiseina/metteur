@@ -1,5 +1,6 @@
 //! LLM client abstraction and provider factory.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,10 +13,42 @@ use crate::error::{DaemonError, DaemonResult};
 pub struct LlmResponse {
     /// The generated text (empty if the model only made tool calls).
     pub text: String,
+    /// Reasoning blocks produced alongside the answer.
+    pub thinking: Vec<ThinkingBlock>,
     /// Tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
     /// Token usage for the request.
     pub usage: Usage,
+}
+
+/// A reasoning block returned by a thinking-capable model.
+///
+/// Providers differ in how reasoning may be fed back: Anthropic verifies a
+/// signature over the text and requires verbatim replay, DeepSeek rejects a
+/// replayed `reasoning_content`, OpenAI's Responses API summarizes instead of
+/// returning raw reasoning. The daemon stores the block either way so the UI
+/// and audit trail can show it; each provider decides what to send back.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThinkingBlock {
+    /// The reasoning text as shown to the user.
+    pub text: String,
+    /// Provider signature binding `text` (Anthropic).
+    pub signature: Option<String>,
+    /// Opaque redacted payload replayed verbatim (Anthropic).
+    pub redacted: Option<String>,
+}
+
+/// One streamed delta from a provider.
+///
+/// Reasoning text is kept separate from the answer: it is displayed to the
+/// user but is not part of the assistant turn, and providers differ in whether
+/// it may be replayed at all (see [`ThinkingBlock`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    /// Assistant answer text.
+    Text(String),
+    /// Reasoning/thinking text.
+    Reasoning(String),
 }
 
 /// A client for a single LLM provider and model.
@@ -35,14 +68,14 @@ pub trait LlmClient: Send + Sync {
         tools: &[ToolDefinition],
     ) -> DaemonResult<LlmResponse>;
 
-    /// Performs a streaming completion, invoking `on_delta` for each text
-    /// delta as it arrives.
+    /// Performs a streaming completion, invoking `on_delta` for each delta as
+    /// it arrives.
     async fn stream(
         &self,
         ctx: &ContextManager,
         params: &GenerationParams,
         tools: &[ToolDefinition],
-        on_delta: &mut (dyn FnMut(String) + Send),
+        on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> DaemonResult<LlmResponse>;
 }
 
@@ -70,6 +103,10 @@ pub struct LlmProviderConfig {
     pub model: String,
     /// Default generation parameters applied to every request.
     pub default_params: GenerationParams,
+    /// Extended-thinking budget in tokens (`0` disables thinking).
+    pub thinking_budget_tokens: u64,
+    /// Whether the provider should emit explicit prompt-cache breakpoints.
+    pub prompt_cache: bool,
 }
 
 impl LlmProviderConfig {
@@ -86,14 +123,34 @@ impl LlmProviderConfig {
             api_key: api_key.into(),
             model: model.into(),
             default_params: GenerationParams::default(),
+            thinking_budget_tokens: 0,
+            prompt_cache: true,
         }
+    }
+
+    /// Sets the extended-thinking budget.
+    pub fn with_thinking_budget(mut self, budget_tokens: u64) -> Self {
+        self.thinking_budget_tokens = budget_tokens;
+        self
+    }
+
+    /// Sets whether explicit prompt-cache breakpoints are emitted.
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.prompt_cache = enabled;
+        self
     }
 }
 
 /// Creates [`LlmClient`] instances for the supported providers.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct LlmClientFactory {
     http: reqwest::Client,
+    /// When set, every `create` call returns this client instead of building a
+    /// provider. Tests use it to script model responses without HTTP.
+    override_client: Option<Arc<dyn LlmClient>>,
+    /// When set, `create` returns the client registered for the requested model
+    /// id. Tests use it to script several models at once (fallback chains).
+    override_by_model: HashMap<String, Arc<dyn LlmClient>>,
 }
 
 impl LlmClientFactory {
@@ -101,11 +158,37 @@ impl LlmClientFactory {
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::new(),
+            override_client: None,
+            override_by_model: HashMap::new(),
+        }
+    }
+
+    /// Creates a factory that always returns `client`.
+    pub fn with_override(client: Arc<dyn LlmClient>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            override_client: Some(client),
+            override_by_model: HashMap::new(),
+        }
+    }
+
+    /// Creates a factory that returns a scripted client per model id.
+    pub fn with_model_overrides(clients: HashMap<String, Arc<dyn LlmClient>>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            override_client: None,
+            override_by_model: clients,
         }
     }
 
     /// Creates a client for the given provider config.
     pub fn create(&self, config: &LlmProviderConfig) -> DaemonResult<Arc<dyn LlmClient>> {
+        if let Some(client) = self.override_by_model.get(&config.model) {
+            return Ok(client.clone());
+        }
+        if let Some(client) = &self.override_client {
+            return Ok(client.clone());
+        }
         let client: Arc<dyn LlmClient> = match config.kind {
             ProviderKind::OpenAiChat => Arc::new(
                 crate::llm::provider::openai_chat::OpenAiChatClient::new(self.http.clone(), config),
@@ -124,13 +207,7 @@ impl LlmClientFactory {
     }
 }
 
-impl Default for LlmClientFactory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Maps an HTTP error into a daemon error.
 pub(crate) fn http_error(context: &str, err: reqwest::Error) -> DaemonError {
-    DaemonError::Llm(format!("{context}: {err}"))
+    DaemonError::LlmTransport(format!("{context}: {err}"))
 }

@@ -249,13 +249,59 @@ impl DaemonService {
             interrupt_bus,
             pause_flag,
             cancel_flag,
-            ws.lsp_manager.clone(),
+            ws.lsp(),
             addon_fragments,
             Some(ws.version_manager.clone()),
+            ws.jobs(),
         )
         .await?;
 
         Ok(Response::new(stream))
+    }
+
+    /// Returns a file's content as recorded by a snapshot.
+    ///
+    /// An empty `snapshot_id` reads the most recent snapshot, which is what a
+    /// "compare with the last snapshot" view asks for.
+    pub(crate) async fn get_file_at_snapshot(
+        &self,
+        request: Request<GetFileAtSnapshotRequest>,
+    ) -> Result<Response<GetFileAtSnapshotResponse>, Status> {
+        let req = request.into_inner();
+        let ws = self
+            .state
+            .workspaces
+            .get(&PathBuf::from(&req.workspace_path))
+            .await
+            .ok_or_else(|| Status::not_found("workspace not open"))?;
+        let manager = &ws.version_manager;
+        let snapshot_id = match req.snapshot_id.trim() {
+            "" => manager.latest_snapshot_id().map_err(to_status)?,
+            raw => Some(
+                uuid::Uuid::parse_str(raw).map_err(|e| Status::invalid_argument(e.to_string()))?,
+            ),
+        };
+        let Some(snapshot_id) = snapshot_id else {
+            // No snapshots yet: everything is "added since", with no baseline.
+            return Ok(Response::new(GetFileAtSnapshotResponse {
+                found: false,
+                content: String::new(),
+                snapshot_id: String::new(),
+            }));
+        };
+        let found = manager.file_at_snapshot(snapshot_id, &req.path).map_err(to_status)?;
+        Ok(Response::new(match found {
+            Some((id, content)) => GetFileAtSnapshotResponse {
+                found: true,
+                content,
+                snapshot_id: id.to_string(),
+            },
+            None => GetFileAtSnapshotResponse {
+                found: false,
+                content: String::new(),
+                snapshot_id: snapshot_id.to_string(),
+            },
+        }))
     }
 
     pub(crate) async fn get_file_history(
@@ -322,6 +368,8 @@ impl DaemonService {
                     output_tokens: m.output_tokens,
                     reasoning_tokens: m.reasoning_tokens,
                     cost_micros: m.cost_micros,
+                    cached_input_tokens: m.cached_input_tokens,
+                    cache_write_input_tokens: m.cache_write_input_tokens,
                 })
                 .collect(),
         }))

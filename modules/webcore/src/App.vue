@@ -6,6 +6,8 @@ import {
   Folder,
   FolderOpen,
   Files,
+  Loader2,
+  Terminal,
   History,
   MessageSquare,
   Moon,
@@ -22,12 +24,16 @@ import { useThemeStore } from '@/stores/theme'
 import { useChatStore } from '@/stores/chat'
 import { usePanelStore } from '@/stores/panel'
 import { useRightPanelStore } from '@/stores/right-panel'
+import { useTabsStore } from '@/stores/tabs'
+import { useJobsStore } from '@/stores/jobs'
 import { useFileWatchStore } from '@/stores/filewatch'
 import { gateway } from '@/core'
 import { projectName } from '@/lib/path'
 import { rootRoute } from '@/lib/workspace-url'
 import { pendingRoute } from '@/router'
 import AppLogo from '@/components/AppLogo.vue'
+import EditorPane from '@/views/EditorPane.vue'
+import JobsPanel from '@/components/JobsPanel.vue'
 import ApprovalDialog from '@/components/ApprovalDialog.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import FolderOpenDialog from '@/components/FolderOpenDialog.vue'
@@ -45,6 +51,8 @@ const theme = useThemeStore()
 const chat = useChatStore()
 const panel = usePanelStore()
 const rightPanel = useRightPanelStore()
+const tabs = useTabsStore()
+const jobs = useJobsStore()
 const fileWatch = useFileWatchStore()
 const feedback = useFeedbackStore()
 const { openSurface } = useSurfaceNavigation()
@@ -116,15 +124,24 @@ watch(
   { immediate: true },
 )
 
-/** Keep the fs-watch subscription tied to the open workspace. */
+/** Keep the fs-watch and job subscriptions tied to the open workspace. */
 watch(
   () => workspace.active?.path,
   (path) => {
     fileWatch.stop()
-    if (path) fileWatch.start()
+    jobs.stop()
+    if (path) {
+      fileWatch.start()
+      void jobs.start()
+    }
   },
   { immediate: true },
 )
+
+/** Opens the background-command panel beside the editor. */
+function openJobs() {
+  rightPanel.show(JobsPanel, 'Jobs', {})
+}
 
 // Reopen the last-used workspace so a refresh returns to the IDE shell, then
 // resume the route that was stashed by the workspace gate (deep links).
@@ -241,6 +258,26 @@ function onResizeStart(e: MouseEvent) {
   const move = (ev: MouseEvent) => {
     const w = Math.min(520, Math.max(180, startW + (ev.clientX - startX)))
     panel.width = Math.round(w)
+  }
+  const up = () => {
+    window.removeEventListener('mousemove', move)
+    window.removeEventListener('mouseup', up)
+  }
+  window.addEventListener('mousemove', move)
+  window.addEventListener('mouseup', up)
+}
+
+/** Whether the split view's right-hand pane should be on screen. */
+const splitVisible = computed(() => tabs.splitPath !== null)
+
+/** Drag the divider between the two editor panes. */
+function onSplitResizeStart(e: MouseEvent) {
+  e.preventDefault()
+  const area = (e.currentTarget as HTMLElement).parentElement
+  if (!area) return
+  const bounds = area.getBoundingClientRect()
+  const move = (ev: MouseEvent) => {
+    tabs.setSplitRatio((ev.clientX - bounds.left) / bounds.width)
   }
   const up = () => {
     window.removeEventListener('mousemove', move)
@@ -420,9 +457,42 @@ function onRightResizeStart(e: MouseEvent) {
           </div>
         </aside>
 
-        <!-- Main editor area. -->
-        <main class="min-w-0 flex-1 overflow-hidden">
-          <RouterView />
+        <!-- Main editor area: one pane, or two when a file is opened to the side. -->
+        <main class="flex min-w-0 flex-1 overflow-hidden">
+          <div class="min-w-0 flex-1 overflow-hidden" :style="splitVisible ? { flex: `0 0 ${tabs.splitRatio * 100}%` } : undefined">
+            <RouterView />
+          </div>
+          <template v-if="splitVisible">
+            <div
+              class="group relative z-10 w-px shrink-0 cursor-col-resize bg-divider"
+              role="separator"
+              aria-orientation="vertical"
+              title="Drag to resize"
+              @mousedown.prevent="onSplitResizeStart"
+            >
+              <div class="absolute -left-1 top-0 h-full w-3" />
+            </div>
+            <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+              <div
+                class="flex h-8 shrink-0 items-center gap-1.5 border-b border-divider px-3 text-[11px] text-subtle"
+              >
+                <Files class="h-3.5 w-3.5" />
+                <span class="mono truncate">{{ tabs.splitPath }}</span>
+                <button
+                  class="btn-icon ml-auto h-5! w-5!"
+                  type="button"
+                  title="Close split view"
+                  aria-label="Close split view"
+                  @click="tabs.closeSplit()"
+                >
+                  <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div class="min-h-0 flex-1 overflow-hidden">
+                <EditorPane :key="tabs.splitPath ?? ''" :file-path="tabs.splitPath ?? undefined" />
+              </div>
+            </div>
+          </template>
         </main>
 
         <!-- Right-hand panel (VSCode-style). Owned by the editor, e.g. for
@@ -486,7 +556,19 @@ function onRightResizeStart(e: MouseEvent) {
       <span v-if="workspace.active" class="max-w-75 truncate">{{ workspace.active.path }}</span>
       <span v-else>{{ workspace.recents.length }} recent workspace(s)</span>
 
-      <span class="ml-auto flex items-center gap-1.5">
+      <button
+        v-if="jobs.entries.length"
+        class="ml-auto flex items-center gap-1.5 rounded px-1.5 py-0.5 transition-colors duration-150 hover:bg-hover hover:text-foreground"
+        type="button"
+        :title="jobs.running ? `${jobs.running} command(s) running` : 'Background commands'"
+        @click="openJobs"
+      >
+        <Loader2 v-if="jobs.running" class="h-3 w-3 animate-spin" style="color: var(--primary)" />
+        <Terminal v-else class="h-3 w-3" />
+        <span>{{ jobs.running ? `${jobs.running} running` : `${jobs.entries.length} job(s)` }}</span>
+      </button>
+
+      <span class="flex items-center gap-1.5" :class="jobs.entries.length ? '' : 'ml-auto'">
         <span class="h-1.5 w-1.5 rounded-full" :class="gateway.connected.value ? 'bg-emerald-500' : 'bg-subtle'" />
         {{ connectionLabel }}
       </span>

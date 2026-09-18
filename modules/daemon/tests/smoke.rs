@@ -12,7 +12,8 @@ use metteur_daemon::grpc::proto::{
     DeleteChatSessionRequest, DeleteFunctionRequest, ExecuteBlueprintRequest, FnPin, FunctionInfo,
     GetChatSessionRequest, GetConfigRequest, GetExecutionUsageRequest, GetFileHistoryRequest,
     ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest, ListFilesRequest,
-    ListFunctionsRequest, ListSnapshotsRequest, LoadFunctionRequest, OpenWorkspaceRequest,
+    GetFileAtSnapshotRequest, KillJobRequest, ListFunctionsRequest, ListJobsRequest,
+    ListSnapshotsRequest, LoadFunctionRequest, OpenWorkspaceRequest, WatchJobsRequest,
     ReadFileRequest, RemoveFileRequest, RenameFileRequest, RollbackRequest, SaveBlueprintRequest,
     SaveFunctionRequest, SendChatRequest, SetConfigRequest, StatFileRequest, WriteFileRequest,
 };
@@ -609,6 +610,7 @@ async fn smoke_open_save_execute() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: blueprint.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -659,6 +661,7 @@ async fn smoke_completed_run_cannot_continue() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: blueprint.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -713,6 +716,7 @@ async fn smoke_cancel_marks_run_failed() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: blueprint.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -812,6 +816,7 @@ async fn smoke_audit_log() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: blueprint.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -1158,6 +1163,7 @@ async fn smoke_sandbox_approval_allow_once() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: id,
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -1230,6 +1236,7 @@ async fn smoke_sandbox_approval_deny_once_fails_run() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: id,
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -1412,6 +1419,7 @@ async fn smoke_abstract_node_expands_and_runs() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: blueprint.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -1613,6 +1621,7 @@ async fn smoke_addon_install_call_uninstall() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: blueprint.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -2076,6 +2085,7 @@ res -> check
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: compiled.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -2350,6 +2360,7 @@ async fn smoke_function_library_save_execute() {
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: root.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -2493,6 +2504,7 @@ sum -> check
         .execute_blueprint(ExecuteBlueprintRequest {
             workspace_path: ws_path.clone(),
             blueprint_id: compiled.id.clone(),
+            blueprint_json: String::new(),
         })
         .await
         .unwrap()
@@ -2889,6 +2901,609 @@ async fn smoke_config_layers_do_not_leak_into_each_other() {
     assert_eq!(parsed["llm"]["default_model"], "global-only");
     assert!(parsed["llm"]["models"]["global-only"].is_object());
     assert!(parsed["llm"]["models"]["ws-only"].is_null());
+
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// Exercises the Round 13 tools end to end through the DSL compiler, the way a
+/// user would assemble them: Start -> Grep -> ReadFile -> EditFile -> Validator
+/// -> End. The validator confirms the edited content, so the run also proves
+/// the transaction-logged write is visible to a downstream node.
+#[tokio::test]
+async fn smoke_search_and_edit_pipeline() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    client
+        .write_file(WriteFileRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+            content: "first line
+todo: finish this
+last line
+".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let source = r#"blueprint "EditPipeline"
+entry start: Start
+srch: Grep(pattern = "todo", path = "notes.txt")
+read: ReadFile(path = "notes.txt", line_numbers = false)
+edit: EditFile(path = "notes.txt", edits = [{"old_string": "todo: finish this", "new_string": "done"}])
+check: Validator(Actual <- read.Result, Expected = "done")
+stop: End
+start -> srch
+srch -> read
+read -> edit
+edit -> check
+check -> stop
+"#;
+    let compiled = client
+        .compile_dsl(CompileDslRequest {
+            source: source.to_string(),
+        })
+        .await
+        .expect("the Round 13 tool kinds must compile from DSL")
+        .into_inner();
+    // Start, Grep, ReadFile, EditFile, Validator, End.
+    assert_eq!(compiled.nodes.len(), 6, "unexpected node count");
+
+    client
+        .save_blueprint(SaveBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint: Some(compiled.clone()),
+        })
+        .await
+        .unwrap();
+
+    let mut stream = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: compiled.id.clone(),
+            blueprint_json: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await.unwrap() {
+        events.push(event);
+    }
+    assert!(
+        !events.iter().any(|e| e.kind == "error"),
+        "pipeline reported an error event: {events:?}"
+    );
+
+    // The edit landed on disk through the transaction-logged path.
+    let content = std::fs::read_to_string(workspace.join("notes.txt")).unwrap();
+    assert!(content.contains("done"), "edit was not applied: {content}");
+    assert!(!content.contains("todo"), "old text survived: {content}");
+
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// Compiles a plan through the draft compiler and executes it end to end.
+///
+/// This is the Plan-and-Execute path an LLM drives: `compile_draft` builds the
+/// graph deterministically, and the result must be a blueprint the interpreter
+/// can actually run — not merely a valid JSON document. The plan reads a file,
+/// greps it and edits it, so a mistranslated pin or edge fails the run instead
+/// of passing silently.
+#[tokio::test]
+async fn smoke_draft_blueprint_runs_end_to_end() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    client
+        .write_file(WriteFileRequest {
+            workspace_path: ws_path.clone(),
+            path: "draft.txt".to_string(),
+            content: "alpha
+beta
+".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // The draft an LLM would author: compact, no ids, no coordinates, no
+    // separate edge objects.
+    let draft = r#"{
+      "name": "DraftPipeline",
+      "nodes": {
+        "start":  { "kind": "Start" },
+        "read":   { "kind": "ReadFile", "path": "draft.txt", "line_numbers": false },
+        "search": { "kind": "Grep", "pattern": "beta", "path": "draft.txt" },
+        "edit":   { "kind": "EditFile", "path": "draft.txt",
+                    "edits": [{ "old_string": "beta", "new_string": "gamma" }] }
+      },
+      "flow": ["start -> read -> search -> edit"]
+    }"#;
+    let blueprint = metteur_shared::dsl::compile_draft(draft).expect("the draft must compile");
+
+    // Execution takes the compiled JSON directly (`blueprint_json`), which is
+    // also how the GUI runs an unsaved canvas.
+    let mut stream = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: String::new(),
+            blueprint_json: serde_json::to_string(&blueprint).unwrap(),
+        })
+        .await
+        .expect("the drafted blueprint must be executable")
+        .into_inner();
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await.unwrap() {
+        events.push(event);
+    }
+    assert!(
+        !events.iter().any(|event| event.kind == "error"),
+        "the drafted plan reported an error: {events:?}"
+    );
+
+    // The edit landed, which proves the pins and edges were wired correctly.
+    let content = std::fs::read_to_string(workspace.join("draft.txt")).unwrap();
+    assert!(content.contains("gamma"), "the edit did not apply: {content}");
+    assert!(!content.contains("beta"), "the old text survived: {content}");
+
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// Runs a blueprint that starts a background command and waits for it.
+///
+/// This is the blueprint half of the job feature: a `StartCommand` node hands
+/// its `job_id` to a `WaitJob` node over a data edge, so the pipeline blocks on
+/// the process without the model polling.
+#[tokio::test]
+async fn smoke_blueprint_start_and_wait_job() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    let source = r#"blueprint "JobPipeline"
+entry start: Start
+run: StartCommand(command = "echo job-ran")
+wait: WaitJob(job_id <- run.Result, timeout_secs = 30)
+stop: End
+start -> run
+run -> wait
+wait -> stop
+"#;
+    let blueprint = metteur_shared::dsl::compile(source)
+        .expect("the job tools must compile from the DSL");
+    // Start, StartCommand, WaitJob, End.
+    assert_eq!(blueprint.nodes.len(), 4, "unexpected node count");
+
+    let mut stream = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint_id: String::new(),
+            blueprint_json: serde_json::to_string(&blueprint).unwrap(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await.unwrap() {
+        events.push(event);
+    }
+    assert!(
+        !events.iter().any(|e| e.kind == "error"),
+        "job pipeline reported an error: {events:#?}"
+    );
+    // The engine announced the command, and the wait consumed its output.
+    assert!(
+        events.iter().any(|event| event.kind == "job"),
+        "no job event was emitted: {events:#?}"
+    );
+    // The WaitJob node reports the command's exit code and its output. The
+    // value travels as a JSON string inside the node_data detail, so it is
+    // parsed rather than matched textually.
+    let waited = events
+        .iter()
+        .filter(|event| event.kind == "node_data")
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.detail_json).ok())
+        .filter_map(|detail| detail["outputs"].as_object().cloned())
+        .flat_map(|outputs| outputs.into_values().collect::<Vec<_>>())
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .find(|parsed| parsed.get("exit_code").is_some())
+        .unwrap_or_else(|| panic!("no job result reached the pipeline: {events:#?}"));
+    assert_eq!(waited["exit_code"], 0, "{waited}");
+    assert!(
+        waited["output"].as_str().unwrap_or_default().contains("job-ran"),
+        "{waited}"
+    );
+
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// Runs a blueprint that starts one background command and waits for it.
+async fn run_one_job_blueprint(client: &mut DaemonClient<Channel>, ws_path: &str) {
+    let source = r#"blueprint "JobRpc"
+entry start: Start
+run: StartCommand(command = "echo rpc-job-output")
+wait: WaitJob(job_id <- run.Result)
+stop: End
+start -> run
+run -> wait
+wait -> stop
+"#;
+    let blueprint =
+        metteur_shared::dsl::compile(source).expect("the job tools must compile from the DSL");
+    let mut stream = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path.to_string(),
+            blueprint_id: String::new(),
+            blueprint_json: serde_json::to_string(&blueprint).unwrap(),
+        })
+        .await
+        .expect("blueprint run")
+        .into_inner();
+    while let Some(event) = stream.message().await.unwrap() {
+        assert_ne!(event.kind, "error", "run reported an error: {event:?}");
+    }
+}
+
+/// `ListJobs` reports what the runs of a workspace started, with output.
+#[tokio::test]
+async fn smoke_list_jobs_reports_background_commands() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    let empty = client
+        .list_jobs(ListJobsRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(empty.jobs.is_empty(), "a fresh workspace has no jobs");
+
+    run_one_job_blueprint(&mut client, &ws_path).await;
+
+    let listed = client
+        .list_jobs(ListJobsRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.jobs.len(), 1, "the run's job must be listed: {listed:?}");
+    let job = &listed.jobs[0];
+    assert_eq!(job.state, "exited", "{job:?}");
+    assert_eq!(job.exit_code, 0, "{job:?}");
+    assert!(job.command.contains("rpc-job-output"), "{job:?}");
+    assert!(job.tail.contains("rpc-job-output"), "tail: {:?}", job.tail);
+    assert!(job.output_bytes > 0);
+    assert!(!job.run_id.is_empty(), "the owning run is reported");
+    assert!(job.finished_at > 0);
+
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// `WatchJobs` streams start / output / finish notices for a workspace.
+#[tokio::test]
+async fn smoke_watch_jobs_streams_lifecycle_and_output() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    // Subscribe first: notices are broadcast while the command runs.
+    let mut jobs_client = client.clone();
+    let mut stream = jobs_client
+        .watch_jobs(WatchJobsRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .expect("watch_jobs")
+        .into_inner();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    run_one_job_blueprint(&mut client, &ws_path).await;
+
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(10), stream.message()).await {
+            Ok(Ok(Some(event))) => {
+                let finished = event.kind == "finished";
+                seen.push(event);
+                if finished {
+                    break;
+                }
+            }
+            Ok(Ok(None)) | Err(_) => break,
+            Ok(Err(err)) => panic!("job stream failed: {err}"),
+        }
+    }
+    let kinds: Vec<&str> = seen.iter().map(|event| event.kind.as_str()).collect();
+    assert!(kinds.contains(&"started"), "no start notice: {kinds:?}");
+    assert!(kinds.contains(&"finished"), "no finish notice: {kinds:?}");
+    let output: String = seen.iter().map(|event| event.chunk.clone()).collect();
+    assert!(output.contains("rpc-job-output"), "streamed output: {output:?}");
+    let finished = seen.last().expect("a finished notice");
+    assert_eq!(finished.state, "exited");
+    assert_eq!(finished.exit_code, 0);
+
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// The job RPCs reject a workspace that is not open.
+#[tokio::test]
+async fn smoke_job_rpcs_require_an_open_workspace() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    let err = client
+        .list_jobs(ListJobsRequest {
+            workspace_path: ws_path.clone(),
+        })
+        .await
+        .expect_err("a closed workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    let mut jobs_client = client.clone();
+    let err = jobs_client
+        .watch_jobs(WatchJobsRequest {
+            workspace_path: ws_path,
+        })
+        .await
+        .expect_err("a closed workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
+/// A user can terminate a background command started by a running execution.
+#[tokio::test]
+async fn smoke_kill_job_terminates_a_running_command() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    // A run that starts a long command and stays alive long enough to kill it.
+    let source = r#"blueprint "KillMe"
+entry start: Start
+run: StartCommand(command = "ping -n 30 127.0.0.1 > nul")
+pause: Delay(Ms = 4000)
+stop: End
+start -> run
+run -> pause
+pause -> stop
+"#;
+    let blueprint =
+        metteur_shared::dsl::compile(source).expect("the job tools must compile from the DSL");
+    let mut run_client = client.clone();
+    let run_ws_path = ws_path.clone();
+    let run = tokio::spawn(async move {
+        let mut stream = run_client
+            .execute_blueprint(ExecuteBlueprintRequest {
+                workspace_path: run_ws_path.clone(),
+                blueprint_id: String::new(),
+                blueprint_json: serde_json::to_string(&blueprint).unwrap(),
+            })
+            .await
+            .expect("blueprint run")
+            .into_inner();
+        while let Some(event) = stream.message().await.unwrap() {
+            assert_ne!(event.kind, "error", "run reported an error: {event:?}");
+        }
+    });
+
+    // Wait for the command to appear, then kill it from "the UI".
+    let mut job_id = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listed = client
+            .list_jobs(ListJobsRequest {
+                workspace_path: ws_path.clone(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        if let Some(job) = listed.jobs.iter().find(|job| job.state == "running") {
+            job_id = job.id.clone();
+            break;
+        }
+    }
+    assert!(!job_id.is_empty(), "the run must start a command");
+
+    let response = client
+        .kill_job(KillJobRequest {
+            workspace_path: ws_path.clone(),
+            job_id: job_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.killed, "a running job must accept the kill");
+    assert_eq!(response.state, "running", "the state flips asynchronously");
+
+    // The command ends without waiting for its own 30-second runtime.
+    let mut killed = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listed = client
+            .list_jobs(ListJobsRequest {
+                workspace_path: ws_path.clone(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        if listed.jobs.iter().any(|job| job.id == job_id && job.state == "killed") {
+            killed = true;
+            break;
+        }
+    }
+    assert!(killed, "the killed job must end in the killed state");
+
+    // Killing a job that already finished is a no-op, not an error.
+    let again = client
+        .kill_job(KillJobRequest {
+            workspace_path: ws_path.clone(),
+            job_id: job_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!again.killed);
+    assert_eq!(again.state, "killed");
+
+    // Unknown ids are reported, not silently ignored.
+    let err = client
+        .kill_job(KillJobRequest {
+            workspace_path: ws_path.clone(),
+            job_id: "deadbeef".to_string(),
+        })
+        .await
+        .expect_err("unknown jobs must be rejected");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    run.await.unwrap();
+    client
+        .close_workspace(CloseWorkspaceRequest {
+            path: ws_path,
+        })
+        .await
+        .unwrap();
+}
+
+/// A file's content as recorded by a snapshot, for side-by-side diffs.
+#[tokio::test]
+async fn smoke_get_file_at_snapshot_returns_the_recorded_content() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    // Before any snapshot there is no baseline to compare against.
+    let none = client
+        .get_file_at_snapshot(GetFileAtSnapshotRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+            snapshot_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!none.found);
+    assert!(none.snapshot_id.is_empty());
+
+    std::fs::write(workspace.join("notes.txt"), "first version
+").unwrap();
+    let snapshot = client
+        .create_snapshot(CreateSnapshotRequest {
+            workspace_path: ws_path.clone(),
+            description: "before edit".to_string(),
+            alias: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    std::fs::write(workspace.join("notes.txt"), "second version
+").unwrap();
+
+    let recorded = client
+        .get_file_at_snapshot(GetFileAtSnapshotRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+            snapshot_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(recorded.found);
+    assert_eq!(recorded.content, "first version
+");
+    assert_eq!(recorded.snapshot_id, snapshot.id);
+
+    // An explicit snapshot id is honoured, and an untracked file reports
+    // "added since" instead of an error.
+    let explicit = client
+        .get_file_at_snapshot(GetFileAtSnapshotRequest {
+            workspace_path: ws_path.clone(),
+            path: "notes.txt".to_string(),
+            snapshot_id: snapshot.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(explicit.found);
+    let missing = client
+        .get_file_at_snapshot(GetFileAtSnapshotRequest {
+            workspace_path: ws_path.clone(),
+            path: "brand-new.txt".to_string(),
+            snapshot_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!missing.found);
+    assert_eq!(missing.snapshot_id, snapshot.id);
 
     client
         .close_workspace(CloseWorkspaceRequest {

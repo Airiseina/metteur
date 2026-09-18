@@ -13,6 +13,7 @@ use crate::chat::session::{
 use crate::execution::context::ExecutionContext;
 use crate::execution::interrupt::{Interrupt, InterruptBus, InterruptPriority};
 use crate::execution::react::{ReactEvent, run_react_streaming};
+use crate::llm::StreamDelta;
 use crate::observability::audit::AuditWriter;
 use crate::sandbox::approval::ApprovalBroker;
 
@@ -103,8 +104,9 @@ impl DaemonService {
         let llm_factory = self.state.llm_factory.clone();
         let root = ws.root().to_path_buf();
         let ws_config = ws.config.clone();
-        let lsp = ws.lsp_manager.clone();
+        let lsp = ws.lsp();
         let version_manager = ws.version_manager.clone();
+        let jobs = ws.jobs();
         let user = subject.clone();
         let message = req.message.clone();
         let history_json = req.history_json.clone();
@@ -122,6 +124,7 @@ impl DaemonService {
             ctx.workspace_db = Some(ws_db.clone());
             ctx.lsp = lsp;
             ctx.version_manager = Some(version_manager);
+            ctx.jobs = Arc::clone(&jobs);
             if let Some(global_db) = state.global_db.clone() {
                 ctx.global_db = Some(global_db);
             }
@@ -129,13 +132,32 @@ impl DaemonService {
 
             // Compose the context: persisted sessions are authoritative (they
             // retain tool results); new sessions start from history_json.
+            let harness = crate::harness::HarnessPrompt::fragments(&ctx).await;
             let mut context = match existing {
-                Some(record) => record.context,
+                Some(record) => {
+                    let mut restored = record.context;
+                    // Rebuild the harness sections from the current environment;
+                    // identical text leaves the stored prefix untouched.
+                    crate::harness::HarnessPrompt::refresh(&mut restored, harness);
+                    // Addons installed since the session started still apply
+                    // to the next turn; already-injected copies are kept as-is.
+                    for fragment in &addon_fragments {
+                        let present = restored
+                            .system_fragments
+                            .iter()
+                            .any(|f| f.scope == fragment.scope && f.content == fragment.content);
+                        if !present {
+                            restored.system_fragments.push(fragment.clone());
+                        }
+                    }
+                    restored
+                }
                 None => {
                     let mut fresh = ContextManager {
-                        system_fragments: addon_fragments,
+                        system_fragments: harness,
                         ..ContextManager::default()
                     };
+                    fresh.system_fragments.extend(addon_fragments);
                     history_messages(&history_json, &mut fresh.messages);
                     fresh
                 }
@@ -156,13 +178,85 @@ impl DaemonService {
                 .to_string(),
             }));
 
-            let opts = chat_options(&options_json);
+            // Tool-side engine events are bridged onto the chat stream so a
+            // `TodoWrite` (or a retry/fallback notice from the loop) reaches
+            // the UI during the turn instead of only when it ends.
+            let (engine_tx, mut engine_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::execution::ExecutionEvent>();
+            ctx.events = Some(engine_tx);
+            let bridge_tx = event_tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = engine_rx.recv().await {
+                    let payload = match event {
+                        crate::execution::ExecutionEvent::Todos {
+                            node_id,
+                            todos,
+                        } => ChatEvent {
+                            kind: "todos".to_string(),
+                            content: String::new(),
+                            detail_json: serde_json::json!({
+                                "node_id": node_id.to_string(),
+                                "todos": todos,
+                            })
+                            .to_string(),
+                        },
+                        crate::execution::ExecutionEvent::Message {
+                            message,
+                            ..
+                        } => ChatEvent {
+                            kind: "notice".to_string(),
+                            content: message,
+                            detail_json: String::new(),
+                        },
+                        crate::execution::ExecutionEvent::Job {
+                            job_id,
+                            state,
+                            summary,
+                            ..
+                        } => ChatEvent {
+                            kind: "job".to_string(),
+                            content: summary,
+                            detail_json: serde_json::json!({
+                                "job_id": job_id,
+                                "state": state,
+                            })
+                            .to_string(),
+                        },
+                        _ => continue,
+                    };
+                    if bridge_tx.send(Ok(payload)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mut opts = chat_options(&options_json);
+            if let Some(config) = &ctx.config {
+                let llm = config.read().await.llm.clone();
+                opts.tool_error_limit = llm.tool_error_limit;
+                opts.repeat_call_limit = llm.repeat_call_limit;
+                opts.max_tool_results = llm.max_tool_results as usize;
+                opts.parallel_read_tools = llm.parallel_read_tools;
+                opts.stale_result_placeholders = llm.stale_result_placeholders;
+                opts.dedup_reads = llm.dedup_reads;
+                opts.max_tool_result_bytes = llm.max_tool_result_bytes as usize;
+                opts.anonymize_thinking = llm.anonymize_thinking;
+                if opts.compress_after_messages.is_none() && llm.compress_at_ratio > 0.0 {
+                    // Long chats must not grow until the provider rejects the
+                    // request; the ReAct loop also enforces the token budget.
+                    opts.compress_after_messages = Some(40);
+                }
+            }
             let delta_tx = event_tx.clone();
             let delta_cancel = cancel_flag.clone();
-            let mut on_delta = move |text: String| {
+            let mut on_delta = move |delta: StreamDelta| {
+                let (kind, content) = match delta {
+                    StreamDelta::Text(text) => ("assistant_delta", text),
+                    StreamDelta::Reasoning(text) => ("reasoning_delta", text),
+                };
                 let event = ChatEvent {
-                    kind: "assistant_delta".to_string(),
-                    content: text,
+                    kind: kind.to_string(),
+                    content,
                     detail_json: String::new(),
                 };
                 if delta_tx.send(Ok(event)).is_err() {
@@ -174,10 +268,15 @@ impl DaemonService {
                 let event = match ev {
                     ReactEvent::Assistant {
                         text,
+                        reasoning,
                     } => ChatEvent {
                         kind: "assistant".to_string(),
                         content: text,
-                        detail_json: String::new(),
+                        detail_json: if reasoning.is_empty() {
+                            String::new()
+                        } else {
+                            serde_json::json!({ "reasoning": reasoning }).to_string()
+                        },
                     },
                     ReactEvent::Tool {
                         name,
@@ -196,6 +295,9 @@ impl DaemonService {
             let outcome =
                 run_react_streaming(&mut ctx, context, &opts, Some(&mut on_delta), &mut on_event)
                     .await;
+            // The task list lives on the execution context; carry it into the
+            // persisted record so a resumed session remembers the plan.
+            let todos = ctx.todos.clone();
             let (terminal, saved) = match outcome {
                 Ok(outcome) => {
                     // Text-only answers are not appended by the loop; persist
@@ -212,6 +314,7 @@ impl DaemonService {
                         turns: old_turns + 1,
                         title,
                         context: saved_context,
+                        todos: todos.clone(),
                     };
                     let terminal = Ok(ChatEvent {
                         kind: "done".to_string(),
@@ -221,6 +324,9 @@ impl DaemonService {
                                 "input_tokens": outcome.usage.input_tokens,
                                 "output_tokens": outcome.usage.output_tokens,
                                 "total_tokens": outcome.usage.total_tokens,
+                                "cached_input_tokens": outcome.usage.cached_input_tokens,
+                                "cache_write_input_tokens":
+                                    outcome.usage.cache_write_input_tokens,
                             },
                             "session_id": session_id.to_string(),
                         })
@@ -238,6 +344,7 @@ impl DaemonService {
                         turns: old_turns,
                         title,
                         context: partial,
+                        todos: todos.clone(),
                     };
                     let terminal = Ok(ChatEvent {
                         kind: "error".to_string(),
@@ -254,6 +361,11 @@ impl DaemonService {
                 tracing::warn!("[chat] failed to persist session: {err}");
             }
             let _ = event_tx.send(terminal);
+            // Background commands belong to the turn that started them.
+            let killed = jobs.kill_owned_by(run_id);
+            if killed > 0 {
+                tracing::info!("chat {run_id} ended; terminated {killed} background job(s)");
+            }
             state.chats.write().await.remove(&ws_key);
         });
 
@@ -339,6 +451,7 @@ impl DaemonService {
             session_id: record.session_id.to_string(),
             created_at: record.created_at as i64,
             history_json: context_history_json(&record.context),
+            todos_json: serde_json::to_string(&record.todos).unwrap_or_else(|_| "[]".to_string()),
         }))
     }
 

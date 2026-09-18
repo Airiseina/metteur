@@ -16,8 +16,8 @@ pub use error::{SharedError, SharedResult};
 pub use fs::{FileSystem, Metadata, NativeFileSystem};
 pub use llm::{
     ContentBlock, ContextManager, ContextSnapshot, EvictionPolicy, GenerationParams, Message,
-    ReasoningEffort, Role, SystemFragment, ToolCall, ToolDefinition, ToolResult,
-    ToolResultLifetime, Usage,
+    ReasoningEffort, Role, SystemFragment, TodoItem, TodoStatus, ToolCall, ToolDefinition,
+    ToolResult, ToolResultLifetime, Usage,
 };
 pub use model::{
     Blueprint, DataType, Edge, EdgeId, Node, NodeId, NodeType, Pin, PinId, PinType, Value,

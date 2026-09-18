@@ -75,6 +75,9 @@ pub struct ExecutionCheckpoint {
     /// Active ForEach loops, innermost last.
     #[serde(default)]
     pub foreach_stack: Vec<super::context::ForEachState>,
+    /// The agent's task list at this point in the run.
+    #[serde(default)]
+    pub todos: Vec<metteur_shared::llm::TodoItem>,
     /// The agent execution tree of the run.
     #[serde(default)]
     pub exec_tree: super::tree::ExecTree,
@@ -105,6 +108,7 @@ impl ExecutionCheckpoint {
             validation_marks: HashMap::new(),
             variables: vec![HashMap::new()],
             foreach_stack: Vec::new(),
+            todos: Vec::new(),
             exec_tree: super::tree::ExecTree::new(),
             frame_trees: Vec::new(),
             error: None,

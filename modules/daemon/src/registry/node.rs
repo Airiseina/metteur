@@ -51,6 +51,7 @@ impl NodeRegistry {
         registry.register(Box::new(n::ToolExecutor));
         registry.register(Box::new(n::ValidatorExecutor));
         registry.register(Box::new(n::JudgeExecutor));
+        registry.register(Box::new(n::LspCheckExecutor));
         registry.register(Box::new(n::AbstractExecutor));
         registry.register(Box::new(n::CallFunctionExecutor));
         registry.register(Box::new(n::FunctionEntryExecutor));
@@ -102,6 +103,7 @@ impl NodeRegistry {
         registry.register(Box::new(n::ContextMergeExecutor));
         registry.register(Box::new(n::ContextFilterExecutor));
         registry.register(Box::new(n::ContextTrimExecutor));
+        registry.register(Box::new(n::ContextReleaseExecutor));
         registry.register(Box::new(n::ContextToTextExecutor));
         // Flow support.
         registry.register(Box::new(n::DelayExecutor));
@@ -124,7 +126,9 @@ impl NodeRegistry {
 
     /// Returns all registered node kinds.
     pub fn kinds(&self) -> Vec<String> {
-        self.executors.keys().cloned().collect()
+        let mut kinds: Vec<String> = self.executors.keys().cloned().collect();
+        kinds.sort();
+        kinds
     }
 }
 

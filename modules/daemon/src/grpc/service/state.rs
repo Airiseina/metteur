@@ -135,18 +135,46 @@ impl AppState {
         self
     }
 
-    /// Attaches the MCP host and starts its config-driven resync task.
+    /// Attaches the MCP host.
+    ///
+    /// Syncing is explicit: [`AppState::resync_mcp`] is called from every place
+    /// that can change the server set (global or workspace config writes, and
+    /// workspace open/close). Driving it from the global `config_tx` alone
+    /// would drop workspace-declared servers, and running both paths would
+    /// race on the same host.
     pub fn with_mcp_host(mut self, host: Arc<crate::integration::mcp::McpHost>) -> Self {
-        let mut config_rx = self.config_tx.subscribe();
-        let task_host = host.clone();
-        tokio::spawn(async move {
-            while config_rx.changed().await.is_ok() {
-                let mcp = config_rx.borrow().mcp.clone();
-                task_host.sync(&mcp).await;
-            }
-        });
         self.mcp_host = Some(host);
         self
+    }
+
+    /// Builds the effective MCP configuration for the whole daemon.
+    ///
+    /// Server processes are daemon-wide, so the effective set is the union of
+    /// the global servers and those declared by every open workspace, with a
+    /// workspace definition winning on an alias collision (the more specific
+    /// scope). Section-level timeouts keep the global value, since one host
+    /// carries only one.
+    pub async fn merged_mcp_config(&self) -> metteur_shared::config::McpConfig {
+        let global = self.global_config.read().await.mcp.clone();
+        let mut workspace_configs = Vec::new();
+        for ws in self.workspaces.list().await {
+            workspace_configs.push(ws.config.read().await.mcp.clone());
+        }
+        crate::integration::mcp::merge_servers(&global, &workspace_configs)
+    }
+
+    /// Pushes the effective MCP configuration to the host.
+    ///
+    /// Called after anything that can change the server set: a global or
+    /// workspace config write, and workspace open/close. `McpHost::sync` is
+    /// incremental (unchanged servers keep their connection, vanished ones are
+    /// shut down), so this stays cheap when nothing relevant changed.
+    pub async fn resync_mcp(&self) {
+        let Some(host) = &self.mcp_host else {
+            return;
+        };
+        let config = self.merged_mcp_config().await;
+        host.sync(&config).await;
     }
 
     /// Attaches the addon host and loads the global addon directory.
@@ -211,6 +239,26 @@ fn proto_event(event: crate::execution::ExecutionEvent) -> ExecutionEvent {
             message: request_id,
             detail_json: detail,
         },
+        E::Todos {
+            node_id,
+            todos,
+        } => ExecutionEvent {
+            node_id: node_id.to_string(),
+            kind: "todos".to_string(),
+            message: String::new(),
+            detail_json: serde_json::json!({ "todos": todos }).to_string(),
+        },
+        E::Job {
+            node_id,
+            job_id,
+            state,
+            summary,
+        } => ExecutionEvent {
+            node_id: node_id.to_string(),
+            kind: "job".to_string(),
+            message: summary.clone(),
+            detail_json: serde_json::json!({ "job_id": job_id, "state": state }).to_string(),
+        },
         E::ContextUsage {
             node_id,
             regions,
@@ -269,6 +317,7 @@ pub(crate) async fn spawn_execution(
     lsp: Option<Arc<crate::integration::lsp::LspManager>>,
     addon_fragments: Vec<metteur_shared::llm::SystemFragment>,
     version_manager: Option<Arc<crate::storage::versioning::VersionManager>>,
+    jobs: Arc<crate::execution::JobManager>,
 ) -> Result<tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>, Status> {
     let broker = Arc::new(ApprovalBroker::new());
     {
@@ -292,6 +341,7 @@ pub(crate) async fn spawn_execution(
 
     let global_db = state.global_db.clone();
     let run_metrics = state.metrics.clone();
+    let run_id = sink.run_id();
     let shared_blueprint: crate::execution::SharedBlueprint =
         Arc::new(parking_lot::RwLock::new(blueprint));
     let (event_tx, mut event_rx) =
@@ -320,6 +370,8 @@ pub(crate) async fn spawn_execution(
         if let Some(version_manager) = version_manager {
             interpreter = interpreter.with_version_manager(version_manager);
         }
+        let run_jobs = Arc::clone(&jobs);
+        interpreter = interpreter.with_jobs(jobs);
         let result = match resume {
             Some(checkpoint) => {
                 interpreter
@@ -344,6 +396,12 @@ pub(crate) async fn spawn_execution(
             }
         };
         drop(interpreter);
+        // Background commands belong to the run that started them: whatever the
+        // outcome, they must not outlive it as orphan processes.
+        let killed = run_jobs.kill_owned_by(run_id);
+        if killed > 0 {
+            tracing::info!("run {run_id} ended; terminated {killed} background job(s)");
+        }
         let _ = err_tx.send(result.map(|_| ()));
     });
     drop(event_tx);

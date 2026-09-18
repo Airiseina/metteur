@@ -43,7 +43,14 @@ impl NodeExecutor for ToolExecutor {
 
         let mut args_obj = serde_json::Map::new();
         for pin in node.pins.iter().filter(|p| p.pin_type == metteur_shared::PinType::DataInput) {
-            let value = inputs.get(&pin.id).cloned().unwrap_or(Value::Null);
+            // Fall back to the node's inline constant for the pin when nothing
+            // is wired: DSL literals and canvas-authored values live in
+            // `node.data`, and a tool argument supplied that way must reach
+            // the tool just like a connected edge would.
+            let value = match inputs.get(&pin.id) {
+                Some(value) => value.clone(),
+                None => super::input_or_data(node, inputs, &pin.name).unwrap_or(Value::Null),
+            };
             args_obj.insert(pin.name.clone(), value_to_json(&value));
         }
         let args = vec![Value::Json(serde_json::Value::Object(args_obj.clone()))];

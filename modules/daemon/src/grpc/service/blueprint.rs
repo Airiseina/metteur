@@ -83,15 +83,29 @@ impl DaemonService {
             .get(&ws_path)
             .await
             .ok_or_else(|| Status::not_found("workspace not open"))?;
-        let id = uuid::Uuid::parse_str(&req.blueprint_id)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let data = ws
-            .db
-            .get(crate::storage::persistence::cf::BLUEPRINTS, id.as_bytes())
-            .map_err(to_status)?
-            .ok_or_else(|| Status::not_found("blueprint not found"))?;
-        let blueprint: metteur_shared::Blueprint =
-            serde_json::from_slice(&data).map_err(|e| Status::internal(e.to_string()))?;
+        // The client may hand over the blueprint it is editing. That copy wins
+        // over the stored one: mirroring happens on save, and a failed mirror
+        // must not make Run execute a stale graph. The stored copy is refreshed
+        // so later loads (and the CLI) agree with what actually ran.
+        let blueprint: metteur_shared::Blueprint = if req.blueprint_json.trim().is_empty() {
+            let id = uuid::Uuid::parse_str(&req.blueprint_id)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let data = ws
+                .db
+                .get(crate::storage::persistence::cf::BLUEPRINTS, id.as_bytes())
+                .map_err(to_status)?
+                .ok_or_else(|| Status::not_found("blueprint not found"))?;
+            serde_json::from_slice(&data).map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            let parsed: metteur_shared::Blueprint = serde_json::from_str(&req.blueprint_json)
+                .map_err(|e| Status::invalid_argument(format!("invalid blueprint: {e}")))?;
+            let encoded =
+                serde_json::to_vec(&parsed).map_err(|e| Status::internal(e.to_string()))?;
+            ws.db
+                .put(crate::storage::persistence::cf::BLUEPRINTS, parsed.id.as_bytes(), &encoded)
+                .map_err(to_status)?;
+            parsed
+        };
         let run_id = uuid::Uuid::new_v4();
         let ws_key = ws.root().to_path_buf();
 
@@ -119,9 +133,10 @@ impl DaemonService {
             interrupt_bus,
             pause_flag,
             cancel_flag,
-            ws.lsp_manager.clone(),
+            ws.lsp(),
             addon_fragments,
             Some(ws.version_manager.clone()),
+            ws.jobs(),
         )
         .await?;
 

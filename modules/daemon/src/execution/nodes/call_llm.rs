@@ -35,16 +35,22 @@ impl NodeExecutor for CallLlmExecutor {
         ctx: &mut ExecutionContext,
     ) -> DaemonResult<HashMap<PinId, Value>> {
         // Resolve the input context, cloning it for isolation.
-        let mut system = vec![SystemFragment {
-            priority: 0,
-            scope: "call_llm".to_string(),
-            content: node
-                .data
-                .get("system")
-                .and_then(|v| v.as_str())
-                .unwrap_or("You are a helpful assistant.")
-                .to_string(),
-        }];
+        let mut system = crate::harness::HarnessPrompt::fragments(ctx).await;
+        // The node's own instruction is task-level: it renders after the
+        // harness sections, close to the conversation.
+        if let Some(text) = node
+            .data
+            .get("system")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            system.push(SystemFragment {
+                priority: crate::harness::sections::PRIORITY_NODE,
+                scope: "call_llm.node".to_string(),
+                content: text.to_string(),
+            });
+        }
         // Addon prompt fragments follow the node-provided ones.
         system.extend(ctx.addon_fragments.iter().cloned());
         let context = match input_context(node, inputs) {
@@ -55,7 +61,7 @@ impl NodeExecutor for CallLlmExecutor {
             ),
         };
 
-        let opts = react_options_from_node(node);
+        let opts = react_options_from_node(node, ctx).await;
         let outcome = run_react(ctx, context, &opts).await?;
         ctx.tree_ops.push(crate::execution::TreeOp::AddTokens(outcome.usage.total_tokens));
 
@@ -84,8 +90,13 @@ fn input_context(node: &Node, inputs: &HashMap<PinId, Value>) -> Option<ContextM
     inputs.get(&pin.id).and_then(|v| v.as_context()).cloned()
 }
 
-/// Builds ReAct options from the node's data keys.
-fn react_options_from_node(node: &Node) -> ReactOptions {
+/// Builds ReAct options from the node's data keys, over the workspace
+/// defaults for the knobs the node does not set itself.
+async fn react_options_from_node(node: &Node, ctx: &ExecutionContext) -> ReactOptions {
+    let defaults = match &ctx.config {
+        Some(config) => config.read().await.llm.clone(),
+        None => Default::default(),
+    };
     let data = &node.data;
     let string = |key: &str| {
         data.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string())
@@ -128,6 +139,14 @@ fn react_options_from_node(node: &Node) -> ReactOptions {
         label: "CallLLM".to_string(),
         mock_text: string("mock_text"),
         mock_delay_ms: data.get("mock_delay_ms").and_then(|v| v.as_u64()),
+        tool_error_limit: defaults.tool_error_limit,
+        repeat_call_limit: defaults.repeat_call_limit,
+        max_tool_results: defaults.max_tool_results as usize,
+        parallel_read_tools: defaults.parallel_read_tools,
+        stale_result_placeholders: defaults.stale_result_placeholders,
+        dedup_reads: defaults.dedup_reads,
+        max_tool_result_bytes: defaults.max_tool_result_bytes as usize,
+        anonymize_thinking: defaults.anonymize_thinking,
     }
 }
 

@@ -10,15 +10,18 @@ use metteur_proto::proto::{
     DecompileDslResponse, DeleteChatSessionRequest, DeleteFunctionRequest, Empty,
     ExecuteBlueprintRequest, ExecutionEvent, ExecutionList, ExecutionTree, FileHistory, FileInfo,
     FileList, FunctionList, GetChatSessionRequest, GetChatSessionResponse, GetConfigRequest,
-    GetExecutionTreeRequest, GetExecutionUsageRequest, GetFileHistoryRequest, InstallAddonRequest,
-    InterruptRequest, ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest,
-    ListExecutionsRequest, ListFilesRequest, ListFunctionsRequest, ListSnapshotsRequest,
+    GetExecutionTreeRequest, GetExecutionUsageRequest, GetFileAtSnapshotRequest,
+    GetFileAtSnapshotResponse, GetFileHistoryRequest, InstallAddonRequest, InterruptRequest,
+    JobEvent, JobList, KillJobRequest, KillJobResponse, ListAddonsRequest, ListAuditLogRequest,
+    ListChatSessionsRequest, ListExecutionsRequest, ListFilesRequest, ListFunctionsRequest,
+    ListJobsRequest, ListSnapshotsRequest,
     LoadBlueprintRequest, LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList,
     OpenWorkspaceRequest, PauseRequest, ReadFileRequest, ReadFileResponse, RemoveFileRequest,
     RenameFileRequest, ResumeRequest, RevealInExplorerRequest, RollbackRequest,
     SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse, SendChatRequest,
     SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest,
-    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchWorkspaceRequest,
+    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchJobsRequest,
+    WatchWorkspaceRequest,
     WorkspaceInfo, WorkspaceList, WriteFileRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -386,6 +389,38 @@ impl Daemon for ForwardService {
         Ok(Response::new(pump_stream(response)))
     }
 
+    // Background commands (jobs).
+    async fn list_jobs(
+        &self,
+        request: Request<ListJobsRequest>,
+    ) -> Result<Response<JobList>, Status> {
+        self.client.clone().list_jobs(request).await
+    }
+
+    async fn kill_job(
+        &self,
+        request: Request<KillJobRequest>,
+    ) -> Result<Response<KillJobResponse>, Status> {
+        self.client.clone().kill_job(request).await
+    }
+
+    async fn get_file_at_snapshot(
+        &self,
+        request: Request<GetFileAtSnapshotRequest>,
+    ) -> Result<Response<GetFileAtSnapshotResponse>, Status> {
+        self.client.clone().get_file_at_snapshot(request).await
+    }
+
+    type WatchJobsStream = ReceiverStream<Result<JobEvent, Status>>;
+
+    async fn watch_jobs(
+        &self,
+        request: Request<WatchJobsRequest>,
+    ) -> Result<Response<Self::WatchJobsStream>, Status> {
+        let response = self.client.clone().watch_jobs(request).await?;
+        Ok(Response::new(pump_stream(response)))
+    }
+
     // ReAct chat.
     type SendChatStream = ReceiverStream<Result<ChatEvent, Status>>;
 
@@ -687,6 +722,31 @@ mod tests {
         ) -> Result<Response<Empty>, Status> {
             Err(Status::unimplemented("rename_file"))
         }
+        type WatchJobsStream = ReceiverStream<Result<JobEvent, Status>>;
+        async fn list_jobs(
+            &self,
+            _: Request<ListJobsRequest>,
+        ) -> Result<Response<JobList>, Status> {
+            Err(Status::unimplemented("list_jobs"))
+        }
+        async fn watch_jobs(
+            &self,
+            _: Request<WatchJobsRequest>,
+        ) -> Result<Response<Self::WatchJobsStream>, Status> {
+            Err(Status::unimplemented("watch_jobs"))
+        }
+        async fn kill_job(
+            &self,
+            _: Request<KillJobRequest>,
+        ) -> Result<Response<KillJobResponse>, Status> {
+            Err(Status::unimplemented("kill_job"))
+        }
+        async fn get_file_at_snapshot(
+            &self,
+            _: Request<GetFileAtSnapshotRequest>,
+        ) -> Result<Response<GetFileAtSnapshotResponse>, Status> {
+            Err(Status::unimplemented("get_file_at_snapshot"))
+        }
         type WatchWorkspaceStream = ReceiverStream<Result<WatchEvent, Status>>;
         async fn watch_workspace(
             &self,
@@ -766,6 +826,7 @@ mod tests {
                 session_id: req.session_id,
                 created_at: 1,
                 history_json: "[]".to_string(),
+                todos_json: "[]".to_string(),
             }))
         }
         async fn delete_chat_session(

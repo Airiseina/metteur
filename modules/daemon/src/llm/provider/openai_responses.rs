@@ -2,14 +2,16 @@
 
 use async_trait::async_trait;
 use metteur_shared::llm::{
-    ContentBlock, ContextManager, GenerationParams, Message, ReasoningEffort, Role, ToolCall,
+    ContextManager, GenerationParams, Message, ReasoningEffort, Role, ToolCall,
     ToolDefinition, Usage,
 };
 use serde_json::{Value as Json, json};
 
 use crate::error::{DaemonError, DaemonResult};
 
-use super::super::client::{LlmClient, LlmProviderConfig, LlmResponse, http_error};
+use super::super::client::{
+    LlmClient, LlmProviderConfig, LlmResponse, StreamDelta, ThinkingBlock, http_error,
+};
 
 /// A client for the OpenAI Responses API.
 pub struct OpenAiResponsesClient {
@@ -45,12 +47,8 @@ impl OpenAiResponsesClient {
             "input": build_input(ctx),
         });
         if !ctx.system_fragments.is_empty() {
-            let system = ctx
-                .system_fragments
-                .iter()
-                .map(|f| f.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            // Canonical fragment order keeps the cached prefix stable.
+            let system = ctx.system_text();
             body["instructions"] = json!(system);
         }
         if let Some(v) = merged.temperature {
@@ -86,7 +84,10 @@ impl OpenAiResponsesClient {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| http_error("openai responses response", e))?;
         if !status.is_success() {
-            return Err(DaemonError::Llm(format!("openai responses returned {status}: {text}")));
+            return Err(DaemonError::LlmStatus {
+                status: status.as_u16(),
+                message: text,
+            });
         }
         let parsed: Json = serde_json::from_str(&text)
             .map_err(|e| DaemonError::Llm(format!("invalid openai responses response: {e}")))?;
@@ -119,7 +120,7 @@ impl LlmClient for OpenAiResponsesClient {
         ctx: &ContextManager,
         params: &GenerationParams,
         tools: &[ToolDefinition],
-        on_delta: &mut (dyn FnMut(String) + Send),
+        on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> DaemonResult<LlmResponse> {
         let mut body = self.build_body(ctx, params, tools);
         body["stream"] = json!(true);
@@ -136,7 +137,10 @@ impl LlmClient for OpenAiResponsesClient {
         if !status.is_success() {
             let text =
                 resp.text().await.map_err(|e| http_error("openai responses stream response", e))?;
-            return Err(DaemonError::Llm(format!("openai responses returned {status}: {text}")));
+            return Err(DaemonError::LlmStatus {
+                status: status.as_u16(),
+                message: text,
+            });
         }
 
         let mut stream = resp.bytes_stream();
@@ -168,7 +172,7 @@ impl LlmClient for OpenAiResponsesClient {
                     Some("response.output_text.delta") => {
                         if let Some(text) = event.get("delta").and_then(|v| v.as_str()) {
                             text_out.push_str(text);
-                            on_delta(text.to_string());
+                            on_delta(StreamDelta::Text(text.to_string()));
                         }
                     }
                     Some("response.output_item.added") => {
@@ -189,6 +193,11 @@ impl LlmClient for OpenAiResponsesClient {
                                 name,
                                 arguments: Json::Null,
                             });
+                        }
+                    }
+                    Some("response.reasoning_summary_text.delta") => {
+                        if let Some(text) = event.get("delta").and_then(|v| v.as_str()) {
+                            on_delta(StreamDelta::Reasoning(text.to_string()));
                         }
                     }
                     Some("response.function_call_arguments.delta") => {
@@ -215,6 +224,7 @@ impl LlmClient for OpenAiResponsesClient {
         }
         Ok(LlmResponse {
             text: text_out,
+            thinking: Vec::new(),
             tool_calls,
             usage,
         })
@@ -231,14 +241,9 @@ fn build_input(ctx: &ContextManager) -> Vec<Json> {
 /// An assistant message with tool calls expands into the function call items
 /// followed by the message item that references them.
 fn message_to_items(msg: &Message) -> Vec<Json> {
-    let content = msg
-        .content
-        .iter()
-        .map(|b| match b {
-            ContentBlock::Text(t) => t.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    // Reasoning items are not replayed: the Responses API uses opaque
+    // encrypted content for that, which this client does not store.
+    let content = msg.text_content();
     match msg.role {
         Role::Tool => vec![json!({
             "type": "function_call_output",
@@ -312,6 +317,7 @@ fn reasoning_str(effort: ReasoningEffort) -> &'static str {
 /// Parses a Responses response into a shared response.
 fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
     let mut text = String::new();
+    let mut thinking: Vec<ThinkingBlock> = Vec::new();
     let mut tool_calls = Vec::new();
     if let Some(output) = parsed.get("output").and_then(|o| o.as_array()) {
         for item in output {
@@ -323,6 +329,26 @@ fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
                                 text.push_str(t);
                             }
                         }
+                    }
+                }
+                // Reasoning arrives as a summary of its text parts; it is
+                // shown and audited but never replayed.
+                Some("reasoning") => {
+                    let mut parts = Vec::new();
+                    if let Some(summary) = item.get("summary").and_then(|s| s.as_array()) {
+                        for part in summary {
+                            if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                                parts.push(t.to_string());
+                            }
+                        }
+                    }
+                    let joined = parts.join("
+");
+                    if !joined.trim().is_empty() {
+                        thinking.push(ThinkingBlock {
+                            text: joined,
+                            ..ThinkingBlock::default()
+                        });
                     }
                 }
                 Some("function_call") => {
@@ -346,22 +372,30 @@ fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
     let usage = parsed.get("usage").map(parse_usage).unwrap_or_default();
     Ok(LlmResponse {
         text,
+        thinking,
         tool_calls,
         usage,
     })
 }
 
 /// Parses a Responses usage object.
+///
+/// Like the Chat API, `input_tokens` already contains cache-served tokens;
+/// `input_tokens_details.cached_tokens` is the breakdown.
 fn parse_usage(u: &Json) -> Usage {
     let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let reasoning =
         u.pointer("/output_tokens_details/reasoning_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cached =
+        u.pointer("/input_tokens_details/cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     Usage {
         input_tokens: input,
         output_tokens: output,
         reasoning_tokens: reasoning,
         total_tokens: input + output,
+        cached_input_tokens: cached,
+        cache_write_input_tokens: 0,
     }
 }
 
@@ -398,10 +432,12 @@ mod tests {
             "hello",
         );
         ctx.mix_in_tool_result(metteur_shared::llm::ToolResult {
+            tool: "ReadFile".to_string(),
             tool_call_id: "call_1".to_string(),
             content: "42".to_string(),
             timestamp: 0,
             lifetime: metteur_shared::llm::ToolResultLifetime::OneShot,
+            paths: Vec::new(),
         });
         let input = build_input(&ctx);
         assert_eq!(input.len(), 2);
@@ -421,6 +457,33 @@ mod tests {
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "ReadFile");
         assert_eq!(resp.usage.input_tokens, 10);
+    }
+
+    #[test]
+    fn usage_exposes_cached_tokens() {
+        let usage = parse_usage(&json!({
+            "input_tokens": 500,
+            "output_tokens": 10,
+            "input_tokens_details": { "cached_tokens": 400 }
+        }));
+        assert_eq!(usage.input_tokens, 500);
+        assert_eq!(usage.cached_input_tokens, 400);
+        assert_eq!(usage.uncached_input_tokens(), 100);
+    }
+
+    #[test]
+    fn reasoning_summaries_are_collected() {
+        let json = json!({
+            "output": [
+                { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thought" }] },
+                { "type": "message", "content": [{ "type": "output_text", "text": "answer" }] }
+            ],
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        });
+        let resp = parse_response(&json).unwrap();
+        assert_eq!(resp.text, "answer");
+        assert_eq!(resp.thinking.len(), 1);
+        assert_eq!(resp.thinking[0].text, "thought");
     }
 
     #[test]

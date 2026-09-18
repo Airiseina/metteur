@@ -9,7 +9,9 @@ use serde_json::{Value as Json, json};
 
 use crate::error::{DaemonError, DaemonResult};
 
-use super::super::client::{LlmClient, LlmProviderConfig, LlmResponse, http_error};
+use super::super::client::{
+    LlmClient, LlmProviderConfig, LlmResponse, StreamDelta, ThinkingBlock, http_error,
+};
 
 /// A client for the OpenAI Chat Completions API.
 pub struct OpenAiChatClient {
@@ -65,7 +67,10 @@ impl OpenAiChatClient {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| http_error("openai chat response", e))?;
         if !status.is_success() {
-            return Err(DaemonError::Llm(format!("openai chat returned {status}: {text}")));
+            return Err(DaemonError::LlmStatus {
+                status: status.as_u16(),
+                message: text,
+            });
         }
         let parsed: Json = serde_json::from_str(&text)
             .map_err(|e| DaemonError::Llm(format!("invalid openai chat response: {e}")))?;
@@ -98,7 +103,7 @@ impl LlmClient for OpenAiChatClient {
         ctx: &ContextManager,
         params: &GenerationParams,
         tools: &[ToolDefinition],
-        on_delta: &mut (dyn FnMut(String) + Send),
+        on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> DaemonResult<LlmResponse> {
         let mut body = self.build_body(ctx, params, tools);
         body["stream"] = json!(true);
@@ -117,11 +122,15 @@ impl LlmClient for OpenAiChatClient {
         if !status.is_success() {
             let text =
                 resp.text().await.map_err(|e| http_error("openai chat stream response", e))?;
-            return Err(DaemonError::Llm(format!("openai chat returned {status}: {text}")));
+            return Err(DaemonError::LlmStatus {
+                status: status.as_u16(),
+                message: text,
+            });
         }
 
         let mut stream = resp.bytes_stream();
         let mut text_out = String::new();
+        let mut reasoning_out = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage = Usage::default();
         let mut buf = String::new();
@@ -150,7 +159,15 @@ impl LlmClient for OpenAiChatClient {
                     && let Some(s) = delta.as_str()
                 {
                     text_out.push_str(s);
-                    on_delta(s.to_string());
+                    on_delta(StreamDelta::Text(s.to_string()));
+                }
+                // Reasoning models (DeepSeek et al.) stream their chain of
+                // thought separately; keep it for display, never replay it.
+                if let Some(delta) = chunk_json.pointer("/choices/0/delta/reasoning_content")
+                    && let Some(s) = delta.as_str()
+                {
+                    reasoning_out.push_str(s);
+                    on_delta(StreamDelta::Reasoning(s.to_string()));
                 }
                 if let Some(calls) = chunk_json.pointer("/choices/0/delta/tool_calls")
                     && let Some(arr) = calls.as_array()
@@ -166,6 +183,7 @@ impl LlmClient for OpenAiChatClient {
         }
         Ok(LlmResponse {
             text: text_out,
+            thinking: thinking_of(&reasoning_out),
             tool_calls,
             usage,
         })
@@ -175,14 +193,11 @@ impl LlmClient for OpenAiChatClient {
 /// Converts a context into the OpenAI messages array.
 fn build_messages(ctx: &ContextManager) -> Vec<Json> {
     let mut messages: Vec<Json> = Vec::new();
-    // System fragments become a single system message.
+    // System fragments become a single system message. The order is canonical
+    // (priority, then scope/content) so the prefix stays byte-identical across
+    // requests, which the provider's automatic cache depends on.
     if !ctx.system_fragments.is_empty() {
-        let system = ctx
-            .system_fragments
-            .iter()
-            .map(|f| f.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let system = ctx.system_text();
         messages.push(json!({ "role": "system", "content": system }));
     }
     for msg in &ctx.messages {
@@ -192,12 +207,16 @@ fn build_messages(ctx: &ContextManager) -> Vec<Json> {
 }
 
 /// Converts a shared message into an OpenAI message object.
+///
+/// Thinking blocks are dropped: this API family (including DeepSeek) rejects a
+/// replayed `reasoning_content`, and the stored context keeps it for audit.
 fn message_to_json(msg: &Message) -> Json {
     let content = msg
         .content
         .iter()
-        .map(|b| match b {
-            ContentBlock::Text(t) => t.clone(),
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.as_str()),
+            _ => None,
         })
         .collect::<Vec<_>>()
         .join("");
@@ -297,6 +316,8 @@ fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
         .ok_or_else(|| DaemonError::Llm("missing choices[0].message".to_string()))?;
 
     let text = choice.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let reasoning =
+        choice.get("reasoning_content").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     let mut tool_calls = Vec::new();
     if let Some(calls) = choice.get("tool_calls").and_then(|c| c.as_array()) {
@@ -320,12 +341,28 @@ fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
     let usage = parsed.get("usage").map(parse_usage).unwrap_or_default();
     Ok(LlmResponse {
         text,
+        thinking: thinking_of(&reasoning),
         tool_calls,
         usage,
     })
 }
 
+/// Wraps non-empty reasoning text into a thinking block.
+fn thinking_of(reasoning: &str) -> Vec<ThinkingBlock> {
+    if reasoning.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![ThinkingBlock {
+            text: reasoning.to_string(),
+            ..ThinkingBlock::default()
+        }]
+    }
+}
+
 /// Parses an OpenAI usage object.
+///
+/// `prompt_tokens` already includes the cache-served part, so it maps directly
+/// onto `input_tokens`; `cached_tokens` is the cache-hit breakdown.
 fn parse_usage(u: &Json) -> Usage {
     let input = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let output = u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -333,11 +370,17 @@ fn parse_usage(u: &Json) -> Usage {
         .pointer("/completion_tokens_details/reasoning_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let cached = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Usage {
         input_tokens: input,
         output_tokens: output,
         reasoning_tokens: reasoning,
         total_tokens: input + output,
+        cached_input_tokens: cached,
+        cache_write_input_tokens: 0,
     }
 }
 
@@ -403,10 +446,12 @@ mod tests {
             "hello",
         );
         ctx.mix_in_tool_result(metteur_shared::llm::ToolResult {
+            tool: "ReadFile".to_string(),
             tool_call_id: "call_1".to_string(),
             content: "42".to_string(),
             timestamp: 0,
             lifetime: metteur_shared::llm::ToolResultLifetime::OneShot,
+            paths: Vec::new(),
         });
         let messages = build_messages(&ctx);
         assert_eq!(messages.len(), 3);
@@ -435,6 +480,53 @@ mod tests {
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "ReadFile");
         assert_eq!(resp.usage.input_tokens, 10);
+    }
+
+    #[test]
+    fn usage_exposes_cached_tokens() {
+        let usage = parse_usage(&json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_tokens_details": { "cached_tokens": 800 }
+        }));
+        // `prompt_tokens` already contains the cached part on this API.
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.cached_input_tokens, 800);
+        assert_eq!(usage.uncached_input_tokens(), 200);
+        assert_eq!(usage.cache_write_input_tokens, 0);
+    }
+
+    #[test]
+    fn reasoning_content_is_collected_but_not_replayed() {
+        let json = json!({
+            "choices": [{
+                "message": {
+                    "content": "the answer",
+                    "reasoning_content": "the reasoning"
+                }
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        });
+        let resp = parse_response(&json).unwrap();
+        assert_eq!(resp.text, "the answer");
+        assert_eq!(resp.thinking.len(), 1);
+        assert_eq!(resp.thinking[0].text, "the reasoning");
+
+        // A stored thinking block must not be sent back to this API family.
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "the reasoning".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text("the answer".to_string()),
+            ],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        };
+        let json = message_to_json(&message);
+        assert_eq!(json["content"], "the answer");
     }
 
     #[test]

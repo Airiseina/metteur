@@ -25,9 +25,10 @@ pub struct ToolCall {
 }
 
 /// How long a tool result should be retained in the context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolResultLifetime {
     /// The result is only useful for the immediate next step.
+    #[default]
     OneShot,
     /// The result remains relevant across multiple steps.
     Persistent,
@@ -38,10 +39,20 @@ pub enum ToolResultLifetime {
 pub struct ToolResult {
     /// The id of the tool call this result corresponds to.
     pub tool_call_id: String,
+    /// The name of the tool that produced the result.
+    ///
+    /// Recorded so results can be released or audited by tool; empty for
+    /// records persisted before the field existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool: String,
     /// The textual result content.
     pub content: String,
     /// Creation time in milliseconds since the Unix epoch.
     pub timestamp: u64,
     /// How long the result should be retained.
     pub lifetime: ToolResultLifetime,
+    /// Workspace-relative paths this result reads, used to expire it when the
+    /// file changes afterwards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<std::path::PathBuf>,
 }

@@ -38,6 +38,22 @@ pub enum DaemonError {
     #[error("llm error: {0}")]
     Llm(String),
 
+    /// The provider answered with a non-success HTTP status.
+    ///
+    /// Kept structured so retry logic can classify the failure (429 and 5xx
+    /// are retryable, most 4xx are not) instead of parsing a message.
+    #[error("llm returned {status}: {message}")]
+    LlmStatus {
+        /// The HTTP status code.
+        status: u16,
+        /// The provider's error body.
+        message: String,
+    },
+
+    /// The request never produced a response (connect, DNS, timeout).
+    #[error("llm transport error: {0}")]
+    LlmTransport(String),
+
     /// Execution was interrupted by the user.
     #[error("execution interrupted: {0}")]
     Interrupted(String),
@@ -91,6 +107,18 @@ impl DaemonError {
             DaemonError::PermissionDenied(_) => tonic::Code::PermissionDenied,
             DaemonError::Locked(_) => tonic::Code::FailedPrecondition,
             DaemonError::Execution(_) | DaemonError::Llm(_) => tonic::Code::Internal,
+            DaemonError::LlmStatus {
+                status,
+                ..
+            } => match status {
+                401 => tonic::Code::Unauthenticated,
+                403 => tonic::Code::PermissionDenied,
+                404 => tonic::Code::NotFound,
+                408 | 504 => tonic::Code::DeadlineExceeded,
+                429 => tonic::Code::ResourceExhausted,
+                _ => tonic::Code::Unavailable,
+            },
+            DaemonError::LlmTransport(_) => tonic::Code::Unavailable,
             DaemonError::Interrupted(_) => tonic::Code::Aborted,
             DaemonError::Paused => tonic::Code::Aborted,
             DaemonError::Sandbox(_) => tonic::Code::FailedPrecondition,

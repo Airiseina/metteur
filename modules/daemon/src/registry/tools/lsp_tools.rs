@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use metteur_shared::Value;
+use metteur_shared::{ToolResultLifetime, Value};
 
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
@@ -182,6 +182,14 @@ impl Tool for CheckDiagnostics {
         })
     }
 
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn lifetime(&self) -> ToolResultLifetime {
+        ToolResultLifetime::Persistent
+    }
+
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {
         let empty = || Value::Json(serde_json::json!({"diagnostics": []}));
         // No LSP manager (integration disabled) behaves like "no diagnostics".
@@ -203,8 +211,13 @@ impl Tool for CheckDiagnostics {
         let uri = manager.to_file_uri(&absolute);
         let content = fs.read(&path)?;
 
+        // An explicit request always syncs: the caller asked for the current
+        // state, so merging it away would defeat the point.
         let since = client.current_epoch();
-        client.sync_document(&uri, &String::from_utf8_lossy(&content), &extension).await?;
+        let decision = manager.should_sync(&uri, true).await;
+        if decision == crate::integration::lsp::debounce::SyncDecision::SyncNow {
+            client.sync_document(&uri, &String::from_utf8_lossy(&content), &extension).await?;
+        }
         client.wait_diagnostics(since, timeout_ms).await;
         let mut items = Vec::new();
         for entry in client.diagnostics_snapshot().await {
@@ -240,6 +253,14 @@ impl Tool for GetHover {
             },
             "required": ["path", "line", "character"]
         })
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn lifetime(&self) -> ToolResultLifetime {
+        ToolResultLifetime::Persistent
     }
 
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {
@@ -282,6 +303,14 @@ impl Tool for FindDefinition {
             },
             "required": ["path", "line", "character"]
         })
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn lifetime(&self) -> ToolResultLifetime {
+        ToolResultLifetime::Persistent
     }
 
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {

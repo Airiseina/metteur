@@ -13,19 +13,32 @@ use std::sync::Arc;
 use metteur_shared::Usage;
 use metteur_shared::config::{LlmConfig, LlmModelConfig};
 use metteur_shared::llm::{
-    ContentBlock, ContextManager, GenerationParams, Message, ReasoningEffort, Role, SystemFragment,
-    ToolCall, ToolDefinition, ToolResult, ToolResultLifetime,
+    ContentBlock, ContextManager, GenerationParams, Message, ReasoningEffort, Role, ToolCall,
+    ToolDefinition, ToolResult,
 };
 
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
 use crate::execution::interrupt::InterruptBus;
 use crate::execution::interrupt::InterruptPriority;
-use crate::llm::{LlmClient, LlmProviderConfig, LlmResponse, MockClient, MockStep, ProviderKind};
+use crate::execution::jobs::{JobManager, JobSnapshot};
+use crate::llm::{
+    LlmClient, LlmProviderConfig, LlmResponse, MockClient, MockStep, ProviderKind, StreamDelta,
+};
 use crate::observability::anon::Anonymizer;
+use crate::registry::tools::result::truncate_result;
 
 /// The default maximum number of ReAct iterations.
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
+
+/// Consecutive tool failures tolerated before a run is aborted.
+pub const DEFAULT_TOOL_ERROR_LIMIT: u32 = 5;
+
+/// Identical tool invocations tolerated before a run is aborted.
+pub const DEFAULT_REPEAT_CALL_LIMIT: u32 = 3;
+
+/// Tool results retained in the context before eviction kicks in.
+pub const DEFAULT_MAX_TOOL_RESULTS: usize = 24;
 
 /// Options controlling a single ReAct run.
 #[derive(Debug, Clone)]
@@ -66,6 +79,23 @@ pub struct ReactOptions {
     pub mock_text: Option<String>,
     /// Artificial delay before each mock response.
     pub mock_delay_ms: Option<u64>,
+    /// Consecutive tool failures tolerated before giving up (`0` disables).
+    pub tool_error_limit: u32,
+    /// Identical `(name, arguments)` invocations tolerated (`0` disables).
+    pub repeat_call_limit: u32,
+    /// Tool results retained in the context (`0` disables eviction).
+    pub max_tool_results: usize,
+    /// Run read-only tool calls of one turn concurrently.
+    pub parallel_read_tools: bool,
+    /// Replace results of files modified afterwards with a stale marker.
+    pub stale_result_placeholders: bool,
+    /// Replace an earlier full read of the same paths when a file is read
+    /// again.
+    pub dedup_reads: bool,
+    /// Fallback byte cap for tool results that declare none of their own.
+    pub max_tool_result_bytes: usize,
+    /// Anonymize thinking text; drops its signature (see `outbound_context`).
+    pub anonymize_thinking: bool,
 }
 
 impl Default for ReactOptions {
@@ -89,6 +119,14 @@ impl Default for ReactOptions {
             label: String::new(),
             mock_text: None,
             mock_delay_ms: None,
+            tool_error_limit: DEFAULT_TOOL_ERROR_LIMIT,
+            repeat_call_limit: DEFAULT_REPEAT_CALL_LIMIT,
+            max_tool_results: DEFAULT_MAX_TOOL_RESULTS,
+            parallel_read_tools: true,
+            stale_result_placeholders: true,
+            dedup_reads: true,
+            max_tool_result_bytes: crate::registry::tool::DEFAULT_TOOL_RESULT_BYTES,
+            anonymize_thinking: false,
         }
     }
 }
@@ -98,11 +136,16 @@ impl Default for ReactOptions {
 pub enum ReactEvent {
     /// A completed assistant turn that answered without tool calls.
     Assistant {
+        /// The answer text.
         text: String,
+        /// The reasoning that preceded the answer, when the model produced any.
+        reasoning: String,
     },
     /// A tool invocation with its (still anonymized) textual result.
     Tool {
+        /// The tool name.
         name: String,
+        /// The tool's textual result.
         content: String,
     },
 }
@@ -133,14 +176,14 @@ pub async fn run_react(
 /// Streaming variant of [`run_react`] used by the ReAct chat RPC.
 ///
 /// Emits one [`ReactEvent`] per assistant turn and tool call. When `on_delta`
-/// is provided the LLM call is streamed and each text delta is forwarded,
-/// allowing token-level output. On error the partially mutated context is
-/// returned so callers can persist an interrupted session.
+/// is provided the LLM call is streamed and each delta is forwarded, allowing
+/// token-level output. On error the partially mutated context is returned so
+/// callers can persist an interrupted session.
 pub async fn run_react_streaming(
     ctx: &mut ExecutionContext,
     context: ContextManager,
     opts: &ReactOptions,
-    on_delta: Option<&mut (dyn FnMut(String) + Send)>,
+    on_delta: Option<&mut (dyn FnMut(StreamDelta) + Send)>,
     on_event: &mut (dyn FnMut(ReactEvent) + Send),
 ) -> Result<ReactOutcome, (DaemonError, ContextManager)> {
     react_loop(ctx, context, opts, on_delta, Some(on_event)).await
@@ -153,13 +196,30 @@ pub async fn run_react_streaming(
 /// partial session; [`run_react`] discards it to keep the plain signature.
 async fn react_loop(
     ctx: &mut ExecutionContext,
+    context: ContextManager,
+    opts: &ReactOptions,
+    on_delta: Option<&mut (dyn FnMut(StreamDelta) + Send)>,
+    on_event: Option<&mut (dyn FnMut(ReactEvent) + Send)>,
+) -> Result<ReactOutcome, (DaemonError, ContextManager)> {
+    // Tools that only queue context operations need to know a loop will drain
+    // them; the mark is cleared on the way out so a following blueprint node
+    // does not inherit it.
+    ctx.in_react_loop = true;
+    let outcome = react_loop_inner(ctx, context, opts, on_delta, on_event).await;
+    ctx.in_react_loop = false;
+    outcome
+}
+
+/// The body of [`react_loop`], without the loop-lifetime bookkeeping.
+async fn react_loop_inner(
+    ctx: &mut ExecutionContext,
     mut context: ContextManager,
     opts: &ReactOptions,
-    mut on_delta: Option<&mut (dyn FnMut(String) + Send)>,
+    mut on_delta: Option<&mut (dyn FnMut(StreamDelta) + Send)>,
     mut on_event: Option<&mut (dyn FnMut(ReactEvent) + Send)>,
 ) -> Result<ReactOutcome, (DaemonError, ContextManager)> {
     let llm_defaults = llm_default_config(ctx).await;
-    let client = match build_client(ctx, opts, &llm_defaults) {
+    let mut client = match build_client(ctx, opts, &llm_defaults) {
         Ok(client) => client,
         Err(err) => return Err((err, context)),
     };
@@ -167,11 +227,31 @@ async fn react_loop(
     let tools = tool_definitions(&ctx.registry, opts.allowed_tools.as_ref());
     let anonymizer = build_anonymizer(ctx).await;
     let billing = billing_config(ctx).await;
+    let policy = crate::llm::RetryPolicy::from_config(&llm_defaults);
 
     let mut total_usage = Usage::default();
     let mut final_text = String::new();
+    // Consecutive tool failures and repeated `(name, arguments)` signatures.
+    let mut consecutive_errors: u32 = 0;
+    let mut repeat_counts: HashMap<String, u32> = HashMap::new();
+    let mut notices = BudgetNotices::new(&llm_defaults, opts.max_iterations);
+    let execution = execution_config(ctx).await;
+    let auto_wake = execution.job_auto_wake;
+    // Job ids whose completion this conversation already reported.
+    let mut announced: Vec<String> = Vec::new();
+    if !ctx.todos.is_empty() {
+        // A resumed run keeps its plan: the tool result that produced it may
+        // have been evicted, and the model must not lose track of the work.
+        let rendered = metteur_shared::llm::render_todos(&ctx.todos);
+        context.push_message(Message::text(
+            Role::User,
+            format!("[engine] current plan:\n{rendered}"),
+        ));
+    }
 
-    for _ in 0..opts.max_iterations {
+    let budget = opts.max_iterations + notices.wrap_up_turns();
+    for iteration in 0..budget {
+        let wrapping = notices.is_wrap_up(iteration, opts.max_iterations);
         // Honor cancellation and pause requests.
         if ctx.cancel_requested.load(std::sync::atomic::Ordering::SeqCst) {
             return Err((DaemonError::Interrupted("cancelled by user".to_string()), context));
@@ -194,10 +274,17 @@ async fn react_loop(
             }
         }
 
+        // Tell the model how much room is left before it runs out of turns;
+        // a wrap-up turn runs without tools so it has to answer.
+        if let Some(notice) = notices.notice_for(iteration, opts.max_iterations) {
+            context.push_message(Message::text(Role::User, notice));
+        }
+        let turn_tools: &[ToolDefinition] = if wrapping { &[] } else { &tools };
+
         // Compress long contexts before issuing the next request.
         compress_if_needed(
             ctx,
-            client.as_ref(),
+            &client,
             &mut context,
             &params,
             opts,
@@ -208,30 +295,26 @@ async fn react_loop(
 
         // Race the LLM call against an emergency interrupt so that an
         // emergency message can abort an in-flight request. The streamed
-        // variant forwards text deltas through `on_delta` as they arrive.
+        // variant forwards deltas through `on_delta` as they arrive.
         //
         // The model sees an anonymized shadow copy; stored context keeps the
         // original text so chat restore and audit remain readable.
         let response = {
-            let outbound = outbound_context(&context, &anonymizer).await;
-            let raced = match &mut on_delta {
-                Some(delta) => {
-                    race_stream(
-                        client.as_ref(),
-                        &outbound,
-                        &params,
-                        &tools,
-                        &ctx.interrupts,
-                        &mut **delta,
-                    )
-                    .await
-                }
-                None => {
-                    race_complete(client.as_ref(), &outbound, &params, &tools, &ctx.interrupts)
-                        .await
-                }
-            };
-            match raced {
+            let outbound =
+                outbound_context(&context, &anonymizer, opts.anonymize_thinking).await;
+            match request_with_retry(
+                ctx,
+                &mut client,
+                opts,
+                &llm_defaults,
+                &policy,
+                &outbound,
+                &params,
+                turn_tools,
+                &mut on_delta,
+            )
+            .await
+            {
                 Ok(LlmRace::Response(resp)) => resp,
                 Ok(LlmRace::Emergency(msg)) => {
                     context.push_message(Message::text(Role::User, msg));
@@ -248,46 +331,192 @@ async fn react_loop(
         total_usage.total_tokens += response.usage.total_tokens;
 
         if response.tool_calls.is_empty() {
-            final_text = response.text;
+            // The model wants to finish. If it still has background jobs, park
+            // here and let the engine wake it when one completes — that is what
+            // removes the "sleep a little and check again" pattern.
+            if auto_wake {
+                let finished = match collect_finished_job(ctx, &mut announced).await {
+                    Ok(finished) => finished,
+                    Err(err) => return Err((err, context)),
+                };
+                if let Some(finished) = finished {
+                    // Keep the model's "I will wait" text, then hand it the
+                    // result of the job that just ended.
+                    if !response.text.is_empty() {
+                        context
+                            .push_message(Message::text(Role::Assistant, response.text.clone()));
+                    }
+                    // The `job` execution event already tells the UI; the
+                    // notice here is what the model reads.
+                    let notice = job_notice(&finished, &ctx.jobs, execution.job_tail_lines as usize);
+                    notify_job(ctx, &finished);
+                    context.push_message(Message::text(Role::User, notice));
+                    continue;
+                }
+            }
+            final_text = response.text.clone();
             if let Some(cb) = on_event.as_deref_mut() {
                 cb(ReactEvent::Assistant {
                     text: final_text.clone(),
+                    reasoning: thinking_text(&response),
                 });
             }
             break;
         }
+        if wrapping {
+            // The wrap-up turn had no tools to call; asking for one means the
+            // model cannot produce an answer and the run must fail loudly.
+            return Err((
+                DaemonError::Execution(
+                    "iteration budget exhausted without a final answer".to_string(),
+                ),
+                context,
+            ));
+        }
 
-        // Record the assistant message with its tool calls.
+        // Record the assistant turn with its tool calls.
+        //
+        // Any text the model produced belongs to *this* message: a separate
+        // assistant message before the results would break the provider
+        // contract (every tool result must directly follow the call that
+        // requested it), and the next request would be rejected.
         context.push_message(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text(response.text.clone())],
+            content: thinking_blocks(&response),
             tool_calls: response.tool_calls.clone(),
             tool_call_id: None,
         });
 
         // Execute each tool call and mix the results into the context.
-        for call in &response.tool_calls {
-            let result =
-                match invoke_tool(ctx, call, opts.allowed_tools.as_ref(), &anonymizer).await {
-                    Ok(result) => result,
-                    Err(err) => return Err((err, context)),
-                };
+        //
+        // Failures are reported to the model as result text instead of
+        // aborting the run: a single rejected edit must not discard a whole
+        // turn. Consecutive failures are bounded so a broken loop cannot spin.
+        //
+        // The conversation is offered to tools that ask for it (SubAgent
+        // inheritance); the clone happens only for those calls.
+        if response.tool_calls.iter().any(|call| call.name == "SpawnSubAgent") {
+            ctx.parent_context = Some(context.clone());
+        }
+        let outcomes = execute_tool_calls(ctx, &response.tool_calls, opts, &anonymizer).await;
+        ctx.parent_context = None;
+
+        // Context operations requested by the calls above apply to the results
+        // already in the context, never to the batch that requested them.
+        apply_context_ops(ctx, &mut context);
+
+        for (call, outcome) in response.tool_calls.iter().zip(outcomes) {
+            let ToolOutcome {
+                result: outcome,
+                read_paths: paths,
+                full_reads,
+            } = outcome;
+            // A complete read replaces an earlier complete read of the same
+            // paths: keeping both would duplicate content the model already
+            // has. The check runs per call so the paths are attributed to the
+            // tool that produced them.
+            if opts.dedup_reads && !full_reads.is_empty() {
+                let superseded = context.supersede_reads(&call.name, &full_reads);
+                if superseded > 0 {
+                    ctx.audit("context.supersede", serde_json::json!({ "results": superseded }));
+                }
+            }
+            let text = match outcome {
+                Ok(text) => {
+                    consecutive_errors = 0;
+                    text
+                }
+                Err(err) => {
+                    consecutive_errors += 1;
+                    let message = format!("Error: {err}");
+                    ctx.audit(
+                        "tool.error",
+                        serde_json::json!({ "name": call.name, "error": err.to_string() }),
+                    );
+                    if opts.tool_error_limit > 0 && consecutive_errors >= opts.tool_error_limit {
+                        return Err((
+                            DaemonError::Execution(format!(
+                                "{consecutive_errors} consecutive tool failures; last error from \
+                                 '{}': {err}",
+                                call.name
+                            )),
+                            context,
+                        ));
+                    }
+                    message
+                }
+            };
+
+            // Warn the model when it repeats an identical call, and abort once
+            // the repetition budget is exhausted.
+            let signature = format!("{}\u{0}{}", call.name, call.arguments);
+            let repeats = repeat_counts.entry(signature).or_insert(0);
+            *repeats += 1;
+            let repeat_note = if *repeats > 1 {
+                if opts.repeat_call_limit > 0 && *repeats > opts.repeat_call_limit {
+                    return Err((
+                        DaemonError::Execution(format!(
+                            "tool '{}' called {} times with identical arguments",
+                            call.name, repeats
+                        )),
+                        context,
+                    ));
+                }
+                format!(
+                    "\n[note: identical {} call #{}; re-read the result or change the approach]",
+                    call.name, repeats
+                )
+            } else {
+                String::new()
+            };
+
+            let capped = truncate_result(&text, tool_result_budget(ctx, &call.name, opts).await);
+            let displayed = format!("{capped}{repeat_note}");
+
             if let Some(cb) = on_event.as_deref_mut() {
                 cb(ReactEvent::Tool {
                     name: call.name.clone(),
-                    content: result.clone(),
+                    content: displayed.clone(),
                 });
             }
-            let mixed = anonymizer.anonymize(&result).await;
+            let mixed = anonymizer.anonymize(&displayed).await;
+            // Retention comes from the tool's own declaration so reads survive
+            // across turns while one-shot mutations can be evicted early.
+            let lifetime =
+                ctx.registry.tool(&call.name).map(|t| t.lifetime()).unwrap_or_default();
             context.mix_in_tool_result(ToolResult {
                 tool_call_id: call.id.clone(),
+                tool: call.name.clone(),
                 content: mixed,
                 timestamp: now_millis(),
-                lifetime: ToolResultLifetime::OneShot,
+                lifetime,
+                paths,
             });
+        }
+
+        // Expire reads of files mutated by the calls above (see
+        // `ContextManager::invalidate_paths`), then bound the retained results.
+        let mutated = drain_mutated_paths(ctx);
+        if opts.stale_result_placeholders && !mutated.is_empty() {
+            let invalidated = context.invalidate_paths(&mutated);
+            if invalidated > 0 {
+                ctx.audit(
+                    "context.stale",
+                    serde_json::json!({ "paths": mutated.len(), "results": invalidated }),
+                );
+            }
+        }
+        if opts.max_tool_results > 0 {
+            context.evict(metteur_shared::EvictionPolicy::Default, opts.max_tool_results);
         }
     }
 
+    if final_text.is_empty() {
+        return Err((
+            DaemonError::Execution("model produced no final answer".to_string()),
+            context,
+        ));
+    }
     Ok(ReactOutcome {
         text: final_text,
         context,
@@ -295,12 +524,371 @@ async fn react_loop(
     })
 }
 
+/// Reads the `[execution]` section of the merged workspace configuration.
+async fn execution_config(ctx: &ExecutionContext) -> metteur_shared::config::ExecutionConfig {
+    match &ctx.config {
+        Some(config) => config.read().await.execution.clone(),
+        None => metteur_shared::config::ExecutionConfig::default(),
+    }
+}
+
+/// Waits for the next background job of this run to finish.
+///
+/// Returns `None` when the run has already collected every finished job — the
+/// caller then ends the turn. Cancellation kills the run's jobs and aborts the
+/// wait, so a parked turn never outlives a cancel.
+async fn collect_finished_job(
+    ctx: &ExecutionContext,
+    announced: &mut Vec<String>,
+) -> DaemonResult<Option<JobSnapshot>> {
+    if let Some(finished) = ctx.jobs.first_finished(ctx.run_id, announced) {
+        announced.push(finished.id.clone());
+        return Ok(Some(finished));
+    }
+    if !ctx.jobs.any_running(ctx.run_id) {
+        return Ok(None);
+    }
+    notify(
+        ctx,
+        format!(
+            "[engine] waiting for {} background job(s) to finish; you will be woken when one              completes",
+            ctx.jobs
+                .list(Some(ctx.run_id))
+                .iter()
+                .filter(|job| job.state.is_running())
+                .count()
+        ),
+    );
+    let jobs = Arc::clone(&ctx.jobs);
+    let owner = ctx.run_id;
+    let known = announced.clone();
+    let cancel = Arc::clone(&ctx.cancel_requested);
+    let finished = tokio::select! {
+        finished = jobs.wait_any_finished(owner, &known) => finished,
+        _ = crate::execution::jobs::wait_for_cancel(cancel) => {
+            ctx.jobs.kill_owned_by(owner);
+            return Err(DaemonError::Interrupted(
+                "cancelled while waiting for a background command".to_string(),
+            ));
+        }
+    };
+    if let Some(job) = &finished {
+        announced.push(job.id.clone());
+    }
+    Ok(finished)
+}
+
+/// Renders the engine's wake-up notice for a finished job.
+fn job_notice(job: &JobSnapshot, jobs: &JobManager, tail_lines: usize) -> String {
+    let tail = jobs.tail(&job.id, tail_lines.max(1));
+    let output = match tail.trim() {
+        "" => "(no output)".to_string(),
+        text => text.to_string(),
+    };
+    format!(
+        "[engine] background job {} {} after {:.1}s. Output (tail):
+{output}",
+        job.id,
+        job.state_label(),
+        job.duration_ms() as f64 / 1000.0,
+    )
+}
+
+/// Announces a finished job to the event stream.
+fn notify_job(ctx: &ExecutionContext, job: &JobSnapshot) {
+    if let Some(tx) = &ctx.events {
+        let _ = tx.send(crate::execution::ExecutionEvent::Job {
+            node_id: ctx.current_node,
+            job_id: job.id.clone(),
+            state: "finished".to_string(),
+            summary: job.summary(),
+        });
+    }
+}
+
+/// Applies the context operations queued by tool calls.
+fn apply_context_ops(ctx: &mut ExecutionContext, context: &mut ContextManager) {
+    let ops = std::mem::take(&mut ctx.context_ops);
+    for op in ops {
+        match op {
+            crate::execution::context::ContextOp::Release(query) => {
+                let report = context.release(&query);
+                ctx.audit(
+                    "context.release",
+                    serde_json::json!({
+                        "released": report.released,
+                        "retained": report.retained,
+                        "freed_tokens": report.estimated_tokens,
+                        "by_tool": report.by_tool,
+                    }),
+                );
+                context.push_message(Message::text(Role::User, report.notice()));
+            }
+        }
+    }
+}
+
+/// Renders the reasoning text of a response as one string.
+fn thinking_text(response: &LlmResponse) -> String {
+    response
+        .thinking
+        .iter()
+        .map(|block| block.text.as_str())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Converts a response's reasoning into content blocks for the context.
+///
+/// Thinking has to travel with the turn it belongs to: Anthropic rejects a
+/// replayed turn whose thinking was stripped while its tool calls were kept,
+/// and a redacted block must be passed back verbatim. Providers that forbid
+/// replayed reasoning (DeepSeek, OpenAI) ignore these blocks when serializing.
+///
+/// Empty blocks are dropped — the API rejects empty text and thinking blocks.
+fn thinking_blocks(response: &LlmResponse) -> Vec<ContentBlock> {
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    for block in &response.thinking {
+        if let Some(redacted) = block.redacted.clone().filter(|data| !data.is_empty()) {
+            blocks.push(ContentBlock::RedactedThinking {
+                data: redacted,
+            });
+        } else if !block.text.is_empty() {
+            blocks.push(ContentBlock::Thinking {
+                text: block.text.clone(),
+                signature: block.signature.clone(),
+            });
+        }
+    }
+    if !response.text.is_empty() {
+        blocks.push(ContentBlock::Text(response.text.clone()));
+    }
+    blocks
+}
+
+/// Iteration-budget notices for one run.
+///
+/// The model is told when the budget runs low and again when it is exhausted;
+/// each notice is emitted once so a retry loop cannot repeat them.
+struct BudgetNotices {
+    /// Whether the low-budget notice is enabled.
+    enabled: bool,
+    /// Turns granted after the budget is spent, without tools.
+    wrap_up: usize,
+    /// Whether the low-budget notice was already emitted.
+    warned: bool,
+    /// Whether the exhausted-budget notice was already emitted.
+    exhausted: bool,
+}
+
+impl BudgetNotices {
+    fn new(config: &LlmConfig, max_iterations: usize) -> Self {
+        Self {
+            enabled: config.budget_notice,
+            wrap_up: if max_iterations == 0 {
+                0
+            } else {
+                config.wrap_up_iterations as usize
+            },
+            warned: false,
+            exhausted: false,
+        }
+    }
+
+    /// Extra tool-free turns granted past the budget.
+    fn wrap_up_turns(&self) -> usize {
+        self.wrap_up
+    }
+
+    /// Whether the turn at `iteration` is a wrap-up turn.
+    fn is_wrap_up(&self, iteration: usize, max_iterations: usize) -> bool {
+        iteration >= max_iterations
+    }
+
+    /// The notice to append before the turn at `iteration`, if any.
+    fn notice_for(&mut self, iteration: usize, max_iterations: usize) -> Option<String> {
+        if iteration >= max_iterations {
+            if self.exhausted {
+                return None;
+            }
+            self.exhausted = true;
+            return Some(
+                "[engine] iteration budget exhausted. Answer now with what is done and what \
+                 remains; no more tool calls will run."
+                    .to_string(),
+            );
+        }
+        if !self.enabled || self.warned {
+            return None;
+        }
+        let remaining = max_iterations - iteration;
+        let threshold = (max_iterations / 5).max(1);
+        if remaining > threshold {
+            return None;
+        }
+        self.warned = true;
+        Some(format!(
+            "[engine] iteration budget: {remaining} of {max_iterations} turns remaining. Finish \
+             the current step, then answer with what is done and what remains."
+        ))
+    }
+}
+
+/// Sends one model request, retrying transient failures and switching to a
+/// fallback model once the retry budget is spent.
+///
+/// A streamed call is only retried while no delta has been forwarded: replaying
+/// a request whose text already reached the client would duplicate output.
+#[allow(clippy::too_many_arguments)]
+async fn request_with_retry(
+    ctx: &mut ExecutionContext,
+    client: &mut Arc<dyn LlmClient>,
+    opts: &ReactOptions,
+    defaults: &LlmConfig,
+    policy: &crate::llm::RetryPolicy,
+    context: &ContextManager,
+    params: &GenerationParams,
+    tools: &[ToolDefinition],
+    delta: &mut Option<&mut (dyn FnMut(StreamDelta) + Send)>,
+) -> DaemonResult<LlmRace> {
+    let mut attempts: u32 = 0;
+    // Models already attempted for this request: a fallback chain must never
+    // revisit one, or two failing models would bounce a request forever.
+    let mut tried: Vec<String> = Vec::new();
+    if let Some(key) = opts.model.clone().or_else(|| defaults.default_model.clone()) {
+        tried.push(key);
+    }
+    loop {
+        let mut emitted = false;
+        let result = match delta.as_deref_mut() {
+            Some(cb) => {
+                let mut tracked = |d: StreamDelta| {
+                    emitted = true;
+                    cb(d);
+                };
+                race_call(
+                    client.as_ref(),
+                    context,
+                    params,
+                    tools,
+                    &ctx.interrupts,
+                    Some(&mut tracked),
+                )
+                .await
+            }
+            None => {
+                race_call(client.as_ref(), context, params, tools, &ctx.interrupts, None).await
+            }
+        };
+        match result {
+            Ok(race) => return Ok(race),
+            Err(err) => {
+                if !crate::llm::RetryPolicy::retryable(&err) || emitted {
+                    return Err(err);
+                }
+                if attempts < policy.max_retries {
+                    attempts += 1;
+                    let delay = policy.delay_for(attempts - 1);
+                    ctx.audit(
+                        "llm.retry",
+                        serde_json::json!({
+                            "attempt": attempts,
+                            "max_retries": policy.max_retries,
+                            "delay_ms": delay.as_millis() as u64,
+                            "error": err.to_string(),
+                        }),
+                    );
+                    notify(
+                        ctx,
+                        format!(
+                            "[engine] provider error ({err}); retrying in {:.1}s (attempt \
+                             {attempts}/{})",
+                            delay.as_secs_f64(),
+                            policy.max_retries
+                        ),
+                    );
+                    tokio::time::sleep(delay).await;
+                    if ctx.cancel_requested.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(DaemonError::Interrupted("cancelled by user".to_string()));
+                    }
+                    continue;
+                }
+                // Retries are spent: fall back to the next usable model. A
+                // candidate that cannot even be built (bad endpoint, unknown
+                // api_type) is skipped rather than masking the real error.
+                let (next, fallback) = loop {
+                    let Some(candidate) = next_fallback(policy, defaults, &tried) else {
+                        return Err(err);
+                    };
+                    tried.push(candidate.clone());
+                    let mut fallback_opts = opts.clone();
+                    fallback_opts.model = Some(candidate.clone());
+                    match build_client(ctx, &fallback_opts, defaults) {
+                        Ok(client) => break (candidate, client),
+                        Err(build_error) => {
+                            tracing::warn!(
+                                "[{}] fallback model '{candidate}' is unusable: {build_error}",
+                                opts.label
+                            );
+                        }
+                    }
+                };
+                ctx.audit(
+                    "llm.fallback",
+                    serde_json::json!({ "to": next, "error": err.to_string() }),
+                );
+                notify(
+                    ctx,
+                    format!("[engine] switching to fallback model '{next}' after: {err}"),
+                );
+                *client = fallback;
+                attempts = 0;
+            }
+        }
+    }
+}
+
+/// Returns the next model in the fallback chain that has not been tried yet.
+///
+/// The configured default model is part of the chain: an explicit per-call
+/// model that fails should be able to fall back to the default one.
+fn next_fallback(
+    policy: &crate::llm::RetryPolicy,
+    defaults: &LlmConfig,
+    tried: &[String],
+) -> Option<String> {
+    std::iter::once(defaults.default_model.clone())
+        .chain(policy.fallback_models.iter().cloned().map(Some))
+        .flatten()
+        .find(|candidate| !tried.iter().any(|name| name == candidate))
+}
+
+/// Emits an engine notice as an audit entry and a live event.
+fn notify(ctx: &ExecutionContext, message: String) {
+    ctx.audit("llm.notice", serde_json::json!({ "message": message }));
+    if let Some(tx) = &ctx.events {
+        let _ = tx.send(crate::execution::ExecutionEvent::Message {
+            node_id: ctx.current_node,
+            message,
+        });
+    }
+}
+
 /// Builds the outbound snapshot sent to the model.
 ///
 /// System fragments, message text and tool-call arguments are anonymized
 /// through `anonymizer` (stable tokens, prefix-cache friendly). The stored
 /// context is untouched: chat restore and audit keep the original text.
-async fn outbound_context(context: &ContextManager, anonymizer: &Anonymizer) -> ContextManager {
+///
+/// Thinking blocks are passed through verbatim by default. Providers that
+/// verify them (Anthropic) reject a replayed block whose text was rewritten,
+/// so anonymizing reasoning text is opt-in and drops the signature.
+async fn outbound_context(
+    context: &ContextManager,
+    anonymizer: &Anonymizer,
+    anonymize_thinking: bool,
+) -> ContextManager {
     if !anonymizer.is_enabled() {
         return context.clone();
     }
@@ -310,8 +898,23 @@ async fn outbound_context(context: &ContextManager, anonymizer: &Anonymizer) -> 
     }
     for message in &mut outbound.messages {
         for block in &mut message.content {
-            let ContentBlock::Text(text) = block;
-            *text = anonymizer.anonymize(text).await;
+            match block {
+                ContentBlock::Text(text) => {
+                    *text = anonymizer.anonymize(text).await;
+                }
+                ContentBlock::Thinking {
+                    text,
+                    signature,
+                } => {
+                    if anonymize_thinking {
+                        *text = anonymizer.anonymize(text).await;
+                        *signature = None;
+                    }
+                }
+                ContentBlock::RedactedThinking {
+                    ..
+                } => {}
+            }
         }
         for call in &mut message.tool_calls {
             let serialized = anonymizer.anonymize(&call.arguments.to_string()).await;
@@ -331,56 +934,42 @@ enum LlmRace {
     Emergency(String),
 }
 
-/// Calls the model (streamed through `on_delta`), racing the request against
-/// an emergency interrupt so the interrupt can abort an in-flight call. The
-/// race is isolated here to keep the loop's borrows simple.
-async fn race_stream(
+/// Calls the model, racing the request against an emergency interrupt so the
+/// interrupt can abort an in-flight call. The race is isolated here to keep the
+/// loop's borrows simple; `on_delta` selects the streaming transport.
+async fn race_call(
     client: &dyn LlmClient,
     context: &ContextManager,
     params: &GenerationParams,
     tools: &[ToolDefinition],
     bus: &Option<InterruptBus>,
-    on_delta: &mut (dyn FnMut(String) + Send),
+    on_delta: Option<&mut (dyn FnMut(StreamDelta) + Send)>,
 ) -> DaemonResult<LlmRace> {
     match bus {
         Some(bus) => {
             let bus = bus.clone();
             tokio::select! {
-                resp = client.stream(context, params, tools, on_delta) => {
-                    resp.map(LlmRace::Response).map_err(|e| DaemonError::Llm(e.to_string()))
+                resp = dispatch(client, context, params, tools, on_delta) => {
+                    resp.map(LlmRace::Response)
                 }
                 msg = bus.wait_emergency() => Ok(LlmRace::Emergency(msg.unwrap_or_default())),
             }
         }
-        None => {
-            let resp = client.stream(context, params, tools, on_delta).await?;
-            Ok(LlmRace::Response(resp))
-        }
+        None => dispatch(client, context, params, tools, on_delta).await.map(LlmRace::Response),
     }
 }
 
-/// Non-streamed variant of [`race_stream`].
-async fn race_complete(
+/// Sends the request over the streamed or plain transport.
+async fn dispatch(
     client: &dyn LlmClient,
     context: &ContextManager,
     params: &GenerationParams,
     tools: &[ToolDefinition],
-    bus: &Option<InterruptBus>,
-) -> DaemonResult<LlmRace> {
-    match bus {
-        Some(bus) => {
-            let bus = bus.clone();
-            tokio::select! {
-                resp = client.complete(context, params, tools) => {
-                    resp.map(LlmRace::Response).map_err(|e| DaemonError::Llm(e.to_string()))
-                }
-                msg = bus.wait_emergency() => Ok(LlmRace::Emergency(msg.unwrap_or_default())),
-            }
-        }
-        None => {
-            let resp = client.complete(context, params, tools).await?;
-            Ok(LlmRace::Response(resp))
-        }
+    on_delta: Option<&mut (dyn FnMut(StreamDelta) + Send)>,
+) -> DaemonResult<LlmResponse> {
+    match on_delta {
+        Some(delta) => client.stream(context, params, tools, delta).await,
+        None => client.complete(context, params, tools).await,
     }
 }
 
@@ -492,7 +1081,9 @@ fn build_client(
         .or_else(|| model_cfg.map(|cfg| cfg.api_key.clone()).filter(|key| !key.is_empty()))
         .unwrap_or_default();
 
-    let config = LlmProviderConfig::new(kind, base_url, api_key, model);
+    let config = LlmProviderConfig::new(kind, base_url, api_key, model)
+        .with_thinking_budget(defaults.thinking_budget_tokens)
+        .with_prompt_cache(defaults.prompt_cache);
     ctx.llm_factory.create(&config).map_err(|e| DaemonError::Llm(e.to_string()))
 }
 
@@ -518,20 +1109,208 @@ fn build_params(opts: &ReactOptions, defaults: &LlmConfig) -> GenerationParams {
 }
 
 /// Builds tool definitions from the registry, restricted by `allowed`.
+///
+/// Definitions are name-sorted: `Registry::tools` iterates a hash map, so
+/// without the sort the tools array would reorder between requests and break
+/// the provider's prefix cache on every call.
 fn tool_definitions(
     registry: &crate::registry::Registry,
     allowed: Option<&HashSet<String>>,
 ) -> Vec<ToolDefinition> {
-    registry
+    let mut tools: Vec<_> = registry
         .tools()
         .into_iter()
         .filter(|t| allowed.map(|set| set.contains(t.name())).unwrap_or(true))
+        .collect();
+    tools.sort_by(|a, b| a.name().cmp(b.name()));
+    tools
+        .into_iter()
         .map(|t| ToolDefinition {
             name: t.name().to_string(),
             description: t.description().to_string(),
             parameters: t.parameters(),
         })
         .collect()
+}
+
+/// Resolves the byte budget for one tool result.
+async fn tool_result_budget(
+    ctx: &ExecutionContext,
+    name: &str,
+    opts: &ReactOptions,
+) -> usize {
+    let declared = ctx.registry.tool(name).map(|t| t.max_result_bytes()).unwrap_or(0);
+    if declared > 0 {
+        return declared;
+    }
+    match &ctx.config {
+        Some(config) => {
+            let configured = config.read().await.llm.max_tool_result_bytes;
+            if configured > 0 {
+                configured as usize
+            } else {
+                opts.max_tool_result_bytes
+            }
+        }
+        None => opts.max_tool_result_bytes,
+    }
+}
+
+/// Drains the paths mutated by tool calls since the last drain.
+fn drain_mutated_paths(ctx: &mut ExecutionContext) -> Vec<std::path::PathBuf> {
+    std::mem::take(&mut ctx.mutated_paths)
+}
+
+/// The result of one tool call, with the read state it declared.
+struct ToolOutcome {
+    /// The textual result, or the failure the model is told about.
+    result: DaemonResult<String>,
+    /// Workspace paths the call read.
+    read_paths: Vec<std::path::PathBuf>,
+    /// Workspace paths the call read *in full*.
+    full_reads: Vec<std::path::PathBuf>,
+}
+
+/// Executes the tool calls of one assistant turn, returning each result in
+/// call order together with the workspace paths that call read.
+///
+/// Calls that the run forbids or the registry does not know yield an error
+/// string (the model can recover from those). Read-only calls run concurrently
+/// when `parallel_read_tools` is set; mutating calls stay sequential so their
+/// side effects keep a deterministic order.
+async fn execute_tool_calls(
+    ctx: &mut ExecutionContext,
+    calls: &[ToolCall],
+    opts: &ReactOptions,
+    anonymizer: &Anonymizer,
+) -> Vec<ToolOutcome> {
+    let parallel = opts.parallel_read_tools
+        && calls.len() > 1
+        && calls.iter().all(|call| is_read_only_tool(ctx, &call.name));
+    if !parallel {
+        let mut out = Vec::with_capacity(calls.len());
+        for call in calls {
+            ctx.read_paths.clear();
+            ctx.read_paths_full.clear();
+            let result = invoke_tool(ctx, call, opts.allowed_tools.as_ref(), anonymizer).await;
+            out.push(ToolOutcome {
+                result,
+                read_paths: drain_read_paths(ctx),
+                full_reads: std::mem::take(&mut ctx.read_paths_full),
+            });
+        }
+        return out;
+    }
+    // Sequential bookkeeping, concurrent execution: audit and transaction
+    // records keep call order while the calls themselves overlap. Each call
+    // runs on a nested context so its read state stays isolated.
+    let mut prepared: Vec<Option<Vec<metteur_shared::Value>>> = Vec::with_capacity(calls.len());
+    for call in calls {
+        if rejected_reason(ctx, call, opts.allowed_tools.as_ref()).is_some() {
+            prepared.push(None);
+            continue;
+        }
+        let args_value = deanonymize_arguments(anonymizer, &call.arguments).await;
+        let args = arguments_to_values(&args_value);
+        ctx.transaction_log.record_tool_call(call.name.clone(), args.clone());
+        ctx.audit("tool.call", serde_json::json!({ "name": call.name, "args": args_value }));
+        prepared.push(Some(args));
+    }
+
+    let mut handles = Vec::with_capacity(calls.len());
+    for (call, args) in calls.iter().zip(prepared) {
+        let Some(args) = args else {
+            handles.push(None);
+            continue;
+        };
+        let Some(tool) = ctx.registry.tool(&call.name) else {
+            handles.push(None);
+            continue;
+        };
+        let mut child = ctx.child_nested();
+        handles.push(Some(tokio::spawn(async move {
+            let outcome = match tool.timeout() {
+                Some(limit) => match tokio::time::timeout(limit, tool.call(&args, &mut child)).await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        Err(DaemonError::Execution(format!("tool '{}' timed out", tool.name())))
+                    }
+                },
+                None => tool.call(&args, &mut child).await,
+            };
+            let text = outcome.map(|value| crate::execution::nodes::value_to_string(&value));
+            (text, child.read_paths, child.read_paths_full)
+        })));
+    }
+
+    let mut out = Vec::with_capacity(calls.len());
+    for (call, handle) in calls.iter().zip(handles) {
+        let entry = match handle {
+            Some(handle) => match handle.await {
+                Ok((result, read_paths, full_reads)) => ToolOutcome {
+                    result,
+                    read_paths,
+                    full_reads,
+                },
+                Err(join_error) => ToolOutcome {
+                    result: Err(DaemonError::Execution(format!(
+                        "tool '{}' task failed: {join_error}",
+                        call.name
+                    ))),
+                    read_paths: Vec::new(),
+                    full_reads: Vec::new(),
+                },
+            },
+            None => ToolOutcome {
+                result: rejected_result(ctx, call, opts.allowed_tools.as_ref()),
+                read_paths: Vec::new(),
+                full_reads: Vec::new(),
+            },
+        };
+        out.push(entry);
+    }
+    out
+}
+
+/// Drains the paths read by tool calls since the last drain.
+fn drain_read_paths(ctx: &mut ExecutionContext) -> Vec<std::path::PathBuf> {
+    std::mem::take(&mut ctx.read_paths)
+}
+
+/// Whether a tool may run concurrently with its siblings.
+fn is_read_only_tool(ctx: &ExecutionContext, name: &str) -> bool {
+    ctx.registry.tool(name).map(|tool| tool.read_only()).unwrap_or(false)
+}
+
+/// Returns the refusal text for a call that must not run, if any.
+fn rejected_reason(
+    ctx: &ExecutionContext,
+    call: &ToolCall,
+    allowed: Option<&HashSet<String>>,
+) -> Option<&'static str> {
+    if let Some(set) = allowed
+        && !set.contains(&call.name)
+    {
+        return Some("not allowed in this context");
+    }
+    if ctx.registry.tool(&call.name).is_none() {
+        return Some("not available");
+    }
+    None
+}
+
+/// Builds the refusal result for a rejected call.
+fn rejected_result(
+    ctx: &ExecutionContext,
+    call: &ToolCall,
+    allowed: Option<&HashSet<String>>,
+) -> DaemonResult<String> {
+    Ok(format!(
+        "Error: tool '{}' is {}.",
+        call.name,
+        rejected_reason(ctx, call, allowed).unwrap_or("unavailable")
+    ))
 }
 
 /// Invokes a tool call and returns the textual result.
@@ -545,19 +1324,25 @@ async fn invoke_tool(
     allowed: Option<&HashSet<String>>,
     anonymizer: &Anonymizer,
 ) -> DaemonResult<String> {
-    if let Some(set) = allowed
-        && !set.contains(&call.name)
-    {
-        return Ok(format!("Error: tool '{}' is not allowed in this context.", call.name));
+    if rejected_reason(ctx, call, allowed).is_some() {
+        return rejected_result(ctx, call, allowed);
     }
     let Some(tool) = ctx.registry.tool(&call.name) else {
-        return Ok(format!("Error: tool '{}' is not available.", call.name));
+        return rejected_result(ctx, call, allowed);
     };
     let args_value = deanonymize_arguments(anonymizer, &call.arguments).await;
     let args = arguments_to_values(&args_value);
     ctx.transaction_log.record_tool_call(call.name.clone(), args.clone());
     ctx.audit("tool.call", serde_json::json!({ "name": call.name, "args": args_value }));
-    let result = tool.call(&args, ctx).await?;
+    let result = match tool.timeout() {
+        Some(limit) => match tokio::time::timeout(limit, tool.call(&args, ctx)).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(DaemonError::Execution(format!("tool '{}' timed out", call.name)));
+            }
+        },
+        None => tool.call(&args, ctx).await,
+    }?;
     Ok(crate::execution::nodes::value_to_string(&result))
 }
 
@@ -600,7 +1385,14 @@ async fn record_usage(
         "output_tokens": usage.output_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
         "total_tokens": usage.total_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
     });
+    // The hit rate is what makes cache effectiveness observable in the audit
+    // UI; it is absent when the provider reports no input at all.
+    if let Some(rate) = usage.cache_hit_rate() {
+        detail["cache_hit_rate"] = serde_json::json!(rate);
+    }
     if let Some((currency, timezone, models)) = billing.as_ref()
         && let Some(model_cfg) = models.get(client.model())
         && let Some(cost) = crate::llm::billing::cost(
@@ -624,20 +1416,45 @@ async fn record_usage(
     }
 }
 
-/// Compresses the context when it exceeds the configured threshold.
+/// Compresses the context when it needs it.
+///
+/// Two triggers coexist: an explicit message-count threshold set on the node
+/// (kept for backwards compatibility) and the workspace token budget, which
+/// applies whenever the configured model declares a context window. The token
+/// trigger is the one that actually protects a long conversation from
+/// overflowing the provider's limit.
 ///
 /// Compression failures are logged and skipped; they never abort the run.
 async fn compress_if_needed(
     ctx: &mut ExecutionContext,
-    client: &dyn LlmClient,
+    client: &Arc<dyn LlmClient>,
     context: &mut ContextManager,
     params: &GenerationParams,
     opts: &ReactOptions,
     billing: &Option<BillingCtx>,
     usage: &mut Usage,
 ) {
-    let Some(keep_recent) = opts.compress_after_messages else {
+    let by_messages = opts.compress_after_messages.filter(|keep| *keep > 0);
+    let by_tokens = window_pressure(ctx, context, opts).await;
+    let triggered_by_messages =
+        matches!(by_messages, Some(keep) if context.messages.len() > keep);
+    // Window pressure is relieved deterministically first: releasing tool
+    // results costs no model call and loses no meaning, while summarizing
+    // spends a completion and can drop details. An explicit node-level message
+    // threshold still goes straight to compression — that is a deliberate
+    // instruction, not pressure.
+    if !triggered_by_messages
+        && by_tokens.is_some()
+        && auto_release(ctx, context).await
+        && window_pressure(ctx, context, opts).await.is_none()
+    {
         return;
+    }
+    let keep_recent = match (by_messages, by_tokens) {
+        // A node-level setting wins when both trigger.
+        (Some(keep), _) if triggered_by_messages => keep,
+        (_, Some(keep)) => keep,
+        _ => return,
     };
     if keep_recent == 0 || context.messages.len() <= keep_recent {
         return;
@@ -650,11 +1467,91 @@ async fn compress_if_needed(
     }
 }
 
+/// Releases the oldest tool results when the automatic release is enabled.
+///
+/// Returns whether anything was released. The model is told through a notice
+/// so it does not keep referring to content that is gone.
+async fn auto_release(ctx: &mut ExecutionContext, context: &mut ContextManager) -> bool {
+    let keep = match &ctx.config {
+        Some(config) => {
+            let config = config.read().await;
+            if !config.llm.auto_release {
+                return false;
+            }
+            config.llm.auto_release_keep_results as usize
+        }
+        None => return false,
+    };
+    if context.tool_results.len() <= keep {
+        return false;
+    }
+    let query = metteur_shared::llm::ReleaseQuery {
+        all: true,
+        keep_recent: keep,
+        ..Default::default()
+    };
+    let report = context.release(&query);
+    if report.released == 0 {
+        return false;
+    }
+    ctx.audit(
+        "context.auto_release",
+        serde_json::json!({
+            "released": report.released,
+            "freed_tokens": report.estimated_tokens,
+            "by_tool": report.by_tool,
+        }),
+    );
+    context.push_message(Message::text(Role::User, report.notice()));
+    true
+}
+
+/// Returns the tail size to keep when the context crowds the model window.
+///
+/// `None` means either the model has no declared window (nothing to guard
+/// against) or the context still fits comfortably.
+async fn window_pressure(
+    ctx: &ExecutionContext,
+    context: &ContextManager,
+    opts: &ReactOptions,
+) -> Option<usize> {
+    let config = ctx.config.as_ref()?;
+    let config = config.read().await;
+    if config.llm.compress_at_ratio <= 0.0 {
+        return None;
+    }
+    let model_key = opts
+        .model
+        .clone()
+        .filter(|key| !key.is_empty())
+        .or_else(|| config.llm.default_model.clone())?;
+    let model = config.llm.models.get(&model_key)?;
+    let budget = crate::llm::context_window_budget(Some(model), opts.max_tokens.map(u64::from))?;
+    let estimated = metteur_shared::llm::estimate_context_tokens(context);
+    let threshold = (budget as f64 * config.llm.compress_at_ratio) as u64;
+    if estimated <= threshold {
+        return None;
+    }
+    // Keep as many trailing messages as the token budget allows, at least one.
+    let keep_budget = config.llm.compress_keep_tokens.max(1);
+    let mut kept = 0usize;
+    let mut tokens = 0u64;
+    for message in context.messages.iter().rev() {
+        let cost = metteur_shared::llm::estimate_message(message);
+        if kept > 0 && tokens + cost > keep_budget {
+            break;
+        }
+        tokens += cost;
+        kept += 1;
+    }
+    Some(kept.max(1))
+}
+
 /// Produces an LLM summary of the older messages and merges it in.
 #[allow(clippy::too_many_arguments)]
 async fn summarize_and_compress(
     ctx: &mut ExecutionContext,
-    client: &dyn LlmClient,
+    client: &Arc<dyn LlmClient>,
     context: &mut ContextManager,
     params: &GenerationParams,
     opts: &ReactOptions,
@@ -662,7 +1559,9 @@ async fn summarize_and_compress(
     usage: &mut Usage,
     keep_recent: usize,
 ) -> DaemonResult<()> {
-    let older: Vec<Message> = context.messages[..context.messages.len() - keep_recent].to_vec();
+    let tokens_before = metteur_shared::llm::estimate_context_tokens(context);
+    let split_at = context.pair_safe_split(keep_recent);
+    let older: Vec<Message> = context.messages[..split_at].to_vec();
     if older.is_empty() {
         return Ok(());
     }
@@ -671,37 +1570,54 @@ async fn summarize_and_compress(
         transcript.push_str(&format!("{:?}: {}\n", message.role, message.text_content()));
     }
     let summarizer_context = ContextManager::new_from_prompt(
-        vec![SystemFragment {
-            priority: 0,
-            scope: "compress".to_string(),
-            content: "You condense conversations.".to_string(),
-        }],
-        format!("Summarize the following conversation concisely:\n\n{transcript}"),
+        vec![crate::harness::HarnessPrompt::compress_fragment()],
+        format!("Summarize the following conversation:\n\n{transcript}"),
     );
-    let response = client
+    // A configured summarizer model keeps the expensive model out of routine
+    // housekeeping; failing to build it falls back to the active client.
+    let summarizer = summarizer_client(ctx, opts).await.unwrap_or_else(|| Arc::clone(client));
+    let response = summarizer
         .complete(&summarizer_context, params, &[])
         .await
         .map_err(|e| DaemonError::Llm(e.to_string()))?;
-    record_usage(ctx, client, &response.usage, billing).await;
-    usage.input_tokens += response.usage.input_tokens;
-    usage.output_tokens += response.usage.output_tokens;
-    usage.reasoning_tokens += response.usage.reasoning_tokens;
-    usage.total_tokens += response.usage.total_tokens;
+    record_usage(ctx, summarizer.as_ref(), &response.usage, billing).await;
+    usage.add(&response.usage);
     if response.text.trim().is_empty() {
         return Err(DaemonError::Llm("empty compression summary".to_string()));
     }
     let messages_before = context.messages.len();
     let summary = response.text;
-    context.compress(keep_recent, |_| Some(summary));
+    // `split_at` was computed on the pairing-safe boundary, so the summary
+    // absorbs exactly what was summarized.
+    context.compress_to(split_at, |_| Some(summary));
     ctx.audit(
         "llm.compress",
         serde_json::json!({
             "label": opts.label,
             "messages_before": messages_before,
             "messages_after": context.messages.len(),
+            "tokens_before": tokens_before,
+            "tokens_after": metteur_shared::llm::estimate_context_tokens(context),
         }),
     );
     Ok(())
+}
+
+/// Builds the summarizer client when `[llm].compress_model` names another
+/// model; `None` means the active client summarizes.
+async fn summarizer_client(
+    ctx: &ExecutionContext,
+    opts: &ReactOptions,
+) -> Option<Arc<dyn LlmClient>> {
+    let config = ctx.config.as_ref()?;
+    let defaults = config.read().await.llm.clone();
+    let model = defaults.compress_model.clone().filter(|name| !name.is_empty())?;
+    if Some(&model) == opts.model.as_ref() {
+        return None;
+    }
+    let mut summarizer_opts = opts.clone();
+    summarizer_opts.model = Some(model);
+    build_client(ctx, &summarizer_opts, &defaults).ok()
 }
 
 /// Returns the current time in milliseconds since the Unix epoch.
@@ -845,15 +1761,17 @@ mod tests {
         };
         let mut deltas = Vec::new();
         let mut events = Vec::new();
-        let mut on_delta = |text: String| deltas.push(text);
+        let mut on_delta = |delta: StreamDelta| deltas.push(delta);
         let mut on_event = |ev: ReactEvent| events.push(ev);
         let outcome =
             run_react_streaming(&mut ctx, context, &opts, Some(&mut on_delta), &mut on_event)
                 .await
                 .unwrap();
         // The mock provider delivers the whole text as a single delta.
-        assert_eq!(deltas, vec!["streamed"]);
-        assert!(matches!(&events[0], ReactEvent::Assistant { text } if text == "streamed"));
+        assert_eq!(deltas, vec![StreamDelta::Text("streamed".to_string())]);
+        assert!(
+            matches!(&events[0], ReactEvent::Assistant { text, .. } if text == "streamed")
+        );
         assert_eq!(outcome.text, "streamed");
         // The loop keeps the initial user message; the final text is appended
         // by the caller when persisting.

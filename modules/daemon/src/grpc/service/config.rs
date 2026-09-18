@@ -76,6 +76,9 @@ impl DaemonService {
                 }
             }
             let _ = self.state.config_tx.send(config.clone());
+            // The host merges global and workspace servers, so a global write
+            // must go through the same union path as a workspace write.
+            self.state.resync_mcp().await;
             record_global_audit(
                 &self.state,
                 &subject,
@@ -103,6 +106,11 @@ impl DaemonService {
             let merged = crate::config::load_merged_config(&global_config_path, ws.root())
                 .map_err(to_status)?;
             *ws.config.write().await = merged;
+            // Apply the change to the live subsystems instead of requiring a
+            // workspace reopen: language servers are rebuilt (and the old
+            // ones shut down) and MCP servers are re-merged.
+            ws.reload_lsp().await;
+            self.state.resync_mcp().await;
             let writer = AuditWriter::new(ws.db.clone());
             let _ =
                 writer.record(&subject, "config.set", serde_json::json!({ "scope": "workspace" }));

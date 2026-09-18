@@ -19,7 +19,10 @@ import type {
   McpServerInfo,
   Result,
   SnapshotInfo,
+  TodoItem,
   UsageSummary,
+  JobInfo,
+  JobNotice,
   WatchEvent,
   WorkspaceInfo,
 } from './types'
@@ -69,6 +72,27 @@ export interface DaemonGateway {
     signal?: AbortSignal,
   ): Promise<Result<void>>
 
+  // Background commands (jobs) --------------------------------------------------
+  /** Lists the workspace's background commands (oldest first). */
+  listJobs(workspacePath: string): Promise<Result<JobInfo[]>>
+  /** Subscribes to job notices; resolves when the stream ends or aborts. */
+  watchJobs(
+    workspacePath: string,
+    onEvent: (e: JobNotice) => void,
+    signal?: AbortSignal,
+  ): Promise<Result<void>>
+  /** Terminates one background command; `killed` is false when it had ended. */
+  killJob(workspacePath: string, jobId: string): Promise<Result<{ killed: boolean; state: string }>>
+  /**
+   * A file's content as recorded by a snapshot (empty id = the latest one).
+   * `found: false` means the snapshot did not track the file.
+   */
+  getFileAtSnapshot(
+    workspacePath: string,
+    path: string,
+    snapshotId?: string,
+  ): Promise<Result<{ found: boolean; content: string; snapshotId: string }>>
+
   // ReAct chat -----------------------------------------------------------------
   /**
    * Send a chat turn. Assistant replies arrive as `onMessage` updates: deltas
@@ -86,6 +110,7 @@ export interface DaemonGateway {
     onSession?: (sessionId: string) => void,
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
+    onTodos?: (todos: TodoItem[]) => void,
   ): Promise<Result<void>>
   abortChat(workspacePath: string): Promise<Result<void>>
   /** List the workspace's persisted chat sessions (newest first). */
@@ -108,6 +133,9 @@ export interface DaemonGateway {
     workspacePath: string,
     blueprintId: string,
     onEvent: (e: ExecutionEvent) => void,
+    /** The canvas being edited; sent so Run executes what the user sees even
+     *  when the daemon mirror of the blueprint is stale. */
+    blueprint?: Blueprint,
   ): Promise<Result<void>>
   continueExecution(
     workspacePath: string,

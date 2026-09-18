@@ -10,6 +10,7 @@ mod blueprint;
 mod chat;
 mod config;
 mod files;
+mod jobs;
 mod registry;
 mod sandbox;
 mod state;
@@ -31,15 +32,17 @@ use super::proto::{
     DeleteFunctionRequest, Empty, ExecuteBlueprintRequest, ExecutionEvent, ExecutionList,
     ExecutionTree, FileHistory, FileInfo, FileList, FunctionList, GetChatSessionRequest,
     GetChatSessionResponse, GetConfigRequest, GetExecutionTreeRequest, GetExecutionUsageRequest,
-    GetFileHistoryRequest, InstallAddonRequest, InterruptRequest, ListAddonsRequest,
-    ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest, ListFilesRequest,
-    ListFunctionsRequest, ListSnapshotsRequest, LoadBlueprintRequest, LoadFunctionRequest,
+    GetFileAtSnapshotRequest, GetFileAtSnapshotResponse, GetFileHistoryRequest,
+    InstallAddonRequest, InterruptRequest, JobEvent, JobList, KillJobRequest, KillJobResponse,
+    ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest,
+    ListFilesRequest, ListFunctionsRequest, ListJobsRequest, ListSnapshotsRequest,
+    LoadBlueprintRequest, LoadFunctionRequest,
     LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
     ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest, ResumeRequest,
     RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest,
     SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo,
     SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent,
-    WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList, WriteFileRequest,
+    WatchJobsRequest, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList, WriteFileRequest,
 };
 
 pub use state::AppState;
@@ -78,6 +81,7 @@ impl Daemon for DaemonService {
     type ContinueExecutionStream =
         tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>;
     type WatchWorkspaceStream = tokio_stream::wrappers::ReceiverStream<Result<WatchEvent, Status>>;
+    type WatchJobsStream = tokio_stream::wrappers::ReceiverStream<Result<JobEvent, Status>>;
     type SendChatStream =
         tokio_stream::wrappers::UnboundedReceiverStream<Result<ChatEvent, Status>>;
 
@@ -381,6 +385,34 @@ impl Daemon for DaemonService {
         request: Request<WatchWorkspaceRequest>,
     ) -> Result<Response<Self::WatchWorkspaceStream>, Status> {
         self.watch_workspace(request).await
+    }
+
+    async fn list_jobs(
+        &self,
+        request: Request<ListJobsRequest>,
+    ) -> Result<Response<JobList>, Status> {
+        self.list_jobs(request).await
+    }
+
+    async fn watch_jobs(
+        &self,
+        request: Request<WatchJobsRequest>,
+    ) -> Result<Response<Self::WatchJobsStream>, Status> {
+        self.watch_jobs(request).await
+    }
+
+    async fn kill_job(
+        &self,
+        request: Request<KillJobRequest>,
+    ) -> Result<Response<KillJobResponse>, Status> {
+        self.kill_job(request).await
+    }
+
+    async fn get_file_at_snapshot(
+        &self,
+        request: Request<GetFileAtSnapshotRequest>,
+    ) -> Result<Response<GetFileAtSnapshotResponse>, Status> {
+        self.get_file_at_snapshot(request).await
     }
 
     async fn send_chat(

@@ -22,6 +22,23 @@ pub enum Role {
 pub enum ContentBlock {
     /// Plain text content.
     Text(String),
+    /// An extended-thinking block.
+    ///
+    /// `signature` binds the text for providers that verify it (Anthropic):
+    /// the block must be replayed verbatim — never anonymized — for the model
+    /// to accept the follow-up turn.
+    Thinking {
+        /// The reasoning text.
+        text: String,
+        /// Provider signature over `text`, when the provider issues one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// A provider-redacted thinking payload, replayed verbatim.
+    RedactedThinking {
+        /// Opaque provider payload.
+        data: String,
+    },
 }
 
 /// A single conversation message.
@@ -50,13 +67,45 @@ impl Message {
         }
     }
 
-    /// Returns the concatenated text content of the message.
+    /// Returns the concatenated **text** content of the message.
+    ///
+    /// Thinking blocks are excluded on purpose: this is what user-facing
+    /// histories, compression transcripts and audit previews consume, and
+    /// reasoning text does not belong in any of them.
     pub fn text_content(&self) -> String {
         self.content
             .iter()
             .map(|block| match block {
                 ContentBlock::Text(t) => t.as_str(),
+                ContentBlock::Thinking {
+                    ..
+                }
+                | ContentBlock::RedactedThinking {
+                    ..
+                } => "",
             })
             .collect()
+    }
+
+    /// Returns the concatenated thinking text, if any.
+    pub fn thinking_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking {
+                    text,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether the message carries any thinking block.
+    pub fn has_thinking(&self) -> bool {
+        self.content.iter().any(|block| {
+            matches!(block, ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. })
+        })
     }
 }

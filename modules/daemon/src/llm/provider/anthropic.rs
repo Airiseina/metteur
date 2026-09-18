@@ -8,7 +8,9 @@ use serde_json::{Value as Json, json};
 
 use crate::error::{DaemonError, DaemonResult};
 
-use super::super::client::{LlmClient, LlmProviderConfig, LlmResponse, http_error};
+use super::super::client::{
+    LlmClient, LlmProviderConfig, LlmResponse, StreamDelta, ThinkingBlock, http_error,
+};
 
 /// The Anthropic API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -20,6 +22,10 @@ pub struct AnthropicClient {
     api_key: String,
     model: String,
     default_params: GenerationParams,
+    /// Extended-thinking token budget (`0` keeps thinking disabled).
+    thinking_budget: u64,
+    /// Whether to emit explicit prompt-cache breakpoints.
+    prompt_cache: bool,
 }
 
 impl AnthropicClient {
@@ -31,6 +37,8 @@ impl AnthropicClient {
             api_key: config.api_key.clone(),
             model: config.model.clone(),
             default_params: config.default_params.clone(),
+            thinking_budget: config.thinking_budget_tokens,
+            prompt_cache: config.prompt_cache,
         }
     }
 
@@ -48,15 +56,28 @@ impl AnthropicClient {
             "max_tokens": merged.max_tokens.unwrap_or(1024),
         });
         if !ctx.system_fragments.is_empty() {
-            let system = ctx
-                .system_fragments
-                .iter()
-                .map(|f| f.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            body["system"] = json!(system);
+            // Anthropic caches explicitly: marking the system block keeps the
+            // (large, stable) prefix cached across the turns of a conversation.
+            // The canonical order is a precondition for that stability.
+            let system = ctx.system_text();
+            body["system"] = if self.prompt_cache {
+                json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": { "type": "ephemeral" },
+                }])
+            } else {
+                json!(system)
+            };
         }
-        if let Some(v) = merged.temperature {
+        // Extended thinking forbids a custom temperature (the API requires its
+        // default); the parameter is dropped rather than sent and rejected.
+        if self.thinking_budget > 0 {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget,
+            });
+        } else if let Some(v) = merged.temperature {
             body["temperature"] = json!(v);
         }
         if let Some(v) = merged.top_p {
@@ -66,7 +87,15 @@ impl AnthropicClient {
             body["stop_sequences"] = json!(merged.stop);
         }
         if !tools.is_empty() {
-            body["tools"] = build_tools(tools);
+            // A cache breakpoint on the last tool extends the cached prefix to
+            // cover the tool definitions as well as the system prompt.
+            let mut tools_json = build_tools(tools);
+            if self.prompt_cache
+                && let Some(last) = tools_json.as_array_mut().and_then(|items| items.last_mut())
+            {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            body["tools"] = tools_json;
         }
         body
     }
@@ -87,7 +116,10 @@ impl AnthropicClient {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| http_error("anthropic response", e))?;
         if !status.is_success() {
-            return Err(DaemonError::Llm(format!("anthropic returned {status}: {text}")));
+            return Err(DaemonError::LlmStatus {
+                status: status.as_u16(),
+                message: text,
+            });
         }
         let parsed: Json = serde_json::from_str(&text)
             .map_err(|e| DaemonError::Llm(format!("invalid anthropic response: {e}")))?;
@@ -120,7 +152,7 @@ impl LlmClient for AnthropicClient {
         ctx: &ContextManager,
         params: &GenerationParams,
         tools: &[ToolDefinition],
-        on_delta: &mut (dyn FnMut(String) + Send),
+        on_delta: &mut (dyn FnMut(StreamDelta) + Send),
     ) -> DaemonResult<LlmResponse> {
         let mut body = self.build_body(ctx, params, tools);
         body["stream"] = json!(true);
@@ -137,11 +169,15 @@ impl LlmClient for AnthropicClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.map_err(|e| http_error("anthropic stream response", e))?;
-            return Err(DaemonError::Llm(format!("anthropic returned {status}: {text}")));
+            return Err(DaemonError::LlmStatus {
+                status: status.as_u16(),
+                message: text,
+            });
         }
 
         let mut stream = resp.bytes_stream();
         let mut text_out = String::new();
+        let mut thinking: Vec<ThinkingBlock> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage = Usage::default();
         let mut buf = String::new();
@@ -166,7 +202,32 @@ impl LlmClient for AnthropicClient {
                     Some("content_block_delta") => {
                         if let Some(text) = event.pointer("/delta/text").and_then(|v| v.as_str()) {
                             text_out.push_str(text);
-                            on_delta(text.to_string());
+                            on_delta(StreamDelta::Text(text.to_string()));
+                        }
+                        // Thinking streams as text deltas followed by a
+                        // signature delta that must be preserved for replay.
+                        if let Some(text) =
+                            event.pointer("/delta/thinking").and_then(|v| v.as_str())
+                        {
+                            on_delta(StreamDelta::Reasoning(text.to_string()));
+                            match thinking.last_mut() {
+                                Some(block) => block.text.push_str(text),
+                                None => thinking.push(ThinkingBlock {
+                                    text: text.to_string(),
+                                    ..ThinkingBlock::default()
+                                }),
+                            }
+                        }
+                        if let Some(signature) =
+                            event.pointer("/delta/signature").and_then(|v| v.as_str())
+                        {
+                            match thinking.last_mut() {
+                                Some(block) => block.signature = Some(signature.to_string()),
+                                None => thinking.push(ThinkingBlock {
+                                    signature: Some(signature.to_string()),
+                                    ..ThinkingBlock::default()
+                                }),
+                            }
                         }
                         if let Some(input) =
                             event.pointer("/delta/partial_json").and_then(|v| v.as_str())
@@ -182,6 +243,18 @@ impl LlmClient for AnthropicClient {
                         }
                     }
                     Some("content_block_start") => {
+                        // A redacted thinking block arrives whole; it is
+                        // opaque and replayed verbatim.
+                        if let Some(block) = event.pointer("/content_block")
+                            && block.get("type").and_then(|t| t.as_str())
+                                == Some("redacted_thinking")
+                            && let Some(data) = block.get("data").and_then(|v| v.as_str())
+                        {
+                            thinking.push(ThinkingBlock {
+                                redacted: Some(data.to_string()),
+                                ..ThinkingBlock::default()
+                            });
+                        }
                         if let Some(tool_use) = event.pointer("/content_block")
                             && tool_use.get("type").and_then(|t| t.as_str()) == Some("tool_use")
                         {
@@ -213,6 +286,7 @@ impl LlmClient for AnthropicClient {
         }
         Ok(LlmResponse {
             text: text_out,
+            thinking,
             tool_calls,
             usage,
         })
@@ -230,14 +304,7 @@ fn message_to_json(msg: &Message) -> Json {
         Role::Tool => {
             // Anthropic represents tool results as a user message with a
             // `tool_result` content block.
-            let content = msg
-                .content
-                .iter()
-                .map(|b| match b {
-                    ContentBlock::Text(t) => t.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join("");
+            let content = msg.text_content();
             json!({
                 "role": "user",
                 "content": [{
@@ -248,13 +315,11 @@ fn message_to_json(msg: &Message) -> Json {
             })
         }
         Role::Assistant if !msg.tool_calls.is_empty() => {
-            let mut content: Vec<Json> = msg
-                .content
-                .iter()
-                .map(|b| match b {
-                    ContentBlock::Text(t) => json!({ "type": "text", "text": t }),
-                })
-                .collect();
+            // Thinking blocks must precede text and tool_use in the replay:
+            // the API rejects a turn whose thinking was stripped while tool
+            // calls were kept.
+            let mut content: Vec<Json> =
+                msg.content.iter().filter_map(block_to_json).collect();
             for call in &msg.tool_calls {
                 content.push(json!({
                     "type": "tool_use",
@@ -266,16 +331,39 @@ fn message_to_json(msg: &Message) -> Json {
             json!({ "role": "assistant", "content": content })
         }
         _ => {
-            let content = msg
-                .content
-                .iter()
-                .map(|b| match b {
-                    ContentBlock::Text(t) => t.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            json!({ "role": role_str(msg.role), "content": content })
+            let blocks: Vec<Json> = msg.content.iter().filter_map(block_to_json).collect();
+            if blocks.len() == 1 && blocks[0].get("type").and_then(|t| t.as_str()) == Some("text") {
+                json!({ "role": role_str(msg.role), "content": blocks[0]["text"] })
+            } else {
+                json!({ "role": role_str(msg.role), "content": blocks })
+            }
         }
+    }
+}
+
+/// Converts one content block into its Anthropic representation.
+///
+/// Returns `None` for a thinking block without payload (defensive: the API
+/// rejects an empty thinking block).
+fn block_to_json(block: &ContentBlock) -> Option<Json> {
+    match block {
+        ContentBlock::Text(text) => Some(json!({ "type": "text", "text": text })),
+        ContentBlock::Thinking {
+            text,
+            signature,
+        } => {
+            if text.is_empty() {
+                return None;
+            }
+            let mut value = json!({ "type": "thinking", "thinking": text });
+            if let Some(signature) = signature {
+                value["signature"] = json!(signature);
+            }
+            Some(value)
+        }
+        ContentBlock::RedactedThinking {
+            data,
+        } => Some(json!({ "type": "redacted_thinking", "data": data })),
     }
 }
 
@@ -309,6 +397,7 @@ fn merge_params(defaults: &GenerationParams, params: &GenerationParams) -> Gener
 /// Parses an Anthropic response into a shared response.
 fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
     let mut text = String::new();
+    let mut thinking: Vec<ThinkingBlock> = Vec::new();
     let mut tool_calls = Vec::new();
     if let Some(content) = parsed.get("content").and_then(|c| c.as_array()) {
         for block in content {
@@ -316,6 +405,27 @@ fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
                 Some("text") => {
                     if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
                         text.push_str(t);
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                        thinking.push(ThinkingBlock {
+                            text: t.to_string(),
+                            signature: block
+                                .get("signature")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            redacted: None,
+                        });
+                    }
+                }
+                Some("redacted_thinking") => {
+                    if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
+                        thinking.push(ThinkingBlock {
+                            text: String::new(),
+                            signature: None,
+                            redacted: Some(data.to_string()),
+                        });
                     }
                 }
                 Some("tool_use") => {
@@ -335,20 +445,30 @@ fn parse_response(parsed: &Json) -> DaemonResult<LlmResponse> {
     let usage = parsed.get("usage").map(parse_usage).unwrap_or_default();
     Ok(LlmResponse {
         text,
+        thinking,
         tool_calls,
         usage,
     })
 }
 
 /// Parses an Anthropic usage object.
+///
+/// Anthropic reports cache traffic *outside* `input_tokens`, so the total is
+/// the sum of the three counters; this provider normalizes to the shared
+/// convention where `input_tokens` includes the cached parts.
 fn parse_usage(u: &Json) -> Usage {
-    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let fresh = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_read = u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_write = u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let input = fresh + cache_read + cache_write;
     Usage {
         input_tokens: input,
         output_tokens: output,
         reasoning_tokens: 0,
         total_tokens: input + output,
+        cached_input_tokens: cache_read,
+        cache_write_input_tokens: cache_write,
     }
 }
 
@@ -376,10 +496,12 @@ mod tests {
     fn builds_messages_with_tool_result() {
         let mut ctx = ContextManager::new_from_prompt(vec![], "hello");
         ctx.mix_in_tool_result(metteur_shared::llm::ToolResult {
+            tool: "ReadFile".to_string(),
             tool_call_id: "toolu_1".to_string(),
             content: "42".to_string(),
             timestamp: 0,
             lifetime: metteur_shared::llm::ToolResultLifetime::OneShot,
+            paths: Vec::new(),
         });
         let messages = build_messages(&ctx);
         assert_eq!(messages.len(), 2);
@@ -418,5 +540,140 @@ mod tests {
         let ctx = ContextManager::new_from_prompt(vec![], "hi");
         let body = client.build_body(&ctx, &GenerationParams::default(), &[]);
         assert!(body["max_tokens"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn system_prompt_carries_a_cache_breakpoint() {
+        let client = AnthropicClient::new(
+            reqwest::Client::new(),
+            &LlmProviderConfig::new(
+                super::super::super::ProviderKind::Anthropic,
+                "https://api.anthropic.com",
+                "key",
+                "claude-sonnet-4",
+            ),
+        );
+        let ctx = ContextManager::new_from_prompt(
+            vec![metteur_shared::llm::SystemFragment {
+                priority: 0,
+                scope: "test".to_string(),
+                content: "system text".to_string(),
+            }],
+            "hi",
+        );
+        let body = client.build_body(&ctx, &GenerationParams::default(), &[]);
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_breakpoints_can_be_disabled() {
+        let client = AnthropicClient::new(
+            reqwest::Client::new(),
+            &LlmProviderConfig::new(
+                super::super::super::ProviderKind::Anthropic,
+                "https://api.anthropic.com",
+                "key",
+                "claude-sonnet-4",
+            )
+            .with_prompt_cache(false),
+        );
+        let ctx = ContextManager::new_from_prompt(
+            vec![metteur_shared::llm::SystemFragment {
+                priority: 0,
+                scope: "test".to_string(),
+                content: "system text".to_string(),
+            }],
+            "hi",
+        );
+        let body = client.build_body(&ctx, &GenerationParams::default(), &[]);
+        // Without breakpoints the system field stays a plain string.
+        assert!(body["system"].is_string(), "{}", body["system"]);
+    }
+
+    #[test]
+    fn thinking_budget_enables_thinking_and_drops_temperature() {
+        let client = AnthropicClient::new(
+            reqwest::Client::new(),
+            &LlmProviderConfig::new(
+                super::super::super::ProviderKind::Anthropic,
+                "https://api.anthropic.com",
+                "key",
+                "claude-sonnet-4",
+            )
+            .with_thinking_budget(4096),
+        );
+        let ctx = ContextManager::new_from_prompt(vec![], "hi");
+        let params = GenerationParams {
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        let body = client.build_body(&ctx, &params, &[]);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+        // The API rejects a custom temperature while thinking is enabled.
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    #[test]
+    fn thinking_blocks_are_parsed_with_signatures() {
+        let json = json!({
+            "content": [
+                { "type": "thinking", "thinking": "let me reason", "signature": "sig-1" },
+                { "type": "redacted_thinking", "data": "opaque" },
+                { "type": "text", "text": "answer" }
+            ],
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        });
+        let resp = parse_response(&json).unwrap();
+        assert_eq!(resp.thinking.len(), 2);
+        assert_eq!(resp.thinking[0].text, "let me reason");
+        assert_eq!(resp.thinking[0].signature.as_deref(), Some("sig-1"));
+        assert_eq!(resp.thinking[1].redacted.as_deref(), Some("opaque"));
+        assert_eq!(resp.text, "answer");
+        // Reasoning never leaks into the user-facing text.
+        assert!(!resp.text.contains("reason"));
+    }
+
+    #[test]
+    fn thinking_blocks_are_replayed_before_tool_use() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "reasoning".to_string(),
+                    signature: Some("sig-1".to_string()),
+                },
+                ContentBlock::Text("calling".to_string()),
+            ],
+            tool_calls: vec![ToolCall {
+                id: "toolu_1".to_string(),
+                name: "ReadFile".to_string(),
+                arguments: json!({ "path": "a.txt" }),
+            }],
+            tool_call_id: None,
+        };
+        let json = message_to_json(&msg);
+        let content = json["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "reasoning");
+        assert_eq!(content[0]["signature"], "sig-1");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn usage_normalizes_anthropic_cache_counters() {
+        let usage = parse_usage(&json!({
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 50
+        }));
+        // Anthropic reports cache traffic outside `input_tokens`.
+        assert_eq!(usage.input_tokens, 1050);
+        assert_eq!(usage.cached_input_tokens, 900);
+        assert_eq!(usage.cache_write_input_tokens, 50);
+        assert_eq!(usage.uncached_input_tokens(), 100);
     }
 }

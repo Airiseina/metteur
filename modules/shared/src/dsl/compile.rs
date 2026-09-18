@@ -17,17 +17,17 @@ use super::parser::Statement;
 const MAX_NODES: usize = 256;
 
 /// A pin template entry.
-struct PinSpec {
+pub(crate) struct PinSpec {
     /// Semantic key (matches canvas/node-data keys); empty for exec pins.
-    key: &'static str,
-    name: &'static str,
-    pin_type: PinType,
-    data_type: DataType,
+    pub(crate) key: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) pin_type: PinType,
+    pub(crate) data_type: DataType,
 }
 
 /// Maps the template's canonical wire name to the pin's semantic key (the key
 /// canvas node data and the DSL init block use).
-fn key_of(name: &str) -> &'static str {
+pub(crate) fn key_of(name: &str) -> &'static str {
     match name {
         "A" => "a",
         "B" => "b",
@@ -71,12 +71,69 @@ fn key_of(name: &str) -> &'static str {
         "Passed" => "passed",
         "Score" => "score",
         "Success" => "success",
+        "Errors" => "errors",
+        "Warnings" => "warnings",
+        "Diagnostics" => "diagnostics",
+        "TimeoutMs" => "timeout_ms",
         other => other.to_ascii_lowercase().leak(),
     }
 }
 
 /// Returns the pin layout for a known node kind, if DataType::Any.
-fn template(kind: &str) -> Option<Vec<PinSpec>> {
+/// Registry tool names the DSL accepts as node kinds.
+///
+/// Each one compiles to a `Tool` node whose `data.tool_name` selects the
+/// registered tool; the shared crate cannot query the daemon registry, so the
+/// list is explicit and grows with the tool set.
+pub(crate) const REGISTRY_TOOL_KINDS: &[&str] = &[
+    "ReadFile",
+    "WriteFile",
+    "EditFile",
+    "ListDirectory",
+    "SearchFile",
+    "Grep",
+    "Glob",
+    "ExecuteCommand",
+    "StartCommand",
+    "JobStatus",
+    "WaitJob",
+    "KillJob",
+    "GetDependencies",
+    "CheckDiagnostics",
+    "GetHover",
+    "FindDefinition",
+    "ReleaseContext",
+];
+
+/// Returns every node kind the DSL and draft formats accept.
+///
+/// Used for "did you mean" hints; the list is the union of the template table
+/// and the registry tool kinds. A template that answers for a probe kind is
+/// what defines membership, so this list cannot drift from [`template`].
+pub(crate) fn known_kinds() -> Vec<&'static str> {
+    const CANDS: &[&str] = &[
+        "Start", "End", "Add", "Subtract", "Multiply", "Divide", "Modulo", "Power", "Min", "Max",
+        "Abs", "Round", "Equal", "NotEqual", "Greater", "Less", "GreaterEqual", "LessEqual", "And",
+        "Or", "Xor", "Not", "Concat", "Length", "Upper", "Lower", "Trim", "Contains", "Replace",
+        "Substring", "ToString", "ToInt", "ToFloat", "ToBool", "ToJson", "ParseJson", "ListCreate",
+        "ListAppend", "ListGet", "ListLength", "ListContains", "JsonGet", "JsonSet",
+        "ContextCreate", "ContextClone", "ContextMerge", "ContextFilter", "ContextTrim",
+        "ContextRelease", "ContextToText", "Delay", "VariableGet", "VariableSet", "Branch",
+        "Switch", "ForEach", "RequestApproval", "CallLLM", "Tool", "Validator", "Judge",
+        "LspCheck", "Abstract", "CallFunction", "FunctionEntry", "FunctionExit",
+    ];
+    let mut kinds: Vec<&'static str> = CANDS
+        .iter()
+        .copied()
+        .filter(|kind| template(kind).is_some())
+        .chain(REGISTRY_TOOL_KINDS.iter().copied())
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
+}
+
+pub(crate) fn template(kind: &str) -> Option<Vec<PinSpec>> {
     let i = |n: &'static str| PinSpec {
         key: "",
         name: n,
@@ -241,6 +298,17 @@ fn template(kind: &str) -> Option<Vec<PinSpec>> {
             pins.push(do_("Result", DataType::Context));
             pins
         }
+        "ContextRelease" => {
+            let mut pins = exec(true);
+            pins.push(di("Context", DataType::Context));
+            pins.push(di("Paths", DataType::List(Box::new(DataType::String))));
+            pins.push(di("Patterns", DataType::List(Box::new(DataType::String))));
+            pins.push(di("Tools", DataType::List(Box::new(DataType::String))));
+            pins.push(do_("Result", DataType::Context));
+            pins.push(do_("Released", DataType::Int));
+            pins.push(do_("Freed", DataType::Int));
+            pins
+        }
         "ContextToText" => un(DataType::Context, DataType::String),
         "Delay" => {
             let mut pins = exec(true);
@@ -339,6 +407,17 @@ fn template(kind: &str) -> Option<Vec<PinSpec>> {
             pins.push(do_("Success", DataType::Bool));
             pins
         }
+        "LspCheck" => {
+            let mut pins = exec(true);
+            pins.push(di("Path", DataType::String));
+            pins.push(di("TimeoutMs", DataType::Int));
+            pins.push(do_("Passed", DataType::Bool));
+            pins.push(do_("Errors", DataType::Int));
+            pins.push(do_("Warnings", DataType::Int));
+            pins.push(do_("Diagnostics", DataType::String));
+            pins.push(do_("Problems", DataType::List(Box::new(DataType::Json))));
+            pins
+        }
         "RequestApproval" => {
             let mut pins = vec![i("x-in")];
             pins.push(PinSpec {
@@ -367,6 +446,129 @@ fn template(kind: &str) -> Option<Vec<PinSpec>> {
             let mut pins = exec(true);
             pins.push(di("ToolName", DataType::String));
             pins.push(di("Command", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        // Round 13 search/edit tools: the DSL names them directly and the
+        // compiler rewrites the kind to `Tool` with `tool_name` set, so the
+        // pins mirror each tool's JSON schema argument names.
+        "Grep" => {
+            let mut pins = exec(true);
+            pins.push(di("pattern", DataType::String));
+            pins.push(di("path", DataType::String));
+            pins.push(di("glob", DataType::String));
+            pins.push(di("case_insensitive", DataType::Bool));
+            pins.push(di("context_lines", DataType::Int));
+            pins.push(di("max_matches", DataType::Int));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "Glob" => {
+            let mut pins = exec(true);
+            pins.push(di("pattern", DataType::String));
+            pins.push(di("path", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "EditFile" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(di("edits", DataType::Json));
+            pins.push(di("expected_sha256", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "ReadFile" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(di("offset", DataType::Int));
+            pins.push(di("limit", DataType::Int));
+            pins.push(di("line_numbers", DataType::Bool));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "WriteFile" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(di("content", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "ListDirectory" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "SearchFile" => {
+            let mut pins = exec(true);
+            pins.push(di("root", DataType::String));
+            pins.push(di("query", DataType::String));
+            pins.push(do_("Result", DataType::List(Box::new(DataType::String))));
+            pins
+        }
+        "ExecuteCommand" => {
+            let mut pins = exec(true);
+            pins.push(di("command", DataType::String));
+            pins.push(di("cwd", DataType::String));
+            pins.push(di("timeout_secs", DataType::Int));
+            pins.push(do_("Result", DataType::Json));
+            pins
+        }
+        "StartCommand" => {
+            let mut pins = exec(true);
+            pins.push(di("command", DataType::String));
+            pins.push(di("cwd", DataType::String));
+            pins.push(do_("Result", DataType::Json));
+            pins
+        }
+        "JobStatus" => {
+            let mut pins = exec(true);
+            pins.push(di("job_id", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "WaitJob" => {
+            let mut pins = exec(true);
+            pins.push(di("job_id", DataType::String));
+            pins.push(di("timeout_secs", DataType::Int));
+            pins.push(do_("Result", DataType::Json));
+            pins
+        }
+        "KillJob" => {
+            let mut pins = exec(true);
+            pins.push(di("job_id", DataType::String));
+            pins.push(do_("Result", DataType::String));
+            pins
+        }
+        "GetDependencies" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(do_("Result", DataType::Json));
+            pins
+        }
+        "CheckDiagnostics" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(di("timeout_ms", DataType::Int));
+            pins.push(do_("Result", DataType::Json));
+            pins
+        }
+        "GetHover" | "FindDefinition" => {
+            let mut pins = exec(true);
+            pins.push(di("path", DataType::String));
+            pins.push(di("line", DataType::Int));
+            pins.push(di("character", DataType::Int));
+            pins.push(do_("Result", DataType::Json));
+            pins
+        }
+        "ReleaseContext" => {
+            let mut pins = exec(true);
+            pins.push(di("paths", DataType::List(Box::new(DataType::String))));
+            pins.push(di("patterns", DataType::List(Box::new(DataType::String))));
+            pins.push(di("tools", DataType::List(Box::new(DataType::String))));
+            pins.push(di("all", DataType::Bool));
+            pins.push(di("keep_recent", DataType::Int));
             pins.push(do_("Result", DataType::String));
             pins
         }
@@ -399,18 +601,18 @@ fn fold_validator_retry(data: &mut serde_json::Map<String, serde_json::Value>) {
 }
 
 /// Returns the node category a kind belongs to for compiled blueprints.
-fn node_type_of(kind: &str) -> NodeType {
+pub(crate) fn node_type_of(kind: &str) -> NodeType {
     match kind {
         "Start" | "End" | "FunctionEntry" | "FunctionExit" => NodeType::Event,
-        "Branch" | "Switch" | "ForEach" | "RequestApproval" => NodeType::Control,
+        "Branch" | "Switch" | "ForEach" | "RequestApproval" | "LspCheck" => NodeType::Control,
         "Add" | "Subtract" | "Multiply" | "Divide" | "Modulo" | "Power" | "Min" | "Max" | "Abs"
         | "Round" | "Equal" | "NotEqual" | "Greater" | "Less" | "GreaterEqual" | "LessEqual"
         | "And" | "Or" | "Xor" | "Not" | "Concat" | "Length" | "Upper" | "Lower" | "Trim"
         | "Contains" | "Replace" | "Substring" | "ToString" | "ToInt" | "ToFloat" | "ToBool"
         | "ToJson" | "ParseJson" | "ListCreate" | "ListAppend" | "ListGet" | "ListLength"
         | "ListContains" | "JsonGet" | "JsonSet" | "ContextCreate" | "ContextClone"
-        | "ContextMerge" | "ContextFilter" | "ContextTrim" | "ContextToText" | "Delay"
-        | "VariableGet" => NodeType::Pure,
+        | "ContextMerge" | "ContextFilter" | "ContextTrim" | "ContextRelease" | "ContextToText"
+        | "Delay" | "VariableGet" => NodeType::Pure,
         _ => NodeType::Function,
     }
 }
@@ -580,10 +782,21 @@ pub fn compile(source: &str) -> SharedResult<Blueprint> {
         if kind == "Validator" {
             fold_validator_retry(&mut data);
         }
+        // The three Round 13 search/edit tools are ordinary registry tools, so
+        // the DSL spells them by name and the compiler emits a `Tool` node with
+        // the matching `tool_name`; everything else about the node is generic.
+        let (node_kind, tool_name) = match kind.as_str() {
+            // Registry tools the DSL names directly resolve to `Tool` nodes.
+            k if REGISTRY_TOOL_KINDS.contains(&k) => ("Tool", Some(k.to_string())),
+            _ => (kind.as_str(), None),
+        };
+        if let Some(tool_name) = tool_name {
+            data.insert("tool_name".to_string(), serde_json::Value::String(tool_name));
+        }
         blueprint.nodes.push(Node {
             id: node_id,
-            node_type: node_type_of(kind),
-            kind: kind.clone(),
+            node_type: node_type_of(node_kind),
+            kind: node_kind.to_string(),
             position: (0.0, 0.0),
             pins,
             data: serde_json::Value::Object(data),

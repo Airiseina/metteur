@@ -36,6 +36,10 @@ impl Tool for SnapshotTake {
         })
     }
 
+    fn max_result_bytes(&self) -> usize {
+        4 * 1024
+    }
+
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {
         let manager = ctx.version_manager.clone().ok_or_else(|| {
             DaemonError::Execution("SnapshotTake requires an attached version manager".to_string())

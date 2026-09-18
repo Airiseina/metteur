@@ -1,7 +1,7 @@
 //! The `GetDependencies` tool backed by the workspace dependency graph.
 
 use async_trait::async_trait;
-use metteur_shared::Value;
+use metteur_shared::{ToolResultLifetime, Value};
 
 use crate::error::{DaemonError, DaemonResult};
 use crate::execution::context::ExecutionContext;
@@ -30,6 +30,14 @@ impl Tool for GetDependencies {
             },
             "required": ["path"]
         })
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn lifetime(&self) -> ToolResultLifetime {
+        ToolResultLifetime::Persistent
     }
 
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {

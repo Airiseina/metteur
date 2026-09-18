@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { Activity, BarChart3, CircleDot, Network, Terminal, X } from '@lucide/vue'
+import {
+  Activity,
+  BarChart3,
+  Check,
+  CircleDot,
+  ListChecks,
+  Loader,
+  Network,
+  Terminal,
+  X,
+} from '@lucide/vue'
 import { useExecutionStore } from '@/stores/execution'
 import ExecTreeRow from './ExecTreeRow.vue'
 import type { EventLine } from '@/stores/execution'
@@ -25,9 +35,17 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'update:open', open: boolean): void }>()
 
 const execution = useExecutionStore()
-const tab = ref<'log' | 'context' | 'node' | 'tree'>('log')
+const tab = ref<'log' | 'context' | 'node' | 'tree' | 'todo'>('log')
 
 const close = () => emit('update:open', false)
+
+/** Progress line for the task list ("2/5 completed, 1 in progress"). */
+const todoProgress = computed(() => {
+  const list = execution.todos
+  const completed = list.filter((t) => t.status === 'completed').length
+  const active = list.filter((t) => t.status === 'in_progress').length
+  return `${completed}/${list.length} completed · ${active} in progress`
+})
 
 /* Log tab                                                               */
 
@@ -37,6 +55,7 @@ const KIND_TONE: Record<EventLine['kind'], string> = {
   message: 'text-muted-foreground',
   approval_request: 'text-amber-600 dark:text-amber-400',
   context: 'text-violet-500',
+  todos: 'text-teal-600 dark:text-teal-400',
   node_data: 'text-sky-600 dark:text-sky-400',
   error: 'text-danger',
 }
@@ -152,6 +171,15 @@ const auditLabel = computed(() => inspectedId.value ?? '—')
         >
           <Network class="h-3.5 w-3.5" />
         </button>
+        <button
+          class="btn-icon h-6! w-6!"
+          type="button"
+          :class="tab === 'todo' ? 'bg-hover text-foreground' : ''"
+          title="Task list"
+          @click="tab = 'todo'"
+        >
+          <ListChecks class="h-3.5 w-3.5" />
+        </button>
         <button class="btn-icon h-6! w-6!" type="button" title="Close audit" @click="close">
           <X class="h-3.5 w-3.5" />
         </button>
@@ -242,6 +270,46 @@ const auditLabel = computed(() => inspectedId.value ?? '—')
       <p v-else class="text-[11.5px] text-muted-foreground">
         Select a node on the canvas to inspect its audit data.
       </p>
+    </div>
+
+    <!-- Task-list tab -->
+    <div v-else-if="tab === 'todo'" class="min-h-0 flex-1 overflow-y-auto p-3">
+      <p v-if="execution.todos.length === 0" class="text-[11.5px] text-muted-foreground">
+        No task list — the agent records one when a task has multiple steps.
+      </p>
+      <template v-else>
+        <p class="mb-2 text-[11px] text-muted-foreground">
+          {{ todoProgress }}
+        </p>
+        <ul class="space-y-1">
+          <li
+            v-for="(todo, index) in execution.todos"
+            :key="index"
+            class="flex items-start gap-2 text-[12px] leading-5"
+          >
+            <Check
+              v-if="todo.status === 'completed'"
+              class="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+            />
+            <Loader
+              v-else-if="todo.status === 'in_progress'"
+              class="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary"
+            />
+            <span v-else class="mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full border border-border" />
+            <span
+              :class="
+                todo.status === 'completed'
+                  ? 'text-muted-foreground line-through'
+                  : todo.status === 'in_progress'
+                    ? 'font-medium'
+                    : ''
+              "
+            >
+              {{ todo.status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content }}
+            </span>
+          </li>
+        </ul>
+      </template>
     </div>
 
     <!-- Execution-tree tab -->

@@ -20,6 +20,8 @@
 mod compile;
 mod decompile;
 mod parser;
+mod shorthand;
 
 pub use compile::compile;
 pub use decompile::decompile;
+pub use shorthand::{compile_draft, compile_draft_value};

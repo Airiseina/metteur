@@ -82,6 +82,15 @@ service Daemon {
   // Live file-change events for the workspace (created / modified / removed).
   rpc WatchWorkspace(WatchWorkspaceRequest) returns (stream WatchEvent);
 
+  // Background commands (jobs) of the workspace.
+  rpc ListJobs(ListJobsRequest) returns (JobList);
+  rpc WatchJobs(WatchJobsRequest) returns (stream JobEvent);
+  // Terminates one background command (a user action from the job panel).
+  rpc KillJob(KillJobRequest) returns (KillJobResponse);
+
+  // File content as recorded by a snapshot, for side-by-side diffs.
+  rpc GetFileAtSnapshot(GetFileAtSnapshotRequest) returns (GetFileAtSnapshotResponse);
+
   // ReAct chat (one chat run per workspace at a time).
   rpc SendChat(SendChatRequest) returns (stream ChatEvent);
   rpc AbortChat(AbortChatRequest) returns (Empty);
@@ -122,6 +131,10 @@ message LoadBlueprintRequest {
 message ExecuteBlueprintRequest {
   string workspace_path = 1;
   string blueprint_id = 2;
+  // Blueprint JSON to execute as-is (the canvas the client is looking at).
+  // When set it takes precedence over `blueprint_id` and is mirrored into the
+  // workspace database, so the stored copy matches what actually ran.
+  string blueprint_json = 3;
 }
 
 message ExecutionEvent {
@@ -300,6 +313,9 @@ message ModelUsage {
   uint64 output_tokens = 4;
   uint64 reasoning_tokens = 5;
   uint64 cost_micros = 6;
+  // Prompt-cache breakdown of input_tokens (0 when the provider reports none).
+  uint64 cached_input_tokens = 7;
+  uint64 cache_write_input_tokens = 8;
 }
 
 message UsageSummary {
@@ -503,6 +519,80 @@ message WatchEvent {
   string kind = 2;
 }
 
+// ---- Background commands (jobs) ------------------------------------------------
+
+message ListJobsRequest {
+  string workspace_path = 1;
+}
+
+message JobInfo {
+  string id = 1;
+  string command = 2;
+  // Working directory relative to the workspace root.
+  string cwd = 3;
+  // One of: running | exited | failed | killed.
+  string state = 4;
+  // Process exit code; -1 when the job did not exit with a code.
+  int32 exit_code = 5;
+  // Identifier of the run that started the job.
+  string run_id = 6;
+  uint64 started_at = 7;
+  uint64 finished_at = 8;
+  // Total output bytes produced (the retained buffer keeps only the tail).
+  uint64 output_bytes = 9;
+  // Trailing output, for a quick look without subscribing.
+  string tail = 10;
+}
+
+message JobList {
+  repeated JobInfo jobs = 1;
+}
+
+message WatchJobsRequest {
+  string workspace_path = 1;
+}
+
+message JobEvent {
+  string job_id = 1;
+  // One of: started | output | finished.
+  string kind = 2;
+  // New output text for `output` events.
+  string chunk = 3;
+  // One of: running | exited | failed | killed.
+  string state = 4;
+  int32 exit_code = 5;
+  // One-line summary for `started` and `finished` events.
+  string summary = 6;
+}
+
+message KillJobRequest {
+  string workspace_path = 1;
+  string job_id = 2;
+}
+
+message KillJobResponse {
+  // Whether a running job was asked to stop (false = already finished).
+  bool killed = 1;
+  // The job's state label after the request.
+  string state = 2;
+}
+
+message GetFileAtSnapshotRequest {
+  string workspace_path = 1;
+  // Workspace-relative path.
+  string path = 2;
+  // Snapshot to read; empty means the most recent snapshot.
+  string snapshot_id = 3;
+}
+
+message GetFileAtSnapshotResponse {
+  // Whether the snapshot tracked this file (false = added since then).
+  bool found = 1;
+  string content = 2;
+  // The snapshot actually read, empty when the workspace has none.
+  string snapshot_id = 3;
+}
+
 // ---- ReAct chat ---------------------------------------------------------------
 
 message SendChatRequest {
@@ -560,6 +650,8 @@ message GetChatSessionResponse {
   int64 created_at = 2;
   // JSON array of `{role, content}` (user/assistant only) for UI restore.
   string history_json = 3;
+  // JSON array of the agent's task list at the end of the last turn.
+  string todos_json = 4;
 }
 
 message DeleteChatSessionRequest {

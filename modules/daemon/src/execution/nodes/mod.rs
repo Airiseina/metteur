@@ -10,6 +10,7 @@ pub mod flow_nodes;
 pub mod foreach;
 pub mod function;
 pub mod judge;
+pub mod lsp_nodes;
 pub mod pure;
 pub mod string_ops;
 pub mod tool;
@@ -25,13 +26,14 @@ pub use collections::{
 };
 pub use context_nodes::{
     ContextCloneExecutor, ContextCreateExecutor, ContextFilterExecutor, ContextMergeExecutor,
-    ContextToTextExecutor, ContextTrimExecutor,
+    ContextReleaseExecutor, ContextToTextExecutor, ContextTrimExecutor,
 };
 pub use control::{BranchExecutor, SwitchExecutor};
 pub use flow_nodes::{DelayExecutor, RequestApprovalExecutor};
 pub use foreach::ForEachExecutor;
 pub use function::{CallFunctionExecutor, FunctionEntryExecutor, FunctionExitExecutor};
 pub use judge::JudgeExecutor;
+pub use lsp_nodes::LspCheckExecutor;
 pub use pure::{
     AbsExecutor, AndExecutor, EqualExecutor, GreaterEqualExecutor, GreaterExecutor,
     LessEqualExecutor, LessExecutor, MaxExecutor, MinExecutor, ModuloExecutor, NotEqualExecutor,
@@ -104,8 +106,10 @@ impl crate::registry::NodeExecutor for StartExecutor {
         if let Some(pin) =
             node.pins.iter().find(|p| p.name == "Context" && p.pin_type == PinType::DataOutput)
         {
+            let mut system_fragments = crate::harness::HarnessPrompt::fragments(ctx).await;
+            system_fragments.extend(ctx.addon_fragments.iter().cloned());
             let context = metteur_shared::llm::ContextManager {
-                system_fragments: ctx.addon_fragments.clone(),
+                system_fragments,
                 ..Default::default()
             };
             outputs.insert(pin.id, Value::Context(context));
@@ -161,6 +165,20 @@ pub(crate) fn numeric_output(
         .find(|p| p.name == name)
         .ok_or_else(|| DaemonError::Execution(format!("missing pin {name}")))?;
     Ok(HashMap::from([(pin.id, Value::Float(value))]))
+}
+
+/// Writes an integer value to the named output pin.
+pub(crate) fn int_output(
+    node: &Node,
+    name: &str,
+    value: i64,
+) -> DaemonResult<HashMap<PinId, Value>> {
+    let pin = node
+        .pins
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| DaemonError::Execution(format!("missing pin {name}")))?;
+    Ok(HashMap::from([(pin.id, Value::Int(value))]))
 }
 
 /// Writes a boolean value to the named output pin.

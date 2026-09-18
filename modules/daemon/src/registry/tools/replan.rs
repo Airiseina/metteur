@@ -48,6 +48,10 @@ impl Tool for ReplanBlueprint {
         })
     }
 
+    fn max_result_bytes(&self) -> usize {
+        4 * 1024
+    }
+
     async fn call(&self, args: &[Value], ctx: &mut ExecutionContext) -> DaemonResult<Value> {
         let a = Args::new(args);
         let summary = a.string("summary", 0).ok_or_else(|| {

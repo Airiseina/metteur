@@ -7,6 +7,7 @@ import type {
   ChatOptions,
   ChatSessionInfo,
   ChatUsage,
+  TodoItem,
   FileTreeNode,
 } from '@/core'
 import { useWorkspaceStore } from './workspace'
@@ -36,6 +37,8 @@ export const useChatStore = defineStore('chat', () => {
   const threads = ref<ChatSessionInfo[]>([])
   /** Token usage of the most recently completed turn. */
   const lastUsage = ref<ChatUsage | null>(null)
+  /** The agent's task list for the open conversation. */
+  const todos = ref<TodoItem[]>([])
 
   // Files / addons driving the composer's attach, @-mention and plugin toggles.
   const files = ref<FileTreeNode[]>([])
@@ -57,6 +60,7 @@ export const useChatStore = defineStore('chat', () => {
       pendingFiles.value = []
       sessionId.value = ''
       lastUsage.value = null
+      todos.value = []
       if (workspace.active?.path) await restore()
     },
     { immediate: true },
@@ -86,10 +90,10 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /** Switch the surface to an existing thread. */
-  async function switchTo(sessionId: string): Promise<void> {
+  async function switchTo(threadId: string): Promise<void> {
     const ws = workspace.active
     if (!ws) return
-    await openThread(ws.path, sessionId, '')
+    await openThread(ws.path, threadId, '')
   }
 
   /** Load one thread into the surface (empty history on failure). */
@@ -102,8 +106,10 @@ export const useChatStore = defineStore('chat', () => {
     if (snap.ok) {
       messages.value = snap.data.history
       sessionId.value = snap.data.sessionId
+      todos.value = snap.data.todos ?? []
     } else {
       messages.value = []
+      todos.value = []
     }
     if (title) {
       const info = threads.value.find((t) => t.sessionId === id)
@@ -185,12 +191,29 @@ export const useChatStore = defineStore('chat', () => {
         (usage) => {
           lastUsage.value = usage
         },
+        (next) => {
+          // Live plan updates stream in while the turn runs.
+          todos.value = next
+        },
       )
       await refreshThreads()
+      if (!r.ok) {
+        // Failures used to vanish here, which made a broken turn look like a
+        // silent stop; the reason is part of the transcript.
+        messages.value.push({
+          id: `e-${Date.now()}`,
+          role: 'error',
+          content: r.error || 'The turn failed.',
+          createdAt: Date.now(),
+        })
+      }
       return r.ok
     } finally {
       if (streaming.value) {
-        for (const m of messages.value) m.pending = false
+        for (const m of messages.value) {
+          m.pending = false
+          m.reasoningPending = false
+        }
         streaming.value = false
       }
       busy.value = false
@@ -214,9 +237,19 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     const existing = messages.value[idx]
-    // Deltas append into the pending bubble; final events replace it.
-    if (existing.pending && m.pending) existing.content += m.content
-    else messages.value[idx] = m
+    if (existing.pending && m.pending) {
+      // Deltas append into the open bubble. Text and reasoning stream on
+      // separate channels, so each accumulates into its own field.
+      existing.content += m.content
+      if (m.reasoning) existing.reasoning = (existing.reasoning ?? '') + m.reasoning
+      if (m.reasoningPending) existing.reasoningPending = true
+      return
+    }
+    // A final event replaces the bubble; reasoning streamed earlier survives
+    // when the provider does not repeat it in the final payload.
+    if (!m.reasoning && existing.reasoning) m.reasoning = existing.reasoning
+    m.reasoningPending = false
+    messages.value[idx] = m
   }
 
   /** Start a fresh conversation without touching the previous thread.
@@ -228,6 +261,7 @@ export const useChatStore = defineStore('chat', () => {
     messages.value = []
     sessionId.value = ''
     lastUsage.value = null
+    todos.value = []
     await refreshThreads()
   }
 
@@ -263,6 +297,7 @@ export const useChatStore = defineStore('chat', () => {
     sessionId,
     threads,
     lastUsage,
+    todos,
     files,
     filesLoading,
     addons,

@@ -24,6 +24,8 @@ pub struct ModelUsageSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
     pub cost_micros: u64,
 }
 
@@ -39,17 +41,26 @@ pub struct UsageSummaryData {
 ///
 /// `pricing` is the model's effective price table (see [`effective_pricing`]);
 /// `None` means the model has no configured pricing. Reasoning tokens are
-/// billed as output tokens.
+/// billed as output tokens. When the provider reports cache traffic, the
+/// matching cache rates apply and fall back to the regular input rate when the
+/// model config leaves them unset.
 pub fn cost(
     pricing: Option<&ModelPricing>,
     currency: &str,
     usage: &metteur_shared::Usage,
 ) -> Option<Cost> {
     let p = pricing?;
-    let input = p.input_per_mtok * usage.input_tokens as f64 / 1_000_000.0;
+    let uncached = usage.uncached_input_tokens();
+    let cache_hit_rate =
+        if p.cache_hit_per_mtok > 0.0 { p.cache_hit_per_mtok } else { p.input_per_mtok };
+    let cache_write_rate =
+        if p.cache_write_per_mtok > 0.0 { p.cache_write_per_mtok } else { p.input_per_mtok };
+    let input = p.input_per_mtok * uncached as f64
+        + cache_hit_rate * usage.cached_input_tokens as f64
+        + cache_write_rate * usage.cache_write_input_tokens as f64;
     let output =
-        p.output_per_mtok * (usage.output_tokens + usage.reasoning_tokens) as f64 / 1_000_000.0;
-    let total = input + output;
+        p.output_per_mtok * (usage.output_tokens + usage.reasoning_tokens) as f64;
+    let total = (input + output) / 1_000_000.0;
 
     Some(Cost {
         micros: (total * 1_000_000.0).round() as u64,
@@ -137,12 +148,16 @@ pub fn run_usage(
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
             cost_micros: 0,
         });
         slot.calls += 1;
         slot.input_tokens += get("input_tokens");
         slot.output_tokens += get("output_tokens");
         slot.reasoning_tokens += get("reasoning_tokens");
+        slot.cached_input_tokens += get("cached_input_tokens");
+        slot.cache_write_input_tokens += get("cache_write_input_tokens");
         let cost_micros = get("cost_micros");
         slot.cost_micros += cost_micros;
         total += cost_micros;
@@ -200,6 +215,36 @@ mod tests {
     }
 
     #[test]
+    fn cache_traffic_uses_the_cache_rates() {
+        let mut p = pricing(1.0, 10.0);
+        p.cache_hit_per_mtok = 0.1;
+        p.cache_write_per_mtok = 1.25;
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cached_input_tokens: 500_000,
+            cache_write_input_tokens: 200_000,
+            ..Usage::default()
+        };
+        let cost = cost(Some(&p), "USD", &usage).unwrap();
+        // 0.3M uncached @ $1 + 0.5M hit @ $0.1 + 0.2M write @ $1.25 = $0.6.
+        assert_eq!(cost.micros, 600_000);
+    }
+
+    #[test]
+    fn missing_cache_rates_fall_back_to_the_input_rate() {
+        let p = pricing(2.0, 10.0);
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 1_000_000,
+            ..Usage::default()
+        };
+        let cost = cost(Some(&p), "USD", &usage).unwrap();
+        // Without a cache-hit rate the tokens bill as regular input.
+        assert_eq!(cost.micros, 2_000_000);
+    }
+
+    #[test]
     fn computes_peak_cost() {
         let p = pricing(1.0, 10.0);
         let usage = Usage {
@@ -207,6 +252,7 @@ mod tests {
             output_tokens: 100_000,
             reasoning_tokens: 0,
             total_tokens: 1_100_000,
+            ..Usage::default()
         };
         let cost = cost(Some(&p), "USD", &usage).unwrap();
         assert_eq!(cost.micros, 2_000_000); // $1 input + $1 output

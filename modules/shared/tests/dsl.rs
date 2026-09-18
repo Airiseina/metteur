@@ -160,3 +160,22 @@ fn foreach_and_variable_nodes_compile() {
     let bp2 = compile(&text).unwrap();
     assert_eq!(bp2.nodes.len(), bp.nodes.len());
 }
+
+#[test]
+fn context_release_and_registry_tools_compile() {
+    // Both the deterministic context node and the model-facing tool must be
+    // declarable from the DSL.
+    let source = "blueprint \"Trim\"
+entry start: Start()
+trim: ContextRelease(Context <- start.Context, all = true)
+read: ReleaseContext(patterns = [\"src/**/*.rs\"], keep_recent = 2)
+start -> trim
+trim -> read
+";
+    let bp = compile(source).unwrap();
+    let trim = bp.nodes.iter().find(|n| n.kind == "ContextRelease").expect("node present");
+    assert_eq!(trim.data["all"], true);
+    assert!(trim.pins.iter().any(|p| p.name == "Released"));
+    let read = bp.nodes.iter().find(|n| n.kind == "Tool").expect("tool node present");
+    assert_eq!(read.data["tool_name"], "ReleaseContext");
+}

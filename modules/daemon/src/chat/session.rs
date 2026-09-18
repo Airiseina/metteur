@@ -37,6 +37,9 @@ pub struct ChatSessionRecord {
     pub title: Option<String>,
     /// The conversation context, including retained tool results.
     pub context: ContextManager,
+    /// The agent's task list at the end of the last turn.
+    #[serde(default)]
+    pub todos: Vec<metteur_shared::llm::TodoItem>,
 }
 
 impl ChatSessionRecord {
@@ -49,6 +52,7 @@ impl ChatSessionRecord {
             turns: 0,
             title: title_of(&context),
             context,
+            todos: Vec::new(),
         }
     }
 }
@@ -86,8 +90,17 @@ pub fn load_thread(db: &Db, session_id: &Uuid) -> DaemonResult<Option<ChatSessio
     let Some(data) = db.get(cf::CHAT_THREADS, session_id.as_bytes())? else {
         return Ok(None);
     };
-    let record: ChatSessionRecord =
+    let mut record: ChatSessionRecord =
         serde_json::from_slice(&data).map_err(|e| DaemonError::Serialization(e.to_string()))?;
+    // Sessions written by an older build can carry an invalid tool-call
+    // sequence that a provider rejects on the next request; repair it before
+    // the conversation is resumed (the next save persists the fix).
+    let repaired = record.context.repair_tool_pairing();
+    if repaired > 0 {
+        tracing::warn!(
+            "chat session {session_id}: repaired {repaired} out-of-order message(s)"
+        );
+    }
     Ok(Some(record))
 }
 

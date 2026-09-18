@@ -18,7 +18,9 @@ clap.workspace = true
 directories.workspace = true
 ed25519-dalek.workspace = true
 extism.workspace = true
+globset.workspace = true
 http.workspace = true
+ignore.workspace = true
 libc.workspace = true
 lsp-types.workspace = true
 metteur-proto = { path = "../proto" }
@@ -38,6 +40,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

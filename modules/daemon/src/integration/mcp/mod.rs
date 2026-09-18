@@ -20,6 +20,26 @@ use crate::registry::Registry;
 
 use connection::McpConnectionOps;
 
+/// Merges the global MCP servers with those declared by open workspaces.
+///
+/// Server processes are daemon-wide, so the effective set is a union: a
+/// workspace declaration overrides a global one with the same alias (the more
+/// specific scope wins), and servers only some workspace declares stay
+/// available while that workspace is open. The section-level timeout keeps the
+/// global value, since one host carries a single timeout.
+pub fn merge_servers(
+    global: &McpConfig,
+    workspace_configs: &[McpConfig],
+) -> McpConfig {
+    let mut merged = global.clone();
+    for config in workspace_configs {
+        for (alias, server) in &config.servers {
+            merged.servers.insert(alias.clone(), server.clone());
+        }
+    }
+    merged
+}
+
 /// Default per-call timeout when `[mcp] call_timeout_secs` is unset.
 pub(crate) const DEFAULT_CALL_TIMEOUT_SECS: u64 = 30;
 
@@ -360,5 +380,63 @@ mod tests {
         let _host = McpHost::new(registry.clone(), Arc::new(Metrics::default()));
         assert!(registry.tool("ListMcpResources").is_some());
         assert!(registry.tool("ReadMcpResource").is_some());
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn server(command: &str) -> McpServerConfig {
+        McpServerConfig {
+            transport: "stdio".to_string(),
+            command: vec![command.to_string()],
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    fn config(servers: &[(&str, &str)]) -> McpConfig {
+        McpConfig {
+            servers: servers.iter().map(|(a, c)| (a.to_string(), server(c))).collect(),
+            call_timeout_secs: 0,
+        }
+    }
+
+    #[test]
+    fn union_keeps_global_and_workspace_servers() {
+        let global = config(&[("files", "filesrv")]);
+        let workspace = config(&[("db", "dbsrv")]);
+        let merged = merge_servers(&global, &[workspace]);
+        assert_eq!(merged.servers.len(), 2);
+        assert!(merged.servers.contains_key("files"));
+        assert!(merged.servers.contains_key("db"));
+    }
+
+    #[test]
+    fn workspace_overrides_a_global_alias() {
+        let global = config(&[("shared", "global-srv")]);
+        let workspace = config(&[("shared", "workspace-srv")]);
+        let merged = merge_servers(&global, &[workspace]);
+        assert_eq!(merged.servers.len(), 1);
+        assert_eq!(merged.servers["shared"].command, vec!["workspace-srv".to_string()]);
+    }
+
+    #[test]
+    fn last_workspace_wins_on_a_collision() {
+        let global = McpConfig::default();
+        let first = config(&[("shared", "first-srv")]);
+        let second = config(&[("shared", "second-srv")]);
+        let merged = merge_servers(&global, &[first, second]);
+        assert_eq!(merged.servers["shared"].command, vec!["second-srv".to_string()]);
+    }
+
+    #[test]
+    fn no_workspace_yields_the_global_set() {
+        let global = config(&[("files", "filesrv")]);
+        let merged = merge_servers(&global, &[]);
+        assert_eq!(merged.servers.len(), 1);
+        // The section timeout always comes from the global layer.
+        assert_eq!(merged.call_timeout_secs, global.call_timeout_secs);
     }
 }

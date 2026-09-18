@@ -111,7 +111,8 @@ pub async fn run(
     let metrics = Arc::new(crate::observability::metrics::Metrics::default());
     let mcp_host = crate::integration::mcp::McpHost::new(registry.clone(), metrics.clone());
     // Initial sync before the server accepts requests; failures are isolated
-    // per server and reported through `ListMcpServers`.
+    // per server and reported through `ListMcpServers`. Workspace-declared
+    // servers are added once their workspaces open (see `resync_mcp`).
     mcp_host.sync(&global_config.mcp).await;
 
     let addon_host = crate::addon::AddonHost::new(

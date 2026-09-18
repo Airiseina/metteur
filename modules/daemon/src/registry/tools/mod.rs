@@ -1,12 +1,18 @@
 //! Built-in tools available to blueprints and LLM agents.
 
+pub mod blueprint;
 pub mod command;
+pub mod context;
 pub mod deps;
+pub mod edit;
 pub mod fs_tools;
 pub mod lsp_tools;
 pub mod replan;
+pub mod result;
+pub mod search;
 pub mod snapshot;
 pub mod subagent;
+pub mod todo;
 
 use metteur_shared::Value;
 
@@ -36,6 +42,15 @@ impl<'a> Args<'a> {
         self.get(name, index).and_then(|v| match v {
             Value::String(s) => Some(s),
             Value::Json(j) => j.as_str().map(|s| s.to_string()),
+            _ => None,
+        })
+    }
+
+    /// Returns a boolean argument, accepting booleans embedded in JSON.
+    pub(crate) fn bool(&self, name: &str, index: usize) -> Option<bool> {
+        self.get(name, index).and_then(|v| match v {
+            Value::Bool(b) => Some(b),
+            Value::Json(j) => j.as_bool(),
             _ => None,
         })
     }

@@ -3,7 +3,9 @@ import { computed, ref } from 'vue'
 import { gateway } from '@/core'
 import type {
   ApprovalRequest,
+  Blueprint,
   ContextRegion,
+  TodoItem,
   ExecStatus,
   ExecTreeData,
   ExecutionEvent,
@@ -41,6 +43,8 @@ export const useExecutionStore = defineStore('execution', () => {
   const runId = ref<string | null>(null)
   /** The agent execution tree of the latest run (loaded on finish). */
   const tree = ref<ExecTreeData | null>(null)
+  /** The agent's task list reported by the running blueprint. */
+  const todos = ref<TodoItem[]>([])
   /** Live per-node audit facts, fed by started/finished/node_data/context. */
   const nodeAudits = ref<Map<string, NodeAudit>>(new Map())
 
@@ -87,6 +91,9 @@ export const useExecutionStore = defineStore('execution', () => {
       const summary = ev.detail?.summary
       audit.message = typeof summary === 'string' ? summary : ev.message
     }
+    if (ev.kind === 'todos' && Array.isArray(ev.detail?.todos)) {
+      todos.value = ev.detail.todos as TodoItem[]
+    }
     if (ev.kind === 'context' && Array.isArray(ev.detail?.regions)) {
       const regions = (ev.detail.regions as unknown as ContextRegion[]).map((r) => ({
         region: r.region,
@@ -103,7 +110,7 @@ export const useExecutionStore = defineStore('execution', () => {
     if (events.value.length > limit) events.value.splice(0, events.value.length - limit)
   }
 
-  async function run(blueprintId: string) {
+  async function run(blueprintId: string, blueprint?: Blueprint) {
     const ws = workspace.active
     if (!ws) return
     events.value = []
@@ -112,9 +119,15 @@ export const useExecutionStore = defineStore('execution', () => {
     contextByNode.value = new Map()
     nodeAudits.value = new Map()
     tree.value = null
+    todos.value = []
     status.value = 'running'
     runId.value = null
-    await gateway.executeBlueprint(ws.path, blueprintId, (ev) => {
+    // Passing the canvas makes Run execute what the editor shows, independent
+    // of whether the daemon-side mirror is current.
+    await gateway.executeBlueprint(
+      ws.path,
+      blueprintId,
+      (ev) => {
       push(ev)
       if (ev.kind === 'approval_request') {
         const detail = (ev.detail ?? {}) as Record<string, unknown>
@@ -134,7 +147,9 @@ export const useExecutionStore = defineStore('execution', () => {
           requestType,
         }
       }
-    })
+      },
+      blueprint,
+    )
     // Capture the run id of the stream just finished for a later resume, and
     // load the execution tree of the finished run.
     const runs = await gateway.listExecutions(ws.path)
@@ -192,6 +207,7 @@ export const useExecutionStore = defineStore('execution', () => {
     contextTotal,
     runId,
     tree,
+    todos,
     running,
     lastEvent,
     nodeAudits,

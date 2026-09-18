@@ -11,6 +11,7 @@ pub mod depgraph;
 pub mod error;
 pub mod execution;
 pub mod grpc;
+pub mod harness;
 pub mod integration;
 pub mod llm;
 pub mod observability;
