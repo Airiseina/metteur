@@ -47,6 +47,16 @@ const isBlueprint = computed(() => filePath.value.endsWith('.blueprint'))
  *  compile it straight into a visual blueprint file. */
 const isDsl = computed(() => filePath.value.toLowerCase().endsWith('.mbp'))
 
+/**
+ * Identity of the edited file for the shared Monaco model.
+ *
+ * Scoped by workspace so two workspaces never share a model, and identical for
+ * the same file opened in both panes so both panes edit one buffer.
+ */
+const modelId = computed(
+  () => (filePath.value ? `${workspace.active?.path ?? ''}::${filePath.value}` : ''),
+)
+
 const content = ref('')
 const loaded = ref(false)
 /** Non-empty when the current file could not be opened (binary/too large). */
@@ -245,7 +255,10 @@ onMounted(() => {
     return
   }
   // Deep-link refresh: re-register the tab so the strip matches the editor.
-  tabs.openFile(filePath.value)
+  // The split pane shows a file the user opened deliberately next to the main
+  // pane, so it must not add or activate a tab: doing so would move the tab
+  // highlight away from whatever the primary pane is showing.
+  if (!props.filePath) tabs.openFile(filePath.value)
   void load()
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('focus', onWindowFocus)
@@ -456,6 +469,7 @@ async function compileToBlueprint() {
           ref="editorRef"
           v-model="content"
           :language="languageOf(filePath)"
+          :model-id="modelId"
           @update:model-value="onEdit"
           @history="onHistory"
         />

@@ -35,7 +35,7 @@ impl NodeExecutor for CallLlmExecutor {
         ctx: &mut ExecutionContext,
     ) -> DaemonResult<HashMap<PinId, Value>> {
         // Resolve the input context, cloning it for isolation.
-        let mut system = crate::harness::HarnessPrompt::fragments(ctx).await;
+        let mut system = crate::harness::fragments(ctx).await;
         // The node's own instruction is task-level: it renders after the
         // harness sections, close to the conversation.
         if let Some(text) = node
@@ -139,6 +139,9 @@ async fn react_options_from_node(node: &Node, ctx: &ExecutionContext) -> ReactOp
         label: "CallLLM".to_string(),
         mock_text: string("mock_text"),
         mock_delay_ms: data.get("mock_delay_ms").and_then(|v| v.as_u64()),
+        // Scripted steps are a chat-level affordance; a blueprint node scripts
+        // the mock with `mock_text`.
+        mock_steps: None,
         tool_error_limit: defaults.tool_error_limit,
         repeat_call_limit: defaults.repeat_call_limit,
         max_tool_results: defaults.max_tool_results as usize,

@@ -115,9 +115,8 @@ fn merge_adjacent_roles(messages: Vec<Message>) -> Vec<Message> {
     for message in messages {
         match merged.last_mut() {
             Some(last) if last.role == message.role => {
-                let combined = format!("{}
-
-{}", last.text_content(), message.text_content());
+                let combined =
+                    format!("{}\n\n{}", last.text_content(), message.text_content());
                 *last = Message::text(message.role, combined);
             }
             _ => merged.push(message),

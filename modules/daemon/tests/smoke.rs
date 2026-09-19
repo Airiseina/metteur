@@ -3512,3 +3512,121 @@ async fn smoke_get_file_at_snapshot_returns_the_recorded_content() {
         .await
         .unwrap();
 }
+
+/// A second turn into the same session must not repeat the opening turn.
+///
+/// A new session is seeded from the client's history *and* from the message
+/// field; sending the current turn in both made the first message appear twice
+/// in the stored context and in every restored view.
+#[tokio::test]
+async fn smoke_chat_first_turn_is_stored_once() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client.open_workspace(OpenWorkspaceRequest { path: ws_path.clone() }).await.unwrap();
+
+    let options = r#"{"provider":"mock","mock_text":"ok","mock_delay_ms":1}"#.to_string();
+    let first = client
+        .send_chat(SendChatRequest {
+            workspace_path: ws_path.clone(),
+            message: "only once".to_string(),
+            // The client sends its prior turns, never the one being sent.
+            history_json: "[]".to_string(),
+            options_json: options.clone(),
+            session_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut session_id = String::new();
+    let mut stream = first;
+    while let Some(event) = stream.message().await.unwrap() {
+        if event.kind == "session" {
+            let detail: serde_json::Value = serde_json::from_str(&event.detail_json).unwrap();
+            session_id = detail["session_id"].as_str().unwrap().to_string();
+        }
+    }
+
+    let snapshot = client
+        .get_chat_session(GetChatSessionRequest {
+            workspace_path: ws_path.clone(),
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let openings = snapshot
+        .history_json
+        .matches("only once")
+        .count();
+    assert_eq!(openings, 1, "the opening turn must be stored once: {}", snapshot.history_json);
+
+    let sessions = client
+        .list_chat_sessions(ListChatSessionsRequest { workspace_path: ws_path })
+        .await
+        .unwrap()
+        .into_inner();
+    let thread = sessions.sessions.first().expect("one thread");
+    // Two entries: the user turn and the answer.
+    assert_eq!(thread.message_count, 2, "count must not include a duplicate");
+}
+
+/// What the client renders is the transcript, not the model's context.
+///
+/// The context drops tool messages (a provider only accepts a narrow shape) and
+/// is rewritten by compression, so a restored conversation built from it has no
+/// tool calls at all. The transcript is what keeps them.
+#[tokio::test]
+async fn smoke_chat_transcript_keeps_tool_calls() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client.open_workspace(OpenWorkspaceRequest { path: ws_path.clone() }).await.unwrap();
+
+    let options = r#"{
+        "provider": "mock",
+        "mock_steps": [
+            { "tool_calls": [{ "name": "ReadFile", "arguments": { "path": "README.md" } }] },
+            { "text": "done" }
+        ]
+    }"#
+    .to_string();
+    let mut stream = client
+        .send_chat(SendChatRequest {
+            workspace_path: ws_path.clone(),
+            message: "read it".to_string(),
+            history_json: "[]".to_string(),
+            options_json: options,
+            session_id: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut session_id = String::new();
+    while let Some(event) = stream.message().await.unwrap() {
+        if event.kind == "session" {
+            let detail: serde_json::Value = serde_json::from_str(&event.detail_json).unwrap();
+            session_id = detail["session_id"].as_str().unwrap().to_string();
+        }
+    }
+
+    let snapshot = client
+        .get_chat_session(GetChatSessionRequest {
+            workspace_path: ws_path,
+            session_id,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let transcript: Vec<serde_json::Value> = serde_json::from_str(&snapshot.transcript_json).unwrap();
+    let tool = transcript
+        .iter()
+        .find(|entry| entry["role"] == "tool")
+        .expect("the transcript keeps the tool call");
+    assert_eq!(tool["tool"], "ReadFile");
+    // The workspace is empty, so the read fails: a failed call is exactly what
+    // a restore must keep showing, rather than a tool row that looks successful.
+    assert_eq!(tool["ok"], false);
+    assert!(tool["content"].as_str().unwrap_or_default().contains("Error"));
+    assert!(transcript.iter().any(|entry| entry["role"] == "user"));
+    assert!(transcript.iter().any(|entry| entry["role"] == "assistant"));
+}

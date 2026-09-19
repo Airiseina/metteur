@@ -33,10 +33,16 @@ export default defineConfig({
     target: 'es2022',
   },
   server: {
-    // In dev the grpc-web traffic is proxied to the Web Server Client, while
-    // the app itself is served by Vite (set VITE_MOCK=1 to use demo data).
+    // In dev the daemon traffic is proxied to the Web Server Client, while the
+    // app itself is served by Vite (set VITE_MOCK=1 to use demo data).
+    // `/api` carries the chat SSE stream and the folder picker, so it needs the
+    // same proxy as grpc-web — without it every chat turn 404s in dev.
     proxy: {
       '/metteur.Daemon': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+      },
+      '/api': {
         target: 'http://127.0.0.1:8787',
         changeOrigin: true,
       },

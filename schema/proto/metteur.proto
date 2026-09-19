@@ -652,6 +652,10 @@ message GetChatSessionResponse {
   string history_json = 3;
   // JSON array of the agent's task list at the end of the last turn.
   string todos_json = 4;
+  // Display transcript (`[{role, at, content, ...}]`), which keeps the tool
+  // calls, notices and errors that `history_json` cannot represent. Empty for
+  // sessions written before it existed.
+  string transcript_json = 5;
 }
 
 message DeleteChatSessionRequest {

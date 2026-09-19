@@ -18,18 +18,18 @@ clap.workspace = true
 directories.workspace = true
 ed25519-dalek.workspace = true
 extism.workspace = true
+getrandom.workspace = true
 globset.workspace = true
 http.workspace = true
 ignore.workspace = true
 libc.workspace = true
-lsp-types.workspace = true
+metteur-harness = { path = "../harness" }
 metteur-proto = { path = "../proto" }
 metteur-shared = { path = "../shared" }
 mimalloc.workspace = true
 notify.workspace = true
 parking_lot.workspace = true
 rcgen.workspace = true
-rand_core.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rmcp.workspace = true
@@ -53,7 +53,6 @@ twox-hash.workspace = true
 uuid.workspace = true
 x509-parser.workspace = true
 zip.workspace = true
-zip-extensions.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true

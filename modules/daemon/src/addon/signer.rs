@@ -11,7 +11,8 @@ use std::path::Path;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::SigningKey;
-use rand_core::OsRng;
+use getrandom::SysRng;
+use getrandom::rand_core::UnwrapErr;
 
 use crate::cli::Cli;
 use crate::error::{DaemonError, DaemonResult};
@@ -38,7 +39,7 @@ pub fn run(cli: &Cli) -> DaemonResult<()> {
 /// Generates a fresh keypair, stores the base64 seed in `path` and returns the
 /// base64 public key for the daemon configuration.
 fn generate_key(path: &Path) -> DaemonResult<String> {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
     std::fs::write(path, B64.encode(signing_key.to_bytes())).map_err(DaemonError::Io)?;
     Ok(B64.encode(signing_key.verifying_key().to_bytes()))
 }

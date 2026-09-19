@@ -225,8 +225,21 @@ impl DaemonService {
             _ => InterruptPriority::Normal,
         };
         let running = self.state.running.read().await;
+        if let Some(entry) = running.get(&ws_key) {
+            if let Some(bus) = &entry.interrupt_bus {
+                bus.send(Interrupt {
+                    priority,
+                    message: req.message,
+                });
+            }
+            return Ok(Response::new(Empty {}));
+        }
+        drop(running);
+        // A ReAct chat runs in its own slot: without this fallback a message
+        // typed while the agent works could not reach it.
+        let chats = self.state.chats.read().await;
         let entry =
-            running.get(&ws_key).ok_or_else(|| Status::not_found("no running execution"))?;
+            chats.get(&ws_key).ok_or_else(|| Status::not_found("no running execution or chat"))?;
         if let Some(bus) = &entry.interrupt_bus {
             bus.send(Interrupt {
                 priority,

@@ -48,7 +48,7 @@ impl NodeExecutor for AbstractExecutor {
         let anonymizer = build_anonymizer(ctx).await;
         // The planner emits JSON and calls no tools, so it gets the environment
         // (workspace path, platform) rather than the full harness prompt.
-        let system = vec![crate::harness::environment::fragment(&ctx.workspace_root, None)];
+        let system = vec![crate::harness::environment_fragment(ctx).await];
         let mut context =
             ContextManager::new_from_prompt(system, build_plan_prompt(ctx, &description));
         let mut errors = String::new();

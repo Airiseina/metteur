@@ -3,9 +3,12 @@ import { defineConfig, devices } from '@playwright/test'
 /**
  * Playwright configuration for Metteur Web Core.
  *
- * Two projects share the same Vite dev server:
- * - `e2e`    : deterministic end-to-end flows located in `e2e/`.
+ * Three projects share the same Vite dev server:
+ * - `e2e`    : deterministic end-to-end flows located in `e2e/` (demo gateway).
  * - `monkey` : randomized interaction sweep located in `e2e/monkey/`.
+ * - `live`   : flows against a real daemon (`e2e/live/`), run explicitly with
+ *              `pnpm test:live` — they need the daemon, the web server and a
+ *              configured model.
  */
 export default defineConfig({
   testDir: './e2e',
@@ -23,14 +26,26 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: '**/*.spec.ts',
-      testIgnore: '**/monkey/**',
-      use: { ...devices['Desktop Chrome'] },
+      testIgnore: ['**/monkey/**', '**/live/**'],
+      // The full Chromium build is what @playwright/browser-chromium installs;
+      // headless runs use it too instead of the separate headless shell.
+      use: { ...devices['Desktop Chrome'], channel: 'chromium' },
+    },
+    {
+      name: 'live',
+      testMatch: '**/live/**',
+      timeout: 300_000,
+      // The daemon is already running for these; reuse it instead of starting
+      // a mock dev server.
+      use: { ...devices['Desktop Chrome'], channel: 'chromium', baseURL: 'http://localhost:5173' },
     },
     {
       name: 'monkey',
       testMatch: '**/monkey/**',
       timeout: 180_000,
-      use: { ...devices['Desktop Chrome'] },
+      // The full Chromium build is what @playwright/browser-chromium installs;
+      // headless runs use it too instead of the separate headless shell.
+      use: { ...devices['Desktop Chrome'], channel: 'chromium' },
     },
   ],
   webServer: {
@@ -38,5 +53,9 @@ export default defineConfig({
     url: 'http://localhost:5173',
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
+    // Every suite runs against the deterministic demo gateway: the daemon is
+    // not assumed to be running, and the demo workspace is what makes editor,
+    // chat and explorer flows reachable at all.
+    env: { VITE_MOCK: '1' },
   },
 })

@@ -292,6 +292,17 @@ pub struct ExecutionContext {
     pub read_paths_full: Vec<std::path::PathBuf>,
     /// Context mutations requested by tools, drained by the ReAct loop.
     pub context_ops: Vec<ContextOp>,
+    /// Who answers authorization questions during this run.
+    ///
+    /// Set from the workspace configuration when the run starts and overridden
+    /// per conversation by the client's permission selector.
+    pub permission_mode: crate::sandbox::PermissionMode,
+    /// Progress sink of the tool call that is currently running.
+    ///
+    /// A long tool reports trailing output here (a build's last lines) and the
+    /// ReAct loop forwards it as an event while the call is still in flight.
+    /// `None` outside a call, and outside the streaming ReAct variant.
+    pub progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Whether a ReAct loop currently drives this context.
     ///
     /// A tool that only queues a context operation (`ReleaseContext`) has no
@@ -351,6 +362,8 @@ impl ExecutionContext {
             read_paths: Vec::new(),
             read_paths_full: Vec::new(),
             context_ops: Vec::new(),
+            permission_mode: crate::sandbox::PermissionMode::default(),
+            progress: None,
             in_react_loop: false,
             parent_context: None,
             mutated_paths: Vec::new(),

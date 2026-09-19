@@ -1,50 +1,30 @@
-//! Harness prompt assembly.
-//!
-//! Every model conversation starts from a set of system fragments owned by the
-//! harness: the agent's identity and working rules, a description of the
-//! environment, and the workspace's project instructions. They are ordinary
-//! [`SystemFragment`]s distinguished by their `harness.` scope prefix, which
-//! lets [`HarnessPrompt::refresh`] replace exactly the harness-owned fragments
-//! while leaving addon and node fragments alone.
-//!
-//! Fragment priority decides the rendered order (higher first): identity,
-//! tool rules, coding standards, plan rules, environment, project
-//! instructions, then whatever a node or the user appends.
+//! Prompt assembly: which fragments a run carries and in what order.
 
-pub mod environment;
-pub mod project;
-pub mod sections;
-
+use metteur_shared::config::Config;
 use metteur_shared::llm::{ContextManager, SystemFragment};
 
-use crate::execution::context::ExecutionContext;
+use super::environment;
+use super::facts::EnvFacts;
+use super::project;
+use super::sections::{self, PRIORITY_APPEND, SCOPE_PREFIX};
 
-/// Scope prefix of every harness-owned fragment.
-pub const SCOPE_PREFIX: &str = "harness.";
-
-/// Renders the harness fragments of the current run.
+/// Renders the harness fragments of a run.
+///
+/// Assembly is a pure function of its inputs (facts, configuration and the
+/// files the configuration points at), which is what makes the rendered prefix
+/// reproducible across turns and processes — the precondition for provider
+/// prefix caching.
 pub struct HarnessPrompt;
 
 impl HarnessPrompt {
-    /// Builds the harness fragments for `ctx`'s workspace and configuration.
-    pub async fn fragments(ctx: &ExecutionContext) -> Vec<SystemFragment> {
-        let config = match &ctx.config {
-            Some(config) => config.read().await.clone(),
-            None => metteur_shared::config::Config::default(),
-        };
-        Self::fragments_for(&ctx.workspace_root, &config)
-    }
-
     /// Builds the harness fragments for a workspace and configuration.
-    pub fn fragments_for(
-        workspace_root: &std::path::Path,
-        config: &metteur_shared::config::Config,
-    ) -> Vec<SystemFragment> {
+    pub fn fragments_for(facts: &EnvFacts, config: &Config) -> Vec<SystemFragment> {
         let mut fragments = sections::static_fragments();
-        fragments.push(environment::fragment(workspace_root, model_label(config).as_deref()));
-        if let Some(project) = project::fragment(workspace_root, &config.llm) {
+        if let Some(project) = project::fragment(&facts.workspace_root, &config.llm) {
             fragments.push(project);
         }
+        fragments.push(environment::fragment(facts));
+        fragments.push(environment::date_fragment(facts));
         if let Some(extra) = config
             .llm
             .system_prompt_append
@@ -53,7 +33,7 @@ impl HarnessPrompt {
             .filter(|text| !text.is_empty())
         {
             fragments.push(SystemFragment {
-                priority: sections::PRIORITY_APPEND,
+                priority: PRIORITY_APPEND,
                 scope: format!("{SCOPE_PREFIX}append"),
                 content: extra.to_string(),
             });
@@ -105,7 +85,7 @@ pub fn is_harness_fragment(fragment: &SystemFragment) -> bool {
 
 /// Renders a fragment set the way a provider would: sorted by descending
 /// priority, then scope and content, joined into one system prompt.
-fn render_all<'a>(fragments: impl Iterator<Item = &'a SystemFragment>) -> String {
+pub fn render_all<'a>(fragments: impl Iterator<Item = &'a SystemFragment>) -> String {
     let mut list: Vec<&SystemFragment> = fragments.collect();
     list.sort_by(|a, b| {
         b.priority
@@ -114,19 +94,4 @@ fn render_all<'a>(fragments: impl Iterator<Item = &'a SystemFragment>) -> String
             .then_with(|| a.content.cmp(&b.content))
     });
     list.iter().map(|fragment| fragment.content.as_str()).collect::<Vec<_>>().join("\n\n")
-}
-
-/// The configured default model, rendered as `key` or `key (api_type)`.
-fn model_label(config: &metteur_shared::config::Config) -> Option<String> {
-    let key = config.llm.default_model.as_deref().filter(|key| !key.is_empty())?;
-    let api_type = config
-        .llm
-        .models
-        .get(key)
-        .map(|model| model.api_type.as_str())
-        .filter(|api_type| !api_type.is_empty());
-    Some(match api_type {
-        Some(api_type) => format!("{key} ({api_type})"),
-        None => key.to_string(),
-    })
 }

@@ -161,6 +161,7 @@ function onPlusSelect(id: string) {
         isDragging(tab.id) ? 'opacity-40' : '',
       ]"
       :title="tab.path"
+      :data-testid="tabs.activeId === tab.id ? 'tab-active' : 'tab'"
       :draggable="true"
       role="button"
       :tabindex="0"

@@ -703,10 +703,7 @@ async fn a_subagent_inherits_the_harness_exactly_once() {
     ctx.llm_factory = LlmClientFactory::with_override(recorder);
     // The parent context already carries its harness sections.
     let mut context = ContextManager::new_from_prompt(vec![], "parent question");
-    let harness = metteur_daemon::harness::HarnessPrompt::fragments_for(
-        &root,
-        &metteur_shared::config::Config::default(),
-    );
+    let harness = metteur_daemon::harness::fragments(&ctx).await;
     metteur_daemon::harness::HarnessPrompt::apply(&mut context, harness);
     run_react(&mut ctx, context, &scripted()).await.unwrap();
     let scopes = scopes.lock().unwrap();

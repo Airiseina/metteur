@@ -1,6 +1,7 @@
 import type { Ref } from 'vue'
 import type {
   AddonInfo,
+  ChatContextStats,
   Blueprint,
   ChatMessage,
   ChatOptions,
@@ -111,8 +112,34 @@ export interface DaemonGateway {
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
+    /** Aborts the stream locally; the caller still asks the daemon to stop. */
+    signal?: AbortSignal,
+    /** Reports a tool call whose arguments are still being written. */
+    onProgress?: (progress: { name: string; bytes: number }) => void,
+    /** Reports what the conversation occupies once the turn ends. */
+    onContext?: (stats: ChatContextStats) => void,
+    /** Asks the client to decide on a sandbox approval, mid-turn. */
+    onApproval?: (request: { requestId: string; detail: string }) => void,
   ): Promise<Result<void>>
   abortChat(workspacePath: string): Promise<Result<void>>
+  /**
+   * Injects a message into the running turn.
+   *
+   * `Normal` lands at the next model call (a queued message), `Urgent` before
+   * the next request of the loop (steering), `Emergency` aborts it.
+   */
+  sendInterrupt(
+    workspacePath: string,
+    message: string,
+    priority?: 'Normal' | 'Urgent' | 'Emergency',
+  ): Promise<Result<void>>
+  /**
+   * Opens the host's folder dialog.
+   *
+   * Implemented by the web server (`POST /api/pick-directory`), so the demo
+   * gateway answers without a round trip.
+   */
+  pickDirectory(): Promise<Result<string | null>>
   /** List the workspace's persisted chat sessions (newest first). */
   listChatSessions(workspacePath: string): Promise<Result<ChatSessionInfo[]>>
   /** Load a session's history for UI restore (empty id = latest, NotFound when absent). */

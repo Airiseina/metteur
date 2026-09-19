@@ -146,6 +146,12 @@ impl Tool for EditFile {
 
         let fs = WorkspaceFs::new(ctx.workspace_root.clone());
         let resolved = fs.resolve_existing(&path)?;
+        // The permission mode decides whether this edit is confirmed first; the
+        // summary is the number of blocks, which is what a reviewer needs.
+        let summary = format!("apply {} edit block(s)", blocks.len());
+        if !crate::sandbox::authorize_write(ctx, &resolved, &path, &summary).await? {
+            return Err(DaemonError::Sandbox(format!("edit denied by permission mode: {path}")));
+        }
         if resolved.is_dir() {
             return Err(DaemonError::Execution(format!("{path} is a directory")));
         }

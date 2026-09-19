@@ -150,6 +150,30 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  /**
+   * Takes a checkpoint of the active workspace.
+   *
+   * Returns `null` when no workspace is open or the daemon refuses (versioning
+   * disabled, no changed files): a missing checkpoint is not an error, it just
+   * means this turn cannot be undone from the transcript.
+   */
+  async function createCheckpoint(description: string): Promise<string | null> {
+    const ws = active.value
+    if (!ws) return null
+    const r = await gateway.createSnapshot(ws.path, description)
+    return r.ok ? r.data.id : null
+  }
+
+  /** Rolls the active workspace back to a checkpoint. */
+  async function restoreCheckpoint(snapshotId: string): Promise<boolean> {
+    const ws = active.value
+    if (!ws) return false
+    const r = await gateway.rollback(ws.path, snapshotId)
+    if (!r.ok) return false
+    dirCache.value = new Map()
+    return true
+  }
+
   /** Switch to a previously opened workspace without a filesystem call. */
   async function switchTo(path: string): Promise<void> {
     if (active.value?.path === path) return
@@ -211,5 +235,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (active.value && !r.data.some((w) => w.path === active.value!.path)) active.value = null
   }
 
-  return { recents, workspaces, active, hasActive, busy, cachedDir, cacheDir, invalidateDir, invalidateTree, restore, open, switchTo, close, closePath, select, forget, refresh }
+  return { recents, workspaces, active, hasActive, busy, cachedDir, cacheDir, invalidateDir, invalidateTree, restore, open, switchTo, close, closePath, select, forget, refresh, createCheckpoint, restoreCheckpoint }
 })

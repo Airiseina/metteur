@@ -1,7 +1,10 @@
-//! Command execution sandbox with whitelists and a six-level approval flow.
+//! Command and file-write authorization: permission modes, whitelists and a
+//! six-level approval flow.
 
 pub mod approval;
+pub mod approver;
 pub mod grant;
+pub mod mode;
 pub mod policy;
 pub mod predict;
 
@@ -10,7 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use metteur_shared::config::SandboxConfig;
 
 use crate::error::DaemonResult;
 use crate::execution::ExecutionEvent;
@@ -18,6 +20,8 @@ use crate::execution::context::ExecutionContext;
 
 use approval::Decision;
 use grant::GrantStore;
+pub use mode::PermissionMode;
+use predict::Risk as policy_risk;
 
 /// Default seconds before an unanswered approval request is denied.
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
@@ -29,11 +33,14 @@ const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
 /// When no approval channel is attached (e.g. unit tests), non-whitelisted
 /// commands fail closed.
 pub async fn authorize(ctx: &ExecutionContext, command: &str) -> DaemonResult<bool> {
-    let sandbox_cfg = match &ctx.config {
-        Some(config) => config.read().await.sandbox.clone(),
-        None => SandboxConfig::default(),
+    let config = match &ctx.config {
+        Some(config) => config.read().await.clone(),
+        None => metteur_shared::config::Config::default(),
     };
-    if !sandbox_cfg.enabled {
+    let sandbox_cfg = config.sandbox.clone();
+    let mode = ctx.permission_mode;
+    // `ask` means every command is confirmed, so the whitelist is not consulted.
+    if !sandbox_cfg.enabled && mode != PermissionMode::Ask {
         return Ok(true);
     }
 
@@ -54,8 +61,11 @@ pub async fn authorize(ctx: &ExecutionContext, command: &str) -> DaemonResult<bo
         return Ok(allow);
     }
 
-    // 3. Whitelisted commands run directly.
-    if policy::classify(command, &sandbox_cfg) == policy::PolicyVerdict::Allowed {
+    // 3. Whitelisted commands run directly (except in `ask`, where the user
+    //    asked to see everything).
+    if mode != PermissionMode::Ask
+        && policy::classify(command, &sandbox_cfg) == policy::PolicyVerdict::Allowed
+    {
         return Ok(true);
     }
 
@@ -64,15 +74,10 @@ pub async fn authorize(ctx: &ExecutionContext, command: &str) -> DaemonResult<bo
         return Ok(true);
     }
 
-    // 5. Ask the user through the approval channel attached to this run.
-    let Some(broker) = &ctx.approvals else {
-        ctx.audit(
-            "sandbox.approval",
-            serde_json::json!({ "command": command, "outcome": "denied", "reason": "no approval channel" }),
-        );
-        return Ok(false);
-    };
-
+    // 5. In `full` mode the risky decisions are delegated to the model: the
+    //    predictor already says which those are. A reviewer that cannot answer
+    //    falls through to the user rather than allowing anything, so this runs
+    //    before the approval channel is required.
     let impact = predict::predict(command);
     let detail = serde_json::json!({
         "tool": "ExecuteCommand",
@@ -84,6 +89,36 @@ pub async fn authorize(ctx: &ExecutionContext, command: &str) -> DaemonResult<bo
             "risk": impact.risk.as_str(),
         },
     });
+    if mode == PermissionMode::Full
+        && impact.risk != policy_risk::Low
+        && let Some(allow) = approver::review(
+            ctx,
+            &approver::ReviewRequest {
+                kind: "command",
+                subject: command,
+                detail: &detail,
+            },
+        )
+        .await
+    {
+        if let Some(broker) = &ctx.approvals {
+            broker.record_run_grant(hash, allow);
+        }
+        ctx.audit(
+            "sandbox.review",
+            serde_json::json!({ "command": command, "outcome": if allow { "allowed" } else { "denied" } }),
+        );
+        return Ok(allow);
+    }
+
+    // 6. Otherwise the user answers, through the channel attached to this run.
+    let Some(broker) = &ctx.approvals else {
+        ctx.audit(
+            "sandbox.approval",
+            serde_json::json!({ "command": command, "outcome": "denied", "reason": "no approval channel" }),
+        );
+        return Ok(false);
+    };
 
     let (request_id, rx) = broker.open_request(hash, command.to_string());
     if let Some(events) = &ctx.events {
@@ -98,11 +133,7 @@ pub async fn authorize(ctx: &ExecutionContext, command: &str) -> DaemonResult<bo
         serde_json::json!({ "command": command, "request_id": request_id, "outcome": "pending" }),
     );
 
-    let timeout_secs = if sandbox_cfg.approval_timeout_secs > 0 {
-        sandbox_cfg.approval_timeout_secs
-    } else {
-        DEFAULT_APPROVAL_TIMEOUT_SECS
-    };
+    let timeout_secs = approval_timeout(&config.sandbox);
     let outcome = tokio::select! {
         response = rx => response.unwrap_or(Decision::Deny),
         _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => Decision::Deny,
@@ -128,6 +159,120 @@ pub async fn authorize(ctx: &ExecutionContext, command: &str) -> DaemonResult<bo
         }),
     );
     Ok(allow)
+}
+
+/// Resolves whether a file mutation may proceed.
+///
+/// `path` is the absolute target, `subject` the workspace-relative path shown to
+/// whoever decides, and `summary` a short description of the change (an edit
+/// summary, a file size). The same three modes apply as for commands:
+///
+/// - `ask`: the user confirms every write;
+/// - `sandbox`: writes inside the workspace run, writes outside are confirmed;
+/// - `full`: writes outside the workspace are reviewed by the model, then by the
+///   user if it cannot answer.
+///
+/// File mutations never fail closed: refusing to write inside the workspace
+/// would make the agent useless, so only the confirmation step is skipped or
+/// delegated.
+pub async fn authorize_write(
+    ctx: &ExecutionContext,
+    path: &std::path::Path,
+    subject: &str,
+    summary: &str,
+) -> DaemonResult<bool> {
+    let config = match &ctx.config {
+        Some(config) => config.read().await.clone(),
+        None => metteur_shared::config::Config::default(),
+    };
+    let mode = ctx.permission_mode;
+    let inside_workspace = path.starts_with(&ctx.workspace_root);
+    let detail = serde_json::json!({
+        "tool": "WriteFile",
+        "node_id": ctx.current_node.to_string(),
+        "path": subject,
+        "summary": summary,
+        "outside_workspace": !inside_workspace,
+    });
+
+    if mode == PermissionMode::Sandbox && inside_workspace {
+        return Ok(true);
+    }
+    if mode == PermissionMode::Full && inside_workspace {
+        return Ok(true);
+    }
+    if mode == PermissionMode::Full
+        && let Some(allow) = approver::review(
+            ctx,
+            &approver::ReviewRequest {
+                kind: "file",
+                subject,
+                detail: &detail,
+            },
+        )
+        .await
+    {
+        if !allow {
+            ctx.audit(
+                "sandbox.review",
+                serde_json::json!({ "path": subject, "outcome": "denied" }),
+            );
+        }
+        return Ok(allow);
+    }
+
+    // The user answers. The request is keyed by the path so a decision can be
+    // remembered for the run, exactly like a command.
+    let hash = command_hash(&policy::normalize(subject));
+    if let Some(allow) = ctx.approvals.as_ref().and_then(|b| b.run_grant(hash)) {
+        return Ok(allow);
+    }
+    let Some(broker) = &ctx.approvals else {
+        // Without an approval channel (tests, blueprint runs without a client)
+        // the write is allowed: the file-system jail already bounds it.
+        return Ok(true);
+    };
+    let (request_id, rx) = broker.open_request(hash, subject.to_string());
+    if let Some(events) = &ctx.events {
+        let _ = events.send(ExecutionEvent::ApprovalRequested {
+            node_id: ctx.current_node,
+            request_id: request_id.clone(),
+            detail: detail.to_string(),
+        });
+    }
+    ctx.audit(
+        "sandbox.approval",
+        serde_json::json!({ "path": subject, "request_id": request_id, "outcome": "pending" }),
+    );
+    let timeout_secs = approval_timeout(&config.sandbox);
+    let outcome = tokio::select! {
+        response = rx => response.unwrap_or(Decision::Deny),
+        _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => Decision::Deny,
+        _ = wait_cancelled(ctx.cancel_requested.clone()) => Decision::Deny,
+    };
+    let allow = outcome == Decision::Allow;
+    broker.record_run_grant(hash, allow);
+    ctx.audit(
+        "sandbox.approval",
+        serde_json::json!({
+            "path": subject,
+            "request_id": request_id,
+            "outcome": if allow { "allowed" } else { "denied" },
+        }),
+    );
+    Ok(allow)
+}
+
+/// Seconds to wait for an approval before denying it.
+///
+/// One setting covers commands and file writes: a user who tunes the timeout
+/// means "how long do I have to answer", not "for which kind of operation".
+fn approval_timeout(config: &metteur_shared::config::SandboxConfig) -> u64 {
+    if config.approval_timeout_secs > 0 {
+        config.approval_timeout_secs
+    } else {
+        DEFAULT_APPROVAL_TIMEOUT_SECS
+    }
 }
 
 /// Polls the shared cancel flag until it is set.

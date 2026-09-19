@@ -49,6 +49,17 @@ pub enum StreamDelta {
     Text(String),
     /// Reasoning/thinking text.
     Reasoning(String),
+    /// A tool call the model is still writing arguments for.
+    ///
+    /// Emitted per chunk with the accumulated size, so a client can show that a
+    /// large edit is being composed instead of going silent until the call
+    /// executes (the tool itself only appears when its arguments are complete).
+    ToolArgs {
+        /// Tool name, as soon as the provider named the call.
+        name: String,
+        /// Argument bytes received for this call so far.
+        bytes: usize,
+    },
 }
 
 /// A client for a single LLM provider and model.
@@ -107,6 +118,8 @@ pub struct LlmProviderConfig {
     pub thinking_budget_tokens: u64,
     /// Whether the provider should emit explicit prompt-cache breakpoints.
     pub prompt_cache: bool,
+    /// Whether stored reasoning is replayed in later requests.
+    pub replay_reasoning: bool,
 }
 
 impl LlmProviderConfig {
@@ -125,6 +138,7 @@ impl LlmProviderConfig {
             default_params: GenerationParams::default(),
             thinking_budget_tokens: 0,
             prompt_cache: true,
+            replay_reasoning: false,
         }
     }
 
@@ -138,6 +152,22 @@ impl LlmProviderConfig {
     pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
         self.prompt_cache = enabled;
         self
+    }
+
+    /// Sets whether stored reasoning is replayed in later requests.
+    pub fn with_reasoning_replay(mut self, enabled: bool) -> Self {
+        self.replay_reasoning = enabled;
+        self
+    }
+
+    /// Whether a model id names a DeepSeek-family model.
+    ///
+    /// Those endpoints require the chain of thought they produced to come back
+    /// verbatim once tools are involved, and reject a request without it on
+    /// some routes. Other OpenAI-compatible endpoints may not accept the field
+    /// at all, which is why this is not a blanket default.
+    pub fn is_deepseek_model(model: &str) -> bool {
+        model.to_ascii_lowercase().contains("deepseek")
     }
 }
 

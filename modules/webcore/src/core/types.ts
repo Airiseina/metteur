@@ -103,6 +103,13 @@ export interface ChatMessage {
   reasoning?: string
   /** Set while the reasoning block is still streaming. */
   reasoningPending?: boolean
+  /** Set on a user turn typed while the agent worked, until it is injected. */
+  queued?: boolean
+  /**
+   * Snapshot taken before this turn ran, when versioning is available: the
+   * transcript offers to roll the workspace back to it.
+   */
+  checkpoint?: string
 }
 
 /** Token usage reported for a completed chat turn. */
@@ -128,12 +135,33 @@ export interface ChatUsage {
 }
 
 /** Sampling parameters for a ReAct chat turn, adjustable from the chat panel. */
-export interface ChatOptions {  model?: string
+export interface ChatOptions {
+  model?: string
   system?: string
   temperature?: number
   top_p?: number
   max_tokens?: number
   reasoning_effort?: 'none' | 'low' | 'medium' | 'high'
+  /**
+   * Who answers authorization questions for this turn.
+   *
+   * `ask` confirms every edit and command, `sandbox` runs workspace-internal
+   * edits and policy-approved commands, and `full` has the model review the
+   * operations the predictor calls risky.
+   */
+  permission_mode?: 'ask' | 'sandbox' | 'full'
+}
+
+/** What the conversation occupies in the model's window, as the daemon sees it. */
+export interface ChatContextStats {
+  /** Estimated tokens of the whole context. */
+  tokens: number | null
+  /** The model's input window; assumed when the configuration states none. */
+  limit: number | null
+  /** Whether `limit` is a default rather than the configured window. */
+  assumedLimit: boolean
+  /** Per-region estimate, largest first. */
+  regions: Array<{ region: string; tokens: number }>
 }
 
 /** Metadata of a persisted chat session, mirroring the daemon's record. */
@@ -153,7 +181,14 @@ export interface ChatSessionSnapshot {
   todos?: TodoItem[]
   sessionId: string
   createdAt: number
-  /** User/assistant messages reconstructed from the daemon history. */
+  /**
+   * The conversation as it was displayed, including tool calls and notices.
+   *
+   * Empty for sessions written before the daemon recorded a transcript; those
+   * fall back to {@link history}, which only carries user/assistant text.
+   */
+  transcript: ChatMessage[]
+  /** User/assistant text reconstructed from the model's context. */
   history: ChatMessage[]
 }
 

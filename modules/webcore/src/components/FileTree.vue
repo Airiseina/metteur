@@ -601,7 +601,7 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined
 </script>
 
 <template>
-  <div class="flex h-full flex-col bg-sidebar">
+  <div class="flex h-full flex-col bg-sidebar" data-testid="file-tree">
     <!-- Toolbar (VSCode-style explorer header) -->
     <div class="flex shrink-0 items-center gap-0.5 border-b border-divider px-2 py-1">
       <span class="panel-heading flex-1 px-0!">Explorer</span>

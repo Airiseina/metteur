@@ -20,6 +20,8 @@ pub struct OpenAiChatClient {
     api_key: String,
     model: String,
     default_params: GenerationParams,
+    /// Whether stored reasoning blocks are replayed in requests.
+    replay_reasoning: bool,
 }
 
 impl OpenAiChatClient {
@@ -31,6 +33,7 @@ impl OpenAiChatClient {
             api_key: config.api_key.clone(),
             model: config.model.clone(),
             default_params: config.default_params.clone(),
+            replay_reasoning: config.replay_reasoning,
         }
     }
 
@@ -43,7 +46,7 @@ impl OpenAiChatClient {
     ) -> Json {
         let mut body = json!({
             "model": self.model,
-            "messages": build_messages(ctx),
+            "messages": build_messages(ctx, self.replay_reasoning),
         });
         apply_params(&mut body, params, &self.default_params);
         if !tools.is_empty() {
@@ -175,6 +178,14 @@ impl LlmClient for OpenAiChatClient {
                     for call in arr {
                         merge_tool_call(&mut tool_calls, call);
                     }
+                    // The arguments of a large edit stream for seconds; report
+                    // their size so the client can show progress.
+                    if let Some(last) = tool_calls.last() {
+                        on_delta(StreamDelta::ToolArgs {
+                            name: last.name.clone(),
+                            bytes: last.arguments.to_string().len(),
+                        });
+                    }
                 }
                 if let Some(u) = chunk_json.get("usage") {
                     usage = parse_usage(u);
@@ -191,7 +202,7 @@ impl LlmClient for OpenAiChatClient {
 }
 
 /// Converts a context into the OpenAI messages array.
-fn build_messages(ctx: &ContextManager) -> Vec<Json> {
+fn build_messages(ctx: &ContextManager, replay_reasoning: bool) -> Vec<Json> {
     let mut messages: Vec<Json> = Vec::new();
     // System fragments become a single system message. The order is canonical
     // (priority, then scope/content) so the prefix stays byte-identical across
@@ -201,16 +212,18 @@ fn build_messages(ctx: &ContextManager) -> Vec<Json> {
         messages.push(json!({ "role": "system", "content": system }));
     }
     for msg in &ctx.messages {
-        messages.push(message_to_json(msg));
+        messages.push(message_to_json(msg, replay_reasoning));
     }
     messages
 }
 
 /// Converts a shared message into an OpenAI message object.
 ///
-/// Thinking blocks are dropped: this API family (including DeepSeek) rejects a
-/// replayed `reasoning_content`, and the stored context keeps it for audit.
-fn message_to_json(msg: &Message) -> Json {
+/// Reasoning blocks are dropped unless `replay_reasoning` is set. Replaying
+/// them keeps the assistant turn byte-identical to what the model produced
+/// (which the provider prefix cache and the model's own chain of thought both
+/// benefit from), but a strict endpoint may reject the extra field.
+fn message_to_json(msg: &Message, replay_reasoning: bool) -> Json {
     let content = msg
         .content
         .iter()
@@ -237,6 +250,19 @@ fn message_to_json(msg: &Message) -> Json {
             })
             .collect();
         obj["tool_calls"] = Json::Array(calls);
+    }
+    if replay_reasoning
+        && let Some(reasoning) = msg
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking { text, .. } if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .first()
+    {
+        obj["reasoning_content"] = json!(reasoning);
     }
     if let Some(id) = &msg.tool_call_id {
         obj["tool_call_id"] = json!(id);
@@ -453,11 +479,35 @@ mod tests {
             lifetime: metteur_shared::llm::ToolResultLifetime::OneShot,
             paths: Vec::new(),
         });
-        let messages = build_messages(&ctx);
+        let messages = build_messages(&ctx, false);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["tool_call_id"], "call_1");
+    }
+
+    /// A large edit streams its arguments for seconds; the provider must report
+    /// their growth so the client is not silent until the call executes.
+    #[test]
+    fn tool_call_arguments_report_their_growth() {
+        let mut calls: Vec<ToolCall> = Vec::new();
+        merge_tool_call(
+            &mut calls,
+            &json!({
+                "index": 0,
+                "id": "call_1",
+                "function": { "name": "WriteFile", "arguments": "{\"path\":" }
+            }),
+        );
+        merge_tool_call(
+            &mut calls,
+            &json!({ "index": 0, "function": { "arguments": "\"a.rs\"}" } }),
+        );
+        assert_eq!(calls[0].name, "WriteFile");
+        assert_eq!(calls[0].arguments["path"], "a.rs");
+        // The provider reports the merged size, not the chunk's.
+        let merged = calls[0].arguments.to_string().len();
+        assert!(merged >= "{\"path\":\"a.rs\"}".len());
     }
 
     #[test]
@@ -512,8 +562,22 @@ mod tests {
         assert_eq!(resp.thinking.len(), 1);
         assert_eq!(resp.thinking[0].text, "the reasoning");
 
-        // A stored thinking block must not be sent back to this API family.
-        let message = Message {
+        // Without replay enabled the thinking block stays out of the request.
+        let json = message_to_json(&thinking_message(), false);
+        assert_eq!(json["content"], "the answer");
+        assert!(json.get("reasoning_content").is_none());
+
+        // DeepSeek-family routes require their chain of thought back verbatim
+        // once tools are in play; the flag is opt-in because a strict endpoint
+        // may reject the extra field.
+        let replayed = message_to_json(&thinking_message(), true);
+        assert_eq!(replayed["content"], "the answer");
+        assert_eq!(replayed["reasoning_content"], "the reasoning");
+    }
+
+    /// An assistant turn that carries a reasoning block and its answer.
+    fn thinking_message() -> Message {
+        Message {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::Thinking {
@@ -524,9 +588,7 @@ mod tests {
             ],
             tool_calls: Vec::new(),
             tool_call_id: None,
-        };
-        let json = message_to_json(&message);
-        assert_eq!(json["content"], "the answer");
+        }
     }
 
     #[test]

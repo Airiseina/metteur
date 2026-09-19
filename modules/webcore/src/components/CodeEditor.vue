@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import { useThemeStore } from '@/stores/theme'
 import { ensureMbpLanguage, bindMbpDiagnostics } from '@/lib/mbp-language'
+import { acquireModel, releaseModel } from '@/lib/editor-models'
 
 /**
  * Code editor backed by Monaco Editor, with a CodeMirror fallback for coarse
@@ -15,6 +16,13 @@ import { ensureMbpLanguage, bindMbpDiagnostics } from '@/lib/mbp-language'
 const props = defineProps<{
   modelValue: string
   language: string
+  /**
+   * Stable identity of the edited file (workspace-scoped path). Two editors
+   * with the same identity share one Monaco model, so a file shown twice stays
+   * in sync and its undo history survives a tab switch. Omit it for a
+   * throwaway buffer.
+   */
+  modelId?: string
 }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
@@ -70,11 +78,11 @@ async function setupMonaco() {
   // The DSL language must exist before the model references it, so
   // tokenization/complete handlers are attached from the start.
   if (lang === 'mbp') ensureMbpLanguage(mod)
-  const model = mod.editor.createModel(
-    props.modelValue,
-    lang,
-    lang === 'mbp' ? mod.Uri.parse('mbp://local/blueprint.mbp') : undefined,
-  )
+  // A shared model is created once per file; a second editor on the same file
+  // attaches to it instead of creating a colliding URI.
+  const model = props.modelId
+    ? acquireModel(mod, props.modelId, lang, props.modelValue)
+    : mod.editor.createModel(props.modelValue, lang)
   monoModel = model
   if (lang === 'mbp') bindMbpDiagnostics(mod, model)
   monoEditor = mod.editor.create(container.value!, {
@@ -199,8 +207,11 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  // The editor always owns its view; the model is owned by the registry when it
+  // is shared, and disposed there with the last reference.
   if (monoEditor) monoEditor.dispose()
-  if (monoModel) monoModel.dispose()
+  if (props.modelId) releaseModel(props.modelId)
+  else if (monoModel && !monoModel.isDisposed()) monoModel.dispose()
   if (cmView) cmView.destroy()
 })
 

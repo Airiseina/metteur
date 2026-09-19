@@ -12,6 +12,22 @@
  */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/**
+ * Motion budget.
+ *
+ * Animation exists to explain a state change, never to decorate: durations stay
+ * under 400ms and the curves are ease-out, so nothing bounces or overshoots.
+ * `prefers-reduced-motion` swaps movement for opacity rather than removing the
+ * feedback entirely.
+ */
+:root {
+  --motion-fast: 90ms;
+  --motion-fade: 110ms;
+  --motion-expand: 150ms;
+  --motion-panel: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0.38, 0.9);
+}
+
 :root {
   /* Base surfaces */
   --background: #fbfbfd;
@@ -48,6 +64,10 @@
 
   /* Interaction */
   --ring: #6a7fe0;
+  /* Keyboard focus ring. Neutral rather than brand-coloured: the brand is for
+     interactive state, and a blue box on every field reads as a browser default.
+     Contrast against both surfaces stays above the 3:1 WCAG needs. */
+  --focus-ring: rgba(27, 27, 32, 0.55);
   --hover: rgba(15, 16, 26, 0.055);
   --selection: rgba(75, 92, 196, 0.16);
 
@@ -61,6 +81,20 @@
   /* Frosted overlay surface: translucent so backdrop blur stays visible even
      in clients that lack `color-mix` (fixed rgba, never opaque). */
   --surface-glass: rgba(255, 255, 255, 0.72);
+
+  /* Chat: the user's own turn, the activity spine and the three states of an
+     activity row. The brand colour stays reserved for interactive elements, so
+     status has its own semantic ramp. */
+  --chat-user-bg: #f1f2f7;
+  --spine: #e7e7ee;
+  --status-pending: #c8912c;
+  --status-running: #4b5cc4;
+  --status-success: #2f9e63;
+  --status-warning: #cf7a33;
+  --status-error: #e5484d;
+  --diff-add: rgba(47, 158, 99, 0.14);
+  --diff-remove: rgba(229, 72, 77, 0.13);
+  --shimmer-to: rgba(75, 92, 196, 0.35);
 
   /* Elevation */
   --overlay: rgba(19, 19, 26, 0.42);
@@ -105,6 +139,7 @@
 
   /* Interaction */
   --ring: #6a8bff;
+  --focus-ring: rgba(235, 235, 240, 0.6);
   --hover: rgba(255, 255, 255, 0.06);
   --selection: rgba(106, 139, 255, 0.22);
 
@@ -115,6 +150,18 @@
   --grid-dot: #3a3a46;
 
   --surface-glass: rgba(31, 31, 36, 0.72);
+
+  /* Chat surfaces; see the light block for the meaning of each token. */
+  --chat-user-bg: #26262c;
+  --spine: #2f2f36;
+  --status-pending: #d8a944;
+  --status-running: #6a8bff;
+  --status-success: #46b97c;
+  --status-warning: #e08a45;
+  --status-error: #f2555a;
+  --diff-add: rgba(70, 185, 124, 0.16);
+  --diff-remove: rgba(242, 85, 90, 0.16);
+  --shimmer-to: rgba(158, 178, 255, 0.45);
 
   /* Elevation */
   --overlay: rgba(0, 0, 0, 0.55);
@@ -152,6 +199,15 @@
   --shadow-soft: var(--shadow-soft);
   --shadow-card: var(--shadow-card);
   --shadow-popover: var(--shadow-popover);
+  --color-chat-user-bg: var(--chat-user-bg);
+  --color-spine: var(--spine);
+  --color-status-pending: var(--status-pending);
+  --color-status-running: var(--status-running);
+  --color-status-success: var(--status-success);
+  --color-status-warning: var(--status-warning);
+  --color-status-error: var(--status-error);
+  --color-diff-add: var(--diff-add);
+  --color-diff-remove: var(--diff-remove);
 }
 
 @layer base {

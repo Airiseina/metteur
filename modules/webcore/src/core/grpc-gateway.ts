@@ -12,6 +12,7 @@ import type {
   ChatMessage,
   ChatOptions,
   ChatSessionInfo,
+  ChatContextStats,
   ChatSessionSnapshot,
   ChatUsage,
   DaemonConfig,
@@ -34,9 +35,84 @@ import type {
   WorkspaceInfo,
 } from './types'
 import { err, ok } from './types'
+import { readSse } from './sse'
 import { Daemon } from '@/gen/metteur_pb'
 import { NODE_PRESETS } from '@/lib/blueprint'
 import { configScopeOf, configToToml, isConfigDoc, tryParseToml } from '@/lib/toml'
+
+/** Reads a context-stats payload, tolerating a partial or unexpected shape. */
+function parseContextStats(raw: unknown): ChatContextStats {
+  const stats = (raw ?? {}) as Record<string, unknown>
+  return {
+    tokens: stats.tokens === null || stats.tokens === undefined ? null : Number(stats.tokens) || 0,
+    limit: stats.limit === null || stats.limit === undefined ? null : Number(stats.limit),
+    assumedLimit: stats.assumed_limit === true,
+    regions: Array.isArray(stats.regions)
+      ? (stats.regions as Array<{ region: string; tokens: number }>)
+      : [],
+  }
+}
+
+/**
+ * Rebuilds the display transcript of a stored session.
+ *
+ * The daemon records what the conversation looked like — turns, tool calls with
+ * their timing and outcome, notices, failures — which the model's context
+ * cannot reproduce after compression or eviction.
+ */
+function parseTranscript(raw: string): ChatMessage[] {
+  if (!raw) return []
+  let entries: Array<Record<string, unknown>>
+  try {
+    entries = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(entries)) return []
+  return entries.map((entry, index) => {
+    const role = String(entry.role ?? '')
+    const at = Number(entry.at) || Date.now()
+    const content = String(entry.content ?? '')
+    if (role === 'tool') {
+      return {
+        id: String(entry.call_id || `t-${index}`),
+        role: 'tool' as const,
+        actor: String(entry.tool ?? ''),
+        content,
+        detail: {
+          callId: String(entry.call_id ?? ''),
+          summary: String(entry.summary ?? ''),
+          ok: entry.ok !== false,
+          elapsedMs: Number(entry.elapsed_ms) || 0,
+        },
+        createdAt: at,
+      }
+    }
+    if (role === 'notice') return { id: `n-${index}`, role: 'notice' as const, content, createdAt: at }
+    if (role === 'error') return { id: `e-${index}`, role: 'error' as const, content, createdAt: at }
+    if (role === 'assistant') {
+      return {
+        id: `a-${index}`,
+        role: 'assistant' as const,
+        content,
+        reasoning: String(entry.reasoning ?? '') || undefined,
+        createdAt: at,
+      }
+    }
+    return { id: `u-${index}`, role: 'user' as const, content, createdAt: at }
+  })
+}
+
+/** Parses a `detail_json` payload, tolerating an empty or malformed value. */
+function parseDetail(raw: string | undefined): Record<string, unknown> {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
 
 /** Maps a thrown connect error into a readable failure result. */
 function toErr(e: unknown): Result<never> {
@@ -351,10 +427,13 @@ export class GrpcGateway implements DaemonGateway {
   readonly connected: Ref<boolean> = ref(true)
   readonly demo = false
   private client: Client<typeof Daemon>
+  /** Same origin as the grpc-web transport, used by the SSE chat endpoint. */
+  private baseUrl: string
 
   constructor(baseUrl: string) {
     const transport = createGrpcWebTransport({ baseUrl })
     this.client = createClient(Daemon, transport)
+    this.baseUrl = baseUrl
     // Probe the daemon periodically; a network failure marks the app offline.
     setInterval(() => void this.ping(), 5000)
     void this.ping()
@@ -617,6 +696,14 @@ export class GrpcGateway implements DaemonGateway {
   }
 
   // ReAct chat --------------------------------------------------------------------
+  /**
+   * Streams one chat turn over server-sent events.
+   *
+   * The daemon exposes the same events as a gRPC stream, but SSE is what the
+   * browser can follow incrementally over plain HTTP and what an operator can
+   * watch with `curl -N`. The callback contract is unchanged, so views do not
+   * care which transport is in use.
+   */
   async sendChat(
     workspacePath: string,
     content: string,
@@ -627,131 +714,199 @@ export class GrpcGateway implements DaemonGateway {
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
+    signal?: AbortSignal,
+    onProgress?: (progress: { name: string; bytes: number }) => void,
+    onContext?: (stats: ChatContextStats) => void,
+    /** Asks the client to decide on a sandbox approval, mid-turn. */
+    onApproval?: (request: { requestId: string; detail: string }) => void,
   ): Promise<Result<void>> {
+    let seq = 0
+    let turnId: string | null = null
+    const historyJson = JSON.stringify(
+      history
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role, content: m.content })),
+    )
+    const turn = () => (turnId ??= `a-${Date.now()}-${seq++}`)
+    let response: Response
     try {
-      let seq = 0
-      let turnId: string | null = null
-      const historyJson = JSON.stringify(
-        history
-          .filter((m) => m.role === 'user' || m.role === 'assistant')
-          .map((m) => ({ role: m.role, content: m.content })),
-      )
-      const optionsJson = JSON.stringify(options ?? {})
-      for await (const ev of this.client.sendChat({
-        workspacePath,
-        message: content,
-        historyJson,
-        optionsJson,
-        sessionId: sessionId ?? '',
-      })) {
-        if (ev.kind === 'session') {
-          let reported = ''
-          if (ev.detailJson) {
-            try {
-              reported = String(JSON.parse(ev.detailJson).session_id ?? '')
-            } catch {
-              reported = ''
-            }
+      response = await fetch(`${this.baseUrl}/api/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspace_path: workspacePath,
+          message: content,
+          history_json: historyJson,
+          options_json: JSON.stringify(options ?? {}),
+          session_id: sessionId ?? '',
+        }),
+        signal,
+      })
+    } catch (e) {
+      return toErr(e)
+    }
+    if (!response.ok) {
+      // A failure before the stream starts is a real HTTP error: it says the
+      // request never reached the daemon, which is a different problem from a
+      // stream that broke halfway.
+      return err((await response.text().catch(() => '')) || `chat request failed (${response.status})`)
+    }
+
+    try {
+      for await (const message of readSse(response, signal)) {
+        let event: { kind?: string; content?: string; detail_json?: string }
+        try {
+          event = JSON.parse(message.data)
+        } catch {
+          continue
+        }
+        const detail = parseDetail(event.detail_json)
+        switch (event.kind) {
+          case 'session': {
+            const reported = String(detail.session_id ?? '')
+            if (reported) onSession?.(reported)
+          // The session event carries the context it starts from, so the meter
+          // has a size immediately (and after switching conversations).
+          if (detail.context) onContext?.(parseContextStats(detail.context))
+            break
           }
-          if (reported) onSession?.(reported)
-        } else if (ev.kind === 'assistant_delta') {
-          if (!turnId) turnId = `a-${Date.now()}-${seq++}`
-          onMessage({
-            id: turnId,
-            role: 'assistant',
-            content: ev.content,
-            createdAt: Date.now(),
-            pending: true,
-          })
-        } else if (ev.kind === 'reasoning_delta') {
-          // The model's thinking streams separately from the answer; it is
-          // shown in a collapsible block, never mixed into the answer text.
-          if (!turnId) turnId = `a-${Date.now()}-${seq++}`
-          onMessage({
-            id: turnId,
-            role: 'assistant',
-            content: '',
-            reasoning: ev.content,
-            reasoningPending: true,
-            createdAt: Date.now(),
-            pending: true,
-          })
-        } else if (ev.kind === 'assistant') {
-          if (!turnId) turnId = `a-${Date.now()}-${seq++}`
-          let reasoning = ''
-          if (ev.detailJson) {
-            try {
-              reasoning = String(JSON.parse(ev.detailJson).reasoning ?? '')
-            } catch {
-              reasoning = ''
-            }
+          case 'assistant_delta':
+            onMessage({
+              id: turn(),
+              role: 'assistant',
+              content: event.content ?? '',
+              createdAt: Date.now(),
+              pending: true,
+            })
+            break
+          case 'reasoning_delta':
+            onMessage({
+              id: turn(),
+              role: 'assistant',
+              content: '',
+              reasoning: event.content ?? '',
+              reasoningPending: true,
+              createdAt: Date.now(),
+              pending: true,
+            })
+            break
+          case 'assistant':
+            onMessage({
+              id: turn(),
+              role: 'assistant',
+              content: event.content ?? '',
+              // The final reasoning settles the collapsible block; without one
+              // the streamed thinking (if any) stays.
+              reasoning: String(detail.reasoning ?? '') || undefined,
+              reasoningPending: false,
+              createdAt: Date.now(),
+            })
+            break
+          case 'tool_start':
+            onMessage({
+              id: `t-${String(detail.call_id ?? seq++)}`,
+              role: 'tool',
+              actor: String(detail.name ?? ''),
+              content: '',
+              detail: { callId: detail.call_id, summary: event.content ?? '', running: true },
+              createdAt: Date.now(),
+              pending: true,
+            })
+            break
+          case 'tool_progress':
+            onMessage({
+              id: `t-${String(detail.call_id ?? '')}`,
+              role: 'tool',
+              content: event.content ?? '',
+              detail: { callId: detail.call_id, progress: true },
+              createdAt: Date.now(),
+              pending: true,
+            })
+            break
+          case 'tool':
+            onMessage({
+              id: `t-${String(detail.call_id ?? seq++)}`,
+              role: 'tool',
+              actor: String(detail.name ?? ''),
+              content: event.content ?? '',
+              detail: {
+                callId: detail.call_id,
+                ok: detail.ok !== false,
+                elapsedMs: Number(detail.elapsed_ms) || 0,
+              },
+              createdAt: Date.now(),
+            })
+            break
+          case 'tool_args':
+            // The model is composing a call's arguments; the row appears once
+            // they are complete, so report progress as a status instead.
+            onProgress?.({
+              name: String(detail.name ?? ''),
+              bytes: Number(detail.bytes) || 0,
+            })
+            break
+          case 'todos':
+            if (Array.isArray(detail.todos)) onTodos?.(detail.todos as TodoItem[])
+            break
+          case 'approval':
+            // A turn that needs a decision must be able to ask for one; the
+            // dialog is shared with blueprint runs.
+            onApproval?.({
+              requestId: String(detail.request_id ?? ''),
+              detail: event.content ?? '',
+            })
+            break
+          case 'notice':
+            onMessage({
+              id: `n-${Date.now()}-${seq++}`,
+              role: 'notice',
+              content: event.content ?? '',
+              createdAt: Date.now(),
+            })
+            break
+          case 'done': {
+            if (detail.context) onContext?.(parseContextStats(detail.context))
+            const usage = (detail.usage ?? {}) as Record<string, unknown>
+            onUsage?.({
+              inputTokens: Number(usage.input_tokens) || 0,
+              outputTokens: Number(usage.output_tokens) || 0,
+              totalTokens: Number(usage.total_tokens) || 0,
+              cachedInputTokens: Number(usage.cached_input_tokens) || 0,
+              cacheWriteInputTokens: Number(usage.cache_write_input_tokens) || 0,
+            })
+            break
           }
-          onMessage({
-            id: turnId,
-            role: 'assistant',
-            content: ev.content,
-            // The final reasoning text settles the collapsible block; when the
-            // model produced none the streamed thinking (if any) stays.
-            reasoning: reasoning || undefined,
-            reasoningPending: false,
-            createdAt: Date.now(),
-          })
-        } else if (ev.kind === 'todos') {
-          // The agent's plan, streamed while the turn runs.
-          let detail: Record<string, unknown> = {}
-          try {
-            detail = JSON.parse(ev.detailJson || '{}')
-          } catch {
-            detail = {}
-          }
-          if (Array.isArray(detail.todos)) onTodos?.(detail.todos as TodoItem[])
-        } else if (ev.kind === 'tool') {
-          let toolName = ''
-          if (ev.detailJson) {
-            try {
-              toolName = String(JSON.parse(ev.detailJson).name ?? '')
-            } catch {
-              toolName = ''
-            }
-          }
-          onMessage({
-            id: `t-${Date.now()}-${seq++}`,
-            role: 'tool',
-            actor: toolName,
-            content: ev.content,
-            createdAt: Date.now(),
-          })
-        } else if (ev.kind === 'done') {
-          let usage: Record<string, unknown> = {}
-          if (ev.detailJson) {
-            try {
-              usage = JSON.parse(ev.detailJson).usage ?? {}
-            } catch {
-              usage = {}
-            }
-          }
-          onUsage?.({
-            inputTokens: Number(usage.input_tokens) || 0,
-            outputTokens: Number(usage.output_tokens) || 0,
-            totalTokens: Number(usage.total_tokens) || 0,
-            cachedInputTokens: Number(usage.cached_input_tokens) || 0,
-            cacheWriteInputTokens: Number(usage.cache_write_input_tokens) || 0,
-          })
-        } else if (ev.kind === 'notice') {
-          // Engine notices (retries, job progress, context releases) are part
-          // of the transcript: they explain pauses the user would otherwise
-          // read as a stall.
-          onMessage({
-            id: `n-${Date.now()}-${seq++}`,
-            role: 'notice',
-            content: ev.content,
-            createdAt: Date.now(),
-          })
-        } else if (ev.kind === 'error') {
-          return err(ev.content)
+          case 'error':
+            return err(event.content || 'The turn failed.')
+          default:
+            break
         }
       }
       return ok(undefined)
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async sendInterrupt(
+    workspacePath: string,
+    message: string,
+    priority: 'Normal' | 'Urgent' | 'Emergency' = 'Normal',
+  ): Promise<Result<void>> {
+    try {
+      await this.client.sendInterrupt({ workspacePath, message, priority })
+      return ok(undefined)
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async pickDirectory(): Promise<Result<string | null>> {
+    try {
+      const res = await fetch('/api/pick-directory', { method: 'POST' })
+      if (!res.ok) return err(res.statusText || `folder picker failed (${res.status})`)
+      const data = (await res.json()) as { path?: string | null }
+      return ok(data.path ?? null)
     } catch (e) {
       return toErr(e)
     }
@@ -805,7 +960,13 @@ export class GrpcGateway implements DaemonGateway {
       } catch {
         todos = []
       }
-      return ok({ sessionId: res.sessionId, createdAt: Number(res.createdAt), history, todos })
+      return ok({
+        sessionId: res.sessionId,
+        createdAt: Number(res.createdAt),
+        history,
+        transcript: parseTranscript(res.transcriptJson),
+        todos,
+      })
     } catch (e) {
       return toErr(e)
     }

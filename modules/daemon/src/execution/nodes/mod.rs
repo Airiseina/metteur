@@ -106,7 +106,7 @@ impl crate::registry::NodeExecutor for StartExecutor {
         if let Some(pin) =
             node.pins.iter().find(|p| p.name == "Context" && p.pin_type == PinType::DataOutput)
         {
-            let mut system_fragments = crate::harness::HarnessPrompt::fragments(ctx).await;
+            let mut system_fragments = crate::harness::fragments(ctx).await;
             system_fragments.extend(ctx.addon_fragments.iter().cloned());
             let context = metteur_shared::llm::ContextManager {
                 system_fragments,
@@ -314,6 +314,12 @@ pub(crate) fn value_to_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Json(j) => j.to_string(),
+        // Scalars render as their value, not as their Rust debug form: a tool
+        // result of `true` must read "true", not "Bool(true)", both to the model
+        // and in the transcript.
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
         other => format!("{other:?}"),
     }
 }

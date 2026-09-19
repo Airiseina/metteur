@@ -1,5 +1,8 @@
 /target
 
+# Scratch directory for test runs (see scripts/test.ps1).
+.tmp/
+
 .idea/
 .vscode/
 

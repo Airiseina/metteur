@@ -209,8 +209,14 @@ impl LlmClient for OpenAiResponsesClient {
                                 _ => String::new(),
                             };
                             let combined = format!("{current}{input}");
+                            let bytes = combined.len();
+                            let name = last.name.clone();
                             last.arguments =
                                 serde_json::from_str(&combined).unwrap_or(Json::String(combined));
+                            on_delta(StreamDelta::ToolArgs {
+                                name,
+                                bytes,
+                            });
                         }
                     }
                     Some("response.completed") => {

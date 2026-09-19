@@ -1,10 +1,11 @@
 //! Project instruction files: workspace-owned rules for the agent.
 
+use std::path::Path;
+
 use metteur_shared::config::LlmConfig;
 use metteur_shared::llm::SystemFragment;
 
-use super::SCOPE_PREFIX;
-use super::sections::PRIORITY_PROJECT;
+use super::sections::{PRIORITY_PROJECT, SCOPE_PREFIX};
 
 /// Loads the first project instruction file that exists at the workspace root.
 ///
@@ -14,7 +15,7 @@ use super::sections::PRIORITY_PROJECT;
 /// Candidate names come from configuration, which a workspace controls, so a
 /// name that is not a plain file name is ignored — otherwise a repository could
 /// point the prompt at an arbitrary file on the machine.
-pub fn fragment(workspace_root: &std::path::Path, config: &LlmConfig) -> Option<SystemFragment> {
+pub fn fragment(workspace_root: &Path, config: &LlmConfig) -> Option<SystemFragment> {
     if !config.project_instructions {
         return None;
     }
@@ -34,9 +35,7 @@ pub fn fragment(workspace_root: &std::path::Path, config: &LlmConfig) -> Option<
     Some(SystemFragment {
         priority: PRIORITY_PROJECT,
         scope: format!("{SCOPE_PREFIX}project"),
-        content: format!(
-            "<project-instructions source=\"{name}\">\n{capped}\n</project-instructions>"
-        ),
+        content: format!("<project-instructions source=\"{name}\">\n{capped}\n</project-instructions>"),
     })
 }
 
@@ -49,12 +48,13 @@ fn is_plain_file_name(name: &str) -> bool {
         && name != ".."
         && !name.contains(['/', '\\'])
         && !name.contains(':')
-        && std::path::Path::new(name).components().count() == 1
+        && Path::new(name).components().count() == 1
 }
 
-/// Truncates `text` to at most `max` bytes, on a character boundary.
+/// Truncates `text` to at most `max` bytes on a character boundary.
 ///
-/// `max == 0` means "no cap".
+/// `max == 0` disables the cap. The truncation note is part of the returned
+/// text so the model knows the file was cut rather than short.
 fn cap_bytes(text: &str, max: usize) -> String {
     if max == 0 || text.len() <= max {
         return text.to_string();
@@ -63,5 +63,5 @@ fn cap_bytes(text: &str, max: usize) -> String {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[truncated]", &text[..end])
+    format!("{}\n[... truncated at {max} bytes]", &text[..end])
 }

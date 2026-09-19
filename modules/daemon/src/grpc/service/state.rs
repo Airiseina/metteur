@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use metteur_shared::config::{AclConfig, Config};
-use metteur_shared::llm::{Message, ReasoningEffort, Role};
+use metteur_shared::llm::{Message, ReasoningEffort, Role, ToolCall};
 use tokio::sync::{RwLock, watch};
 use tonic::Status;
 use uuid::Uuid;
@@ -14,6 +14,7 @@ use crate::error::DaemonError;
 use crate::execution::RunStatus;
 use crate::execution::interrupt::InterruptBus;
 use crate::execution::react::{DEFAULT_MAX_ITERATIONS, ReactOptions};
+use crate::llm::MockStep;
 use crate::llm::LlmClientFactory;
 use crate::observability::audit::AuditWriter;
 use crate::registry::Registry;
@@ -501,8 +502,43 @@ pub(crate) fn chat_options(options_json: &str) -> ReactOptions {
             .unwrap_or(DEFAULT_MAX_ITERATIONS),
         mock_text: string("mock_text"),
         mock_delay_ms: data.get("mock_delay_ms").and_then(|v| v.as_u64()),
+        mock_steps: parse_mock_steps(&data),
         ..ReactOptions::default()
     }
+}
+
+/// Parses scripted mock steps out of the chat options.
+///
+/// Only the `mock` provider reads this. It exists so a tool-calling turn can be
+/// driven through the chat RPC in a test: a single scripted text answer cannot
+/// produce one, and the transcript's tool handling is exactly what needs
+/// covering.
+fn parse_mock_steps(data: &serde_json::Value) -> Option<Vec<MockStep>> {
+    let steps = data.get("mock_steps")?.as_array()?;
+    let parsed: Vec<MockStep> = steps.iter().filter_map(parse_mock_step).collect();
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+/// Parses one scripted step: `{"text": "..."}` or `{"tool_calls": [...]}`.
+fn parse_mock_step(step: &serde_json::Value) -> Option<MockStep> {
+    if let Some(text) = step.get("text").and_then(|value| value.as_str()) {
+        return Some(MockStep::Text(text.to_string()));
+    }
+    let calls: Vec<ToolCall> = step
+        .get("tool_calls")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            let name = call.get("name")?.as_str()?.to_string();
+            Some(ToolCall {
+                id: format!("mock-call-{index}"),
+                name,
+                arguments: call.get("arguments").cloned().unwrap_or(serde_json::Value::Null),
+            })
+        })
+        .collect();
+    (!calls.is_empty()).then_some(MockStep::Tools(calls))
 }
 
 /// Converts the client-supplied conversation history into context messages.

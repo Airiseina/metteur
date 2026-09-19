@@ -92,7 +92,7 @@ impl Tool for SpawnSubAgent {
 
         // A fresh sub-agent still needs to know where it works: the harness
         // sections (identity, rules, environment) travel with it either way.
-        let mut fragments = crate::harness::HarnessPrompt::fragments(ctx).await;
+        let mut fragments = crate::harness::fragments(ctx).await;
         if let Some(content) = system {
             fragments.push(SystemFragment {
                 priority: crate::harness::sections::PRIORITY_NODE,

@@ -121,6 +121,27 @@ fn default_true() -> bool {
     true
 }
 
+/// The configured permission mode, or the one the sandbox switch implies.
+///
+/// Implemented here rather than in the daemon because both the merge logic and
+/// the daemon need the same answer.
+pub fn effective_permission_mode(config: &SandboxConfig) -> &'static str {
+    match config.mode.trim() {
+        "ask" | "manual" | "confirm" => "ask",
+        "sandbox" => "sandbox",
+        "full" | "auto" | "bypass" => "full",
+        // Unset: a disabled sandbox has no policy to consult, so nothing is
+        // confirmed; an enabled one falls back to the whitelist.
+        _ => {
+            if config.enabled {
+                "sandbox"
+            } else {
+                "full"
+            }
+        }
+    }
+}
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -326,6 +347,15 @@ pub struct LlmModelConfig {
     /// Whether the model accepts image inputs (advanced, optional).
     #[serde(default)]
     pub supports_vision: bool,
+    /// Replay stored reasoning blocks in later requests (advanced, optional).
+    ///
+    /// DeepSeek-family models require their `reasoning_content` back verbatim
+    /// once tools are in play, and replaying it also keeps the assistant turn
+    /// byte-identical for prefix caching. Strict OpenAI-compatible endpoints
+    /// reject the extra field, so the default is off and the daemon turns it on
+    /// for model ids that name a DeepSeek model.
+    #[serde(default)]
+    pub replay_reasoning: Option<bool>,
     /// Pricing strategy (all prices optional).
     #[serde(default)]
     pub pricing: ModelPricingStrategy,
@@ -354,11 +384,31 @@ pub struct AnonymizeConfig {
 }
 
 /// Command sandbox configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Whether the sandbox is enabled.
     #[serde(default)]
     pub enabled: bool,
+    /// Default permission mode: `ask`, `sandbox` or `full`.
+    ///
+    /// `ask` confirms every edit and command, `sandbox` runs edits inside the
+    /// workspace and policy-approved commands without asking, and `full` sends
+    /// the operations the predictor calls risky to a model before running them
+    /// (falling back to the user when the model cannot answer). A client may
+    /// override this per conversation.
+    ///
+    /// Empty — the default — derives the mode from `enabled`, so a
+    /// configuration written before modes existed keeps its behaviour: a
+    /// disabled sandbox means nothing asks, an enabled one means the whitelist
+    /// decides.
+    #[serde(default)]
+    pub mode: String,
+    /// Model key used for automatic approval in `full` mode.
+    ///
+    /// Empty selects the workspace's default model, which keeps the feature
+    /// usable without extra configuration; a small model is usually enough.
+    #[serde(default)]
+    pub approver_model: Option<String>,
     /// Commands allowed without user approval (glob patterns).
     #[serde(default)]
     pub whitelist: Vec<String>,
@@ -371,6 +421,25 @@ pub struct SandboxConfig {
     /// Seconds before a spawned command is killed (0 = default).
     #[serde(default)]
     pub command_timeout_secs: u64,
+}
+
+/// Mirrors the serde defaults of every field.
+///
+/// A derived `Default` would leave `mode` empty, and an empty mode is not a
+/// mode: a configuration built in code must behave exactly like one parsed from
+/// an empty file (see the note on [`LlmConfig`]'s `Default`).
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: String::new(),
+            approver_model: None,
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+            approval_timeout_secs: 0,
+            command_timeout_secs: 0,
+        }
+    }
 }
 
 /// Transport configuration for one MCP server connection.
@@ -844,6 +913,18 @@ impl Config {
             },
             sandbox: SandboxConfig {
                 enabled: workspace.sandbox.enabled || self.sandbox.enabled,
+                // An overridden mode is what the workspace asked for; the
+                // default value never shadows the global layer.
+                mode: if workspace.sandbox.mode.trim().is_empty() {
+                    self.sandbox.mode.clone()
+                } else {
+                    workspace.sandbox.mode.clone()
+                },
+                approver_model: workspace
+                    .sandbox
+                    .approver_model
+                    .clone()
+                    .or_else(|| self.sandbox.approver_model.clone()),
                 whitelist: if workspace.sandbox.whitelist.is_empty() {
                     self.sandbox.whitelist.clone()
                 } else {
@@ -1034,6 +1115,8 @@ mod tests {
         let global = Config {
             sandbox: SandboxConfig {
                 enabled: false,
+                mode: "sandbox".to_string(),
+                approver_model: None,
                 whitelist: vec!["cargo *".to_string()],
                 blacklist: vec!["rm *".to_string()],
                 approval_timeout_secs: 0,
@@ -1044,6 +1127,8 @@ mod tests {
         let workspace = Config {
             sandbox: SandboxConfig {
                 enabled: true,
+                mode: "sandbox".to_string(),
+                approver_model: None,
                 whitelist: vec!["node *".to_string()],
                 blacklist: Vec::new(),
                 approval_timeout_secs: 120,

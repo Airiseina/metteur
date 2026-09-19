@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import type { DaemonGateway } from './gateway'
 import type {
   AddonInfo,
+  ChatContextStats,
   ApprovalRequest,
   Blueprint,
   BlueprintEdge,
@@ -237,6 +238,8 @@ const DEMO_TREE: FileTreeNode[] = [
         children: [
           { name: 'api.ts', path: 'metrics/src/api.ts', kind: 'file' },
           { name: 'parser.ts', path: 'metrics/src/parser.ts', kind: 'file' },
+          { name: 'collect.mbp', path: 'metrics/src/collect.mbp', kind: 'file' },
+          { name: 'report.mbp', path: 'metrics/src/report.mbp', kind: 'file' },
         ],
       },
       { name: 'package.json', path: 'metrics/package.json', kind: 'file' },
@@ -278,6 +281,26 @@ A tiny telemetry workspace.
  * folder): the explorer hands back exactly those paths, so a key without the
  * folder prefix would make every demo file unopenable.
  */
+/**
+ * Demo blueprint DSL source.
+ *
+ * Shaped like the real DSL so tokenization, completion and the "to blueprint"
+ * action have something to work with in the mock.
+ */
+function MBP_SOURCE(name: string): string {
+  return [
+    `# ${name}`,
+    `blueprint "${name}"`,
+    '',
+    'entry start: Start()',
+    '  -> load: ReadFile(path="metrics/src/api.ts")',
+    '  -> done: CallLLM(prompt="Summarize the file")',
+    '',
+    '$done.result -> start.summary',
+    '',
+  ].join('\n')
+}
+
 const DEMO_FILES = new Map<string, string>([
   [
     'metrics/package.json',
@@ -295,6 +318,8 @@ const DEMO_FILES = new Map<string, string>([
     'metrics/src/parser.ts',
     `export function parseLine(line: string): number {\n  return Number.parseInt(line.trim(), 10);\n}\n`,
   ],
+  ['metrics/src/collect.mbp', MBP_SOURCE('Collect Samples')],
+  ['metrics/src/report.mbp', MBP_SOURCE('Report Samples')],
 ])
 
 const BLUEPRINT_SOURCE = (id: string): string =>
@@ -402,6 +427,8 @@ export class MockGateway implements DaemonGateway {
   private approved = new Map<string, boolean>()
   /** Workspaces with an abort requested for an in-flight chat response. */
   private chatAbort = new Set<string>()
+  /** Conversations the demo has streamed, keyed by workspace. */
+  private chatLog = new Map<string, ChatMessage[]>()
   /** Demo jobs, so the job panel has something to list outside a real run. */
   private jobs = new Map<string, JobInfo>()
   /** Open workspaces in memory so the tab strip can switch/close real entries. */
@@ -690,8 +717,19 @@ export class MockGateway implements DaemonGateway {
     _sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
+    signal?: AbortSignal,
+    onProgress?: (progress: { name: string; bytes: number }) => void,
+    onContext?: (stats: ChatContextStats) => void,
+    onApproval?: (request: { requestId: string; detail: string }) => void,
   ): Promise<Result<void>> {
     this.chatAbort.delete(ws)
+    // The demo never blocks on a decision; the parameter exists so a caller can
+    // pass the callback without the signature diverging from the real gateway.
+    void onApproval
+    const aborted = () => this.chatAbort.has(ws) || signal?.aborted === true
+    const log = this.chatLog.get(ws) ?? []
+    this.chatLog.set(ws, log)
+    log.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: Date.now() })
     onSession?.(`mock-${ws}`)
     const model = options?.model ?? 'demo-chat'
     const wantBlueprint = /blueprint|agent|graph|自动化|蓝图/i.test(content)
@@ -741,12 +779,42 @@ export class MockGateway implements DaemonGateway {
       })
     }
     for (const step of steps) {
-      if (this.chatAbort.has(ws)) return ok(undefined)
+      if (aborted()) return ok(undefined)
       const base = { actor: step.actor, detail: step.detail }
       const id = msgId()
+      if (step.role === 'tool') {
+        // Arguments are composed before the call exists; the demo reports the
+        // same progress the daemon sends for a large edit.
+        onProgress?.({ name: step.actor ?? '', bytes: 0 })
+        await delay(80)
+        onProgress?.({ name: step.actor ?? '', bytes: (step.text?.length ?? 0) * 4 })
+        await delay(80)
+        // A tool call is visible while it runs, not only when it returns.
+        onMessage({
+          id,
+          role: 'tool',
+          ...base,
+          content: '',
+          detail: { ...step.detail, callId: id, running: true, summary: step.actor },
+          createdAt: Date.now(),
+          pending: true,
+        })
+        await delay(120)
+        if (aborted()) return ok(undefined)
+        onMessage({
+          id,
+          role: 'tool',
+          ...base,
+          content: (step.text.split('\n').slice(-3).join('\n') || '').trim(),
+          detail: { ...step.detail, callId: id, progress: true },
+          createdAt: Date.now(),
+          pending: true,
+        })
+        await delay(120)
+      }
       // Reasoning streams first on its own channel, then the answer text.
       for (const chunk of streamChunks(step.reasoning)) {
-        if (this.chatAbort.has(ws)) return ok(undefined)
+        if (aborted()) return ok(undefined)
         onMessage({
           id,
           role: step.role,
@@ -761,7 +829,7 @@ export class MockGateway implements DaemonGateway {
       }
       // Stream the answer in small chunks so the bubble visibly fills in.
       for (const chunk of streamChunks(step.text)) {
-        if (this.chatAbort.has(ws)) return ok(undefined)
+        if (aborted()) return ok(undefined)
         onMessage({
           id,
           role: step.role,
@@ -773,17 +841,31 @@ export class MockGateway implements DaemonGateway {
         await delay(16)
       }
       // Settle the bubble with the complete text, exercising the replace path.
-      onMessage({
+      const settled: ChatMessage = {
         id,
         role: step.role,
         ...base,
         content: step.text,
         reasoning: step.reasoning,
         reasoningPending: false,
+        detail: { ...step.detail, ok: true, elapsedMs: 240 },
         createdAt: Date.now(),
-      })
+      }
+      onMessage(settled)
+      log.push(settled)
     }
     onTodos?.(DEMO_TODOS)
+    onContext?.({
+      tokens: 4200 + content.length * 3,
+      limit: 128_000,
+      assumedLimit: true,
+      regions: [
+        { region: 'system', tokens: 3100 },
+        { region: 'user', tokens: 600 + content.length * 3 },
+        { region: 'assistant', tokens: 900 },
+        { region: 'tool', tokens: 1400 },
+      ],
+    })
     onUsage?.({
       inputTokens: history.length * 120,
       outputTokens: content.length * 2,
@@ -795,19 +877,58 @@ export class MockGateway implements DaemonGateway {
     return ok(undefined)
   }
 
+  /** The demo workspace path, standing in for the OS folder dialog. */
+  async pickDirectory(): Promise<Result<string | null>> {
+    await delay(120)
+    return ok('D:/metteur-demo/metrics')
+  }
+
   async abortChat(ws: string): Promise<Result<void>> {
     this.chatAbort.add(ws)
     return ok(undefined)
   }
 
-  async listChatSessions(_ws: string): Promise<Result<ChatSessionInfo[]>> {
-    return ok([])
+  async sendInterrupt(
+    _ws: string,
+    _message: string,
+    priority: 'Normal' | 'Urgent' | 'Emergency' = 'Normal',
+  ): Promise<Result<void>> {
+    // The demo has no engine to inject into; reporting success is what lets the
+    // queue UI be exercised.
+    void priority
+    return ok(undefined)
+  }
+
+  async listChatSessions(ws: string): Promise<Result<ChatSessionInfo[]>> {
+    const transcript = this.chatLog.get(ws) ?? []
+    if (!transcript.length) return ok([])
+    const turns = transcript.filter((m) => m.role === 'user' || m.role === 'assistant')
+    const at = (index: number) => transcript.at(index)?.createdAt ?? Date.now()
+    return ok([
+      {
+        sessionId: 'demo',
+        createdAt: at(0),
+        updatedAt: at(-1),
+        turns: transcript.filter((m) => m.role === 'user').length,
+        title: (transcript.find((m) => m.role === 'user')?.content ?? 'Demo chat').slice(0, 80),
+        messageCount: turns.length,
+      },
+    ])
   }
 
   /** Returns a demo snapshot so the mock exercises session restore, including
    *  the task list the chat surface renders above the composer. */
-  async getChatSession(_ws: string, _sessionId?: string): Promise<Result<ChatSessionSnapshot>> {
-    return ok({ sessionId: 'demo', createdAt: Date.now(), history: [], todos: DEMO_TODOS })
+  async getChatSession(ws: string, _sessionId?: string): Promise<Result<ChatSessionSnapshot>> {
+    const transcript = this.chatLog.get(ws) ?? []
+    return ok({
+      sessionId: 'demo',
+      createdAt: transcript[0]?.createdAt ?? Date.now(),
+      // The demo transcript holds every role, so it doubles as the fallback
+      // history a pre-transcript session would offer.
+      transcript,
+      history: transcript.filter((m) => m.role === 'user' || m.role === 'assistant'),
+      todos: DEMO_TODOS,
+    })
   }
 
   async deleteChatSession(_ws: string, _sessionId?: string): Promise<Result<void>> {
@@ -832,10 +953,18 @@ export class MockGateway implements DaemonGateway {
     ])
   }
 
+  /**
+   * Compiles DSL text.
+   *
+   * The mock accepts the canonical blueprint header and reports an error with
+   * the real compiler's position suffix otherwise, so the editor's diagnostics
+   * path is exercised instead of throwing.
+   */
   async compileDsl(source: string): Promise<Result<Blueprint>> {
     await delay(120)
-    const bp = JSON.parse(source) as Blueprint
-    return ok(bp)
+    const header = /^\s*blueprint\s+"([^"]+)"/m.exec(source)
+    if (!header) return err('expected a blueprint header (line 1, column 1)')
+    return ok({ name: header[1], nodes: [], edges: [] } as unknown as Blueprint)
   }
 
   async decompileBlueprint(_ws: string, blueprintOrId: Blueprint | string): Promise<Result<string>> {

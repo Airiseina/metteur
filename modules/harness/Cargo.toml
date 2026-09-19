@@ -1,0 +1,11 @@
+[package]
+name = "metteur-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+metteur-shared = { path = "../shared" }
+
+[dev-dependencies]
+toml.workspace = true

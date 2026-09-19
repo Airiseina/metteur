@@ -3,16 +3,16 @@ allowBuilds:
   esbuild: true
   vue-demi: true
 minimumReleaseAgeExclude:
-  - '@vue/compiler-core@3.6.0-rc.6'
-  - '@vue/compiler-dom@3.6.0-rc.6'
-  - '@vue/compiler-sfc@3.6.0-rc.6'
-  - '@vue/compiler-ssr@3.6.0-rc.6'
-  - '@vue/compiler-vapor@3.6.0-rc.6'
-  - '@vue/reactivity@3.6.0-rc.6'
-  - '@vue/runtime-core@3.6.0-rc.6'
-  - '@vue/runtime-dom@3.6.0-rc.6'
-  - '@vue/runtime-vapor@3.6.0-rc.6'
-  - '@vue/server-renderer@3.6.0-rc.6'
-  - '@vue/shared@3.6.0-rc.6'
-  - vue@3.6.0-rc.6
+  - '@vue/compiler-core@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/compiler-dom@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/compiler-sfc@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/compiler-ssr@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/compiler-vapor@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/reactivity@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/runtime-core@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/runtime-dom@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/runtime-vapor@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/server-renderer@3.6.0-rc.6 || 3.6.0-rc.9'
+  - '@vue/shared@3.6.0-rc.6 || 3.6.0-rc.9'
+  - vue@3.6.0-rc.6 || 3.6.0-rc.9
   - vue-echarts@8.2.0

@@ -10,6 +10,7 @@ use metteur_shared::llm::{ContextManager, Role};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::transcript::TranscriptEntry;
 use crate::error::{DaemonError, DaemonResult};
 use crate::storage::persistence::{Db, cf};
 
@@ -40,6 +41,14 @@ pub struct ChatSessionRecord {
     /// The agent's task list at the end of the last turn.
     #[serde(default)]
     pub todos: Vec<metteur_shared::llm::TodoItem>,
+    /// What the conversation looked like: every turn, tool call and notice.
+    ///
+    /// Kept apart from `context`, which is the model's (compressed, evicted)
+    /// view and cannot reproduce the transcript. Records written before this
+    /// field existed deserialize as empty, and readers fall back to the
+    /// context's user/assistant turns.
+    #[serde(default)]
+    pub transcript: Vec<TranscriptEntry>,
 }
 
 impl ChatSessionRecord {
@@ -53,6 +62,7 @@ impl ChatSessionRecord {
             title: title_of(&context),
             context,
             todos: Vec::new(),
+            transcript: Vec::new(),
         }
     }
 }
@@ -154,12 +164,47 @@ fn migrate_legacy(db: &Db) -> DaemonResult<()> {
 
 /// Counts user and assistant messages (system/tool messages excluded).
 pub fn display_message_count(record: &ChatSessionRecord) -> usize {
+    if !record.transcript.is_empty() {
+        return record
+            .transcript
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.role,
+                    super::transcript::EntryRole::User | super::transcript::EntryRole::Assistant
+                )
+            })
+            .count();
+    }
     record
         .context
         .messages
         .iter()
         .filter(|m| matches!(m.role, Role::User | Role::Assistant))
         .count()
+}
+
+/// Drops the duplicated opening turn written before the send path was fixed.
+///
+/// A new session used to be seeded from the client's history *and* from the
+/// message field, so its first user turn appeared twice — in the transcript and
+/// in every restored view. The duplicate is only repaired when it is the very
+/// first pair of messages, which cannot be a legitimate repetition.
+pub fn repair_duplicate_opening(context: &mut ContextManager) -> usize {
+    let mut removed = 0;
+    while context.messages.len() >= 2 {
+        let (first, second) = (&context.messages[0], &context.messages[1]);
+        let same = first.role == Role::User
+            && second.role == Role::User
+            && first.text_content() == second.text_content()
+            && !first.text_content().trim().is_empty();
+        if !same {
+            break;
+        }
+        context.messages.remove(1);
+        removed += 1;
+    }
+    removed
 }
 
 /// Builds a truncated title from the first user message.

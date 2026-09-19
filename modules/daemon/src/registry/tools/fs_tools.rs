@@ -214,6 +214,11 @@ impl Tool for WriteFile {
 
         let fs = WorkspaceFs::new(ctx.workspace_root.clone());
         let resolved = fs.resolve(&path)?;
+        // The permission mode decides whether this write is confirmed first.
+        let summary = format!("write {} bytes", content.len());
+        if !crate::sandbox::authorize_write(ctx, &resolved, &path, &summary).await? {
+            return Err(DaemonError::Sandbox(format!("write denied by permission mode: {path}")));
+        }
         let old_content = std::fs::read(&resolved).ok();
         ctx.transaction_log.record_file_write(
             resolved.clone(),

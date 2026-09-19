@@ -87,8 +87,18 @@ export function ensureMbpLanguage(monaco: Monaco): void {
 /** Matches the `(line L, column C)` suffix appended to DSL compile errors. */
 const POSITION_RE = /\(line (\d+), column (\d+)\)/
 
-/** Compiles the model's text on edits (debounced) and marks errors inline. */
+/** Models whose diagnostics are already wired (a model can be shared). */
+const bound = new WeakSet<MonacoEditor.ITextModel>()
+
+/**
+ * Compiles the model's text on edits (debounced) and marks errors inline.
+ *
+ * Binding is idempotent: a model shared by two panes gets one diagnostics
+ * pipeline, not two.
+ */
 export function bindMbpDiagnostics(monaco: Monaco, model: MonacoEditor.ITextModel): void {
+  if (bound.has(model)) return
+  bound.add(model)
   const update = async () => {
     const text = model.getValue()
     const r = await gateway.compileDsl(text)

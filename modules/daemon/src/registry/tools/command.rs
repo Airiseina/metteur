@@ -22,6 +22,12 @@ const DEFAULT_TAIL_LINES: usize = 80;
 /// Maximum compressed output size returned to the caller.
 const OUTPUT_LIMIT_BYTES: usize = 8192;
 
+/// How often a running command's trailing output is reported to clients.
+const PROGRESS_INTERVAL_MS: u64 = 1000;
+
+/// Output lines included in one progress report.
+const PROGRESS_TAIL_LINES: usize = 12;
+
 /// Runs a shell command and waits for it to finish.
 ///
 /// The command runs as a job (see [`crate::execution::jobs`]) even though the
@@ -115,6 +121,10 @@ async fn start_command(
 ///
 /// A timeout kills the process: leaving it running would leak a build the
 /// caller has already given up on.
+///
+/// While waiting, the job's trailing output is reported to the caller's
+/// progress sink: a build can run for minutes, and the client shows its tail
+/// instead of a silent spinner. Reports are sent only when the tail changed.
 async fn wait_for_job(
     ctx: &ExecutionContext,
     job_id: &str,
@@ -138,12 +148,15 @@ async fn wait_for_job(
             }
         }
     };
+    let progress = report_progress(ctx, job_id);
+    tokio::pin!(progress);
     let outcome = tokio::select! {
         snapshot = waiting => snapshot,
         _ = wait_for_cancel(cancel) => {
             ctx.jobs.kill(job_id);
             return Err(DaemonError::Interrupted(format!("command {job_id} cancelled")));
         }
+        _ = &mut progress => None,
     };
     outcome.ok_or_else(|| {
         if timeout_secs == 0 {
@@ -154,6 +167,33 @@ async fn wait_for_job(
             ))
         }
     })
+}
+
+/// Reports the running job's tail until the sink closes or the wait ends.
+///
+/// Returns when the client side of the sink is gone, so a dropped connection
+/// stops the reporting instead of spinning.
+async fn report_progress(ctx: &ExecutionContext, job_id: &str) {
+    let Some(sink) = ctx.progress.clone() else {
+        // Without a sink (blueprint runs, non-streaming callers) the future
+        // never resolves; the select! above simply ignores it.
+        std::future::pending::<()>().await;
+        return;
+    };
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(PROGRESS_INTERVAL_MS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last = String::new();
+    loop {
+        ticker.tick().await;
+        let tail = ctx.jobs.tail(job_id, PROGRESS_TAIL_LINES);
+        if tail.is_empty() || tail == last {
+            continue;
+        }
+        if sink.send(tail.clone()).is_err() {
+            return;
+        }
+        last = tail;
+    }
 }
 
 /// Renders a job as the tool result payload.

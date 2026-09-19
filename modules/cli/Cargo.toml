@@ -20,7 +20,6 @@ metteur-proto = { path = "../proto" }
 ratatui.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
 tonic.workspace = true
 uuid.workspace = true
 zip.workspace = true

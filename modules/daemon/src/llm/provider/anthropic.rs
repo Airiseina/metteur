@@ -15,6 +15,13 @@ use super::super::client::{
 /// The Anthropic API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Cache breakpoints the API accepts per request.
+///
+/// Ordering is load-bearing: a change in an earlier section invalidates every
+/// later one, so tools are marked before the system prompt and the conversation
+/// tail comes last.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
 /// A client for the Anthropic Messages API.
 pub struct AnthropicClient {
     http: reqwest::Client,
@@ -50,9 +57,15 @@ impl AnthropicClient {
         tools: &[ToolDefinition],
     ) -> Json {
         let merged = merge_params(&self.default_params, params);
+        // Breakpoints are planned up front so the request never exceeds the
+        // API's limit when every segment is present.
+        let budget = if self.prompt_cache { MAX_CACHE_BREAKPOINTS } else { 0 };
+        let mutate_tools = budget >= 1;
+        let mutate_system = budget >= 2;
+        let rolling = budget >= 3;
         let mut body = json!({
             "model": self.model,
-            "messages": build_messages(ctx),
+            "messages": build_messages(ctx, rolling),
             "max_tokens": merged.max_tokens.unwrap_or(1024),
         });
         if !ctx.system_fragments.is_empty() {
@@ -60,7 +73,7 @@ impl AnthropicClient {
             // (large, stable) prefix cached across the turns of a conversation.
             // The canonical order is a precondition for that stability.
             let system = ctx.system_text();
-            body["system"] = if self.prompt_cache {
+            body["system"] = if mutate_system {
                 json!([{
                     "type": "text",
                     "text": system,
@@ -90,7 +103,7 @@ impl AnthropicClient {
             // A cache breakpoint on the last tool extends the cached prefix to
             // cover the tool definitions as well as the system prompt.
             let mut tools_json = build_tools(tools);
-            if self.prompt_cache
+            if mutate_tools
                 && let Some(last) = tools_json.as_array_mut().and_then(|items| items.last_mut())
             {
                 last["cache_control"] = json!({ "type": "ephemeral" });
@@ -238,8 +251,14 @@ impl LlmClient for AnthropicClient {
                                 _ => String::new(),
                             };
                             let combined = format!("{current}{input}");
+                            let bytes = combined.len();
+                            let name = last.name.clone();
                             last.arguments =
                                 serde_json::from_str(&combined).unwrap_or(Json::String(combined));
+                            on_delta(StreamDelta::ToolArgs {
+                                name,
+                                bytes,
+                            });
                         }
                     }
                     Some("content_block_start") => {
@@ -294,8 +313,48 @@ impl LlmClient for AnthropicClient {
 }
 
 /// Converts a context into the Anthropic messages array.
-fn build_messages(ctx: &ContextManager) -> Vec<Json> {
-    ctx.messages.iter().map(message_to_json).collect()
+fn build_messages(ctx: &ContextManager, rolling_breakpoint: bool) -> Vec<Json> {
+    let mut messages: Vec<Json> = ctx.messages.iter().map(message_to_json).collect();
+    if rolling_breakpoint && let Some(last) = messages.last_mut() {
+        // The conversation tail is append-only, so caching it costs one write
+        // now and turns every later turn's history into a cache read. Providers
+        // whose cacheable minimum is not reached silently skip the write, so a
+        // short conversation is unaffected.
+        mark_last_block(last);
+    }
+    messages
+}
+
+/// Marks the final content block of a message as a cache breakpoint.
+///
+/// A message whose content is a plain string is rewritten into the equivalent
+/// single text block, which is the only form that can carry `cache_control`.
+/// Reasoning blocks are skipped: they carry a signature that must be replayed
+/// verbatim, and providers reject a breakpoint on generated reasoning.
+fn mark_last_block(message: &mut Json) {
+    let ephemeral = json!({ "type": "ephemeral" });
+    match message.get_mut("content") {
+        Some(Json::String(text)) => {
+            let text = text.clone();
+            message["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": ephemeral,
+            }]);
+        }
+        Some(Json::Array(blocks)) => {
+            let markable = blocks.iter_mut().rev().find(|block| {
+                !matches!(
+                    block.get("type").and_then(Json::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            });
+            if let Some(block) = markable {
+                block["cache_control"] = ephemeral;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Converts a shared message into an Anthropic message object.
@@ -503,7 +562,7 @@ mod tests {
             lifetime: metteur_shared::llm::ToolResultLifetime::OneShot,
             paths: Vec::new(),
         });
-        let messages = build_messages(&ctx);
+        let messages = build_messages(&ctx, false);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"][0]["type"], "tool_result");
@@ -589,6 +648,59 @@ mod tests {
         let body = client.build_body(&ctx, &GenerationParams::default(), &[]);
         // Without breakpoints the system field stays a plain string.
         assert!(body["system"].is_string(), "{}", body["system"]);
+    }
+
+    /// A rolling breakpoint on the conversation tail is what turns the history
+    /// of a long session into cache reads instead of cache writes.
+    #[test]
+    fn the_conversation_tail_carries_a_cache_breakpoint() {
+        let client = AnthropicClient::new(
+            reqwest::Client::new(),
+            &LlmProviderConfig::new(
+                super::super::super::ProviderKind::Anthropic,
+                "https://api.anthropic.com",
+                "key",
+                "claude-sonnet-4",
+            ),
+        );
+        let mut ctx = ContextManager::new_from_prompt(vec![], "hi");
+        ctx.push_message(metteur_shared::llm::Message::text(
+            metteur_shared::llm::Role::Assistant,
+            "answer",
+        ));
+        let body = client.build_body(&ctx, &GenerationParams::default(), &[]);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.last().unwrap()["content"][0]["type"], "text");
+        assert_eq!(
+            messages.last().unwrap()["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        // Earlier messages stay untouched.
+        assert!(messages[0]["content"].is_string());
+    }
+
+    /// Reasoning blocks must not carry a breakpoint: the API rejects a
+    /// `cache_control` on generated thinking.
+    #[test]
+    fn a_trailing_thinking_block_is_not_marked() {
+        let mut message = json!({
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "hmm", "signature": "sig" },
+                { "type": "text", "text": "answer" }
+            ]
+        });
+        mark_last_block(&mut message);
+        assert!(message["content"][0].get("cache_control").is_none());
+        assert_eq!(message["content"][1]["cache_control"]["type"], "ephemeral");
+
+        // A message that is nothing but reasoning stays unmarked.
+        let mut thinking_only = json!({
+            "role": "assistant",
+            "content": [{ "type": "thinking", "thinking": "hmm", "signature": "sig" }]
+        });
+        mark_last_block(&mut thinking_only);
+        assert!(thinking_only["content"][0].get("cache_control").is_none());
     }
 
     #[test]

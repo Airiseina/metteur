@@ -219,7 +219,7 @@ function renderFence(code: string, tag: string): string {
   }
 }
 
-function createRenderer(): MarkdownIt {
+function createRenderer(highlight: boolean): MarkdownIt {
   const md = new MarkdownIt({
     html: false,
     linkify: true,
@@ -228,6 +228,7 @@ function createRenderer(): MarkdownIt {
   })
   md.renderer.rules.fence = (tokens, index) => {
     const token = tokens[index]
+    if (!highlight) return plainFence(token.content, token.info ?? '')
     return renderFence(token.content, token.info ?? '')
   }
   // Links open in a new tab; the app is a local shell and never navigates away.
@@ -243,12 +244,23 @@ function createRenderer(): MarkdownIt {
 }
 
 let renderer: MarkdownIt | null = null
+/** Renderer used for messages that are still streaming (no highlighting). */
+let plainRenderer: MarkdownIt | null = null
 
-/** Renders markdown to sanitized HTML. */
-export function renderMarkdown(source: string): string {
+/**
+ * Renders markdown to sanitized HTML.
+ *
+ * `highlight: false` keeps code fences as plain escaped text: a message that is
+ * still streaming would otherwise re-run the highlighter on every delta.
+ * Highlighting is the expensive part, not parsing.
+ */
+export function renderMarkdown(source: string, options?: { highlight?: boolean }): string {
   if (!source.trim()) return ''
-  renderer ??= createRenderer()
-  const html = renderer.render(source)
+  const highlight = options?.highlight ?? true
+  if (highlight) renderer ??= createRenderer(true)
+  else plainRenderer ??= createRenderer(false)
+  const active = highlight ? renderer : plainRenderer
+  const html = active!.render(source)
   // Shiki emits <span style="color:…">; the target/rel attributes come from
   // the link rule above and are the only additions the sanitizer allows.
   return DOMPurify.sanitize(html, {

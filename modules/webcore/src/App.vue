@@ -187,16 +187,13 @@ async function openDir() {
   if (openingFolder.value) return
   openingFolder.value = true
   try {
-    const res = await fetch('/api/pick-directory', { method: 'POST' })
-    if (!res.ok) {
-      feedback.toast('error', 'Folder picker unavailable', `${res.statusText || res.status}`)
+    const result = await gateway.pickDirectory()
+    if (!result.ok) {
+      feedback.toast('error', 'Folder picker unavailable', result.error)
       return
     }
-    const data = (await res.json()) as { path?: string | null }
-    if (!data.path) return // User cancelled the OS dialog.
-    pendingOpen.value = data.path
-  } catch (e) {
-    feedback.toast('error', 'Folder picker error', String(e))
+    if (!result.data) return // The user cancelled the dialog.
+    pendingOpen.value = result.data
   } finally {
     openingFolder.value = false
   }
@@ -539,15 +536,6 @@ function onRightResizeStart(e: MouseEvent) {
     <main v-else class="min-h-0 flex-1 overflow-hidden">
       <RouterView />
     </main>
-
-    <!-- Activity indicator for the chat stream. -->
-    <div
-      v-if="chat.streaming"
-      class="flex h-6 shrink-0 items-center gap-1.5 border-t border-divider bg-sidebar px-3 text-[11px] text-muted-foreground"
-    >
-      <span class="h-1.5 w-1.5 animate-pulse rounded-full" style="background: var(--primary)" />
-      Agent is thinking…
-    </div>
 
     <!-- Status bar -->
     <footer

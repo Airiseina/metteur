@@ -10,6 +10,7 @@ use crate::chat::session::{
     ChatSessionRecord, delete_thread, display_message_count, list_threads, load_thread,
     save_thread, title_of,
 };
+use crate::chat::transcript::Transcript;
 use crate::execution::context::ExecutionContext;
 use crate::execution::interrupt::{Interrupt, InterruptBus, InterruptPriority};
 use crate::execution::react::{ReactEvent, run_react_streaming};
@@ -65,6 +66,7 @@ impl DaemonService {
         let created_at = existing.as_ref().map(|r| r.created_at).unwrap_or(now);
         let old_turns = existing.as_ref().map(|r| r.turns).unwrap_or(0);
         let title = existing.as_ref().and_then(|r| r.title.clone());
+        let existing_transcript = existing.as_ref().map(|r| r.transcript.clone());
 
         // A workspace hosts either one execution or one chat at a time.
         {
@@ -129,10 +131,20 @@ impl DaemonService {
                 ctx.global_db = Some(global_db);
             }
             ctx.addon_fragments = addon_fragments.clone();
+            // The composer's permission selector travels with each turn; an
+            // absent value falls back to the workspace configuration.
+            if let Some(mode) = chat_option(&options_json, "permission_mode") {
+                ctx.permission_mode = crate::sandbox::PermissionMode::parse(&mode);
+            } else if let Some(config) = &ctx.config {
+                let configured = metteur_shared::config::effective_permission_mode(
+                    &config.read().await.sandbox,
+                );
+                ctx.permission_mode = crate::sandbox::PermissionMode::parse(configured);
+            }
 
             // Compose the context: persisted sessions are authoritative (they
             // retain tool results); new sessions start from history_json.
-            let harness = crate::harness::HarnessPrompt::fragments(&ctx).await;
+            let harness = crate::harness::fragments(&ctx).await;
             let mut context = match existing {
                 Some(record) => {
                     let mut restored = record.context;
@@ -162,18 +174,34 @@ impl DaemonService {
                     fresh
                 }
             };
-            context.push_message(Message::text(Role::User, message));
+            // Sessions written before the send path was fixed carry their
+            // opening turn twice; the repair is a no-op for healthy ones.
+            let repaired = crate::chat::session::repair_duplicate_opening(&mut context);
+            if repaired > 0 {
+                tracing::info!("chat {session_id}: repaired {repaired} duplicated opening turn(s)");
+            }
+            context.push_message(Message::text(Role::User, message.clone()));
+
+            // The transcript is the display view: it keeps tool calls, notices
+            // and the timing the model's context cannot reproduce.
+            let mut transcript =
+                Transcript::resuming(existing_transcript.unwrap_or_default());
+            transcript.push_user(message.clone(), now);
 
             // New sessions take their title from the first user message.
             let title = title.or_else(|| title_of(&context));
 
-            // Announce the session id so the client can resume later turns.
+            // Announce the session id so the client can resume later turns,
+            // together with the context it starts from: without it the client
+            // has no size to show until the first turn completes.
+            let opening_stats = context_stats(&ctx, &context).await;
             let _ = event_tx.send(Ok(ChatEvent {
                 kind: "session".to_string(),
                 content: String::new(),
                 detail_json: serde_json::json!({
                     "session_id": session_id.to_string(),
                     "created_at": created_at,
+                    "context": opening_stats,
                 })
                 .to_string(),
             }));
@@ -222,6 +250,19 @@ impl DaemonService {
                             })
                             .to_string(),
                         },
+                        // An approval request must reach the client that can
+                        // answer it; dropping it here made a turn that needs a
+                        // decision wait for the timeout with nothing shown.
+                        crate::execution::ExecutionEvent::ApprovalRequested {
+                            request_id,
+                            detail,
+                            ..
+                        } => ChatEvent {
+                            kind: "approval".to_string(),
+                            content: detail,
+                            detail_json: serde_json::json!({ "request_id": request_id })
+                                .to_string(),
+                        },
                         _ => continue,
                     };
                     if bridge_tx.send(Ok(payload)).is_err() {
@@ -247,24 +288,53 @@ impl DaemonService {
                     opts.compress_after_messages = Some(40);
                 }
             }
+            // The closures below run while the turn streams, so the transcript
+            // is shared rather than borrowed.
+            let transcript = std::sync::Arc::new(parking_lot::Mutex::new(transcript));
             let delta_tx = event_tx.clone();
             let delta_cancel = cancel_flag.clone();
+            // Argument-size reports arrive per chunk; one per 400ms is what a
+            // reader can use, and a burst would drown the transcript.
+            let mut last_args_at = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now);
             let mut on_delta = move |delta: StreamDelta| {
-                let (kind, content) = match delta {
-                    StreamDelta::Text(text) => ("assistant_delta", text),
-                    StreamDelta::Reasoning(text) => ("reasoning_delta", text),
-                };
-                let event = ChatEvent {
-                    kind: kind.to_string(),
-                    content,
-                    detail_json: String::new(),
+                let event = match delta {
+                    StreamDelta::Text(text) => ChatEvent {
+                        kind: "assistant_delta".to_string(),
+                        content: text,
+                        detail_json: String::new(),
+                    },
+                    StreamDelta::Reasoning(text) => ChatEvent {
+                        kind: "reasoning_delta".to_string(),
+                        content: text,
+                        detail_json: String::new(),
+                    },
+                    StreamDelta::ToolArgs {
+                        name,
+                        bytes,
+                    } => {
+                        let now = std::time::Instant::now();
+                        if now.duration_since(last_args_at) < std::time::Duration::from_millis(400) {
+                            return;
+                        }
+                        last_args_at = now;
+                        ChatEvent {
+                            kind: "tool_args".to_string(),
+                            content: String::new(),
+                            detail_json: serde_json::json!({ "name": name, "bytes": bytes })
+                                .to_string(),
+                        }
+                    }
                 };
                 if delta_tx.send(Ok(event)).is_err() {
                     delta_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             };
             let stream_tx = event_tx.clone();
+            let journal = std::sync::Arc::clone(&transcript);
             let mut on_event = move |ev: ReactEvent| {
+                record_react_event(&journal, &ev);
                 let event = match ev {
                     ReactEvent::Assistant {
                         text,
@@ -278,13 +348,45 @@ impl DaemonService {
                             serde_json::json!({ "reasoning": reasoning }).to_string()
                         },
                     },
-                    ReactEvent::Tool {
+                    // The live client already streamed this text with the
+                    // deltas, so it is recorded but not re-sent.
+                    ReactEvent::AssistantText {
+                        ..
+                    } => return,
+                    ReactEvent::ToolStart {
+                        call_id,
                         name,
+                        summary,
+                    } => ChatEvent {
+                        kind: "tool_start".to_string(),
+                        content: summary,
+                        detail_json: serde_json::json!({ "name": name, "call_id": call_id })
+                            .to_string(),
+                    },
+                    ReactEvent::ToolProgress {
+                        call_id,
+                        tail,
+                    } => ChatEvent {
+                        kind: "tool_progress".to_string(),
+                        content: tail,
+                        detail_json: serde_json::json!({ "call_id": call_id }).to_string(),
+                    },
+                    ReactEvent::Tool {
+                        call_id,
+                        name,
+                        ok,
+                        elapsed_ms,
                         content,
                     } => ChatEvent {
                         kind: "tool".to_string(),
                         content,
-                        detail_json: serde_json::json!({ "name": name }).to_string(),
+                        detail_json: serde_json::json!({
+                            "name": name,
+                            "call_id": call_id,
+                            "ok": ok,
+                            "elapsed_ms": elapsed_ms,
+                        })
+                        .to_string(),
                     },
                 };
                 if stream_tx.send(Ok(event)).is_err() {
@@ -307,6 +409,8 @@ impl DaemonService {
                         saved_context
                             .push_message(Message::text(Role::Assistant, outcome.text.clone()));
                     }
+                    // Measured before the context moves into the record.
+                    let stats = context_stats(&ctx, &saved_context).await;
                     let record = ChatSessionRecord {
                         session_id,
                         created_at,
@@ -315,6 +419,7 @@ impl DaemonService {
                         title,
                         context: saved_context,
                         todos: todos.clone(),
+                        transcript: finish_transcript(&transcript),
                     };
                     let terminal = Ok(ChatEvent {
                         kind: "done".to_string(),
@@ -328,6 +433,9 @@ impl DaemonService {
                                 "cache_write_input_tokens":
                                     outcome.usage.cache_write_input_tokens,
                             },
+                            // What the conversation now occupies, so the client can
+                            // show a capacity meter without a second RPC.
+                            "context": stats,
                             "session_id": session_id.to_string(),
                         })
                         .to_string(),
@@ -336,7 +444,12 @@ impl DaemonService {
                 }
                 Err((err, partial)) => {
                     // Persist the partially mutated context so an aborted or
-                    // failed turn can be resumed from where it stopped.
+                    // failed turn can be resumed from where it stopped. The
+                    // transcript keeps the failure so a restored conversation
+                    // says why the turn stopped.
+                    if let Some(mut journal) = transcript.try_lock() {
+                        journal.push_error(err.to_string(), now);
+                    }
                     let record = ChatSessionRecord {
                         session_id,
                         created_at,
@@ -345,6 +458,7 @@ impl DaemonService {
                         title,
                         context: partial,
                         todos: todos.clone(),
+                        transcript: finish_transcript(&transcript),
                     };
                     let terminal = Ok(ChatEvent {
                         kind: "error".to_string(),
@@ -452,6 +566,7 @@ impl DaemonService {
             created_at: record.created_at as i64,
             history_json: context_history_json(&record.context),
             todos_json: serde_json::to_string(&record.todos).unwrap_or_else(|_| "[]".to_string()),
+            transcript_json: crate::chat::transcript::to_json(&record.transcript),
         }))
     }
 
@@ -504,6 +619,92 @@ impl DaemonService {
         }
         Ok(Response::new(Empty {}))
     }
+}
+
+/// Reads a non-empty string field out of the chat options JSON.
+fn chat_option(options_json: &str, key: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(options_json).ok()?;
+    let text = value.get(key)?.as_str()?.trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Input window assumed when the model's configuration does not state one.
+const DEFAULT_CONTEXT_WINDOW: u64 = 128 * 1024;
+
+/// Summarises what the conversation occupies: tokens, the model's window and
+/// the per-region breakdown the capacity popover renders.
+///
+/// The numbers are estimates (see `llm::token::estimate_tokens`); a client must
+/// present them as an indication, not as a billed figure. The window is
+/// `null` for models whose configuration does not describe one, and the UI
+/// hides the meter rather than inventing a limit.
+async fn context_stats(ctx: &ExecutionContext, context: &ContextManager) -> serde_json::Value {
+    let llm = match &ctx.config {
+        Some(config) => config.read().await.llm.clone(),
+        None => metteur_shared::config::LlmConfig::default(),
+    };
+    let model = llm
+        .default_model
+        .as_deref()
+        .and_then(|key| llm.models.get(key))
+        .or_else(|| llm.models.values().next());
+    // A configured window wins; otherwise assume the common modern default so
+    // the meter has a percentage at all. The client labels an assumed limit as
+    // such, and Settings → LLM & Models sets the real one.
+    let limit = crate::llm::context_window_budget(model, None).or(Some(DEFAULT_CONTEXT_WINDOW));
+    let regions: Vec<serde_json::Value> = context
+        .usage_report()
+        .into_iter()
+        .map(|region| {
+            serde_json::json!({ "region": region.region, "tokens": region.tokens })
+        })
+        .collect();
+    let configured = crate::llm::context_window_budget(model, None).is_some();
+    serde_json::json!({
+        "tokens": metteur_shared::llm::estimate_context_tokens(context),
+        "limit": limit,
+        "assumed_limit": !configured,
+        "regions": regions,
+    })
+}
+
+/// Mirrors one ReAct event into the session transcript.
+///
+/// Only the durable steps are recorded: progress tails belong to a running
+/// call and a restored turn shows the result, not every intermediate chunk.
+fn record_react_event(journal: &std::sync::Arc<parking_lot::Mutex<Transcript>>, event: &ReactEvent) {
+    let at = chrono::Utc::now().timestamp_millis() as u64;
+    let mut journal = journal.lock();
+    match event {
+        ReactEvent::Assistant {
+            text,
+            reasoning,
+        } => journal.push_assistant(text.clone(), reasoning.clone(), at),
+        ReactEvent::AssistantText {
+            text,
+        } => journal.push_assistant(text.clone(), String::new(), at),
+        ReactEvent::ToolStart {
+            call_id,
+            name,
+            summary,
+        } => journal.push_tool_start(call_id.clone(), name.clone(), summary.clone(), at),
+        ReactEvent::Tool {
+            call_id,
+            name,
+            ok,
+            elapsed_ms,
+            content,
+        } => journal.push_tool_result(call_id, name, *ok, *elapsed_ms, content.clone(), at),
+        ReactEvent::ToolProgress { .. } => {}
+    }
+}
+
+/// Closes the shared transcript, returning the session's entries.
+fn finish_transcript(
+    journal: &std::sync::Arc<parking_lot::Mutex<Transcript>>,
+) -> Vec<crate::chat::transcript::TranscriptEntry> {
+    let entries = std::mem::take(&mut *journal.lock());
+    entries.finish()
 }
 
 /// Serializes a context's user/assistant text as `[{role, content}]`.

@@ -71,8 +71,7 @@ mod tests {
             enabled: true,
             whitelist: whitelist.iter().map(|s| s.to_string()).collect(),
             blacklist: blacklist.iter().map(|s| s.to_string()).collect(),
-            approval_timeout_secs: 0,
-            command_timeout_secs: 0,
+            ..Default::default()
         }
     }
 

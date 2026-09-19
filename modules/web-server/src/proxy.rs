@@ -827,6 +827,7 @@ mod tests {
                 created_at: 1,
                 history_json: "[]".to_string(),
                 todos_json: "[]".to_string(),
+                transcript_json: "[]".to_string(),
             }))
         }
         async fn delete_chat_session(

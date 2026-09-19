@@ -247,7 +247,7 @@ pub async fn run_plan_agent(
     task: &str,
     mock_text: Option<String>,
 ) -> DaemonResult<serde_json::Value> {
-    let mut system = crate::harness::HarnessPrompt::fragments(ctx).await;
+    let mut system = crate::harness::fragments(ctx).await;
     system.push(metteur_shared::llm::SystemFragment {
         priority: crate::harness::sections::PRIORITY_NODE,
         scope: "plan_agent".to_string(),

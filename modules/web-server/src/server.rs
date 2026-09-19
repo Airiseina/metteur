@@ -18,7 +18,7 @@ use std::convert::Infallible;
 use tonic::transport::Channel;
 use tower::{Layer, Service};
 
-use crate::{Cli, ForwardService};
+use crate::{Cli, ForwardService, sse};
 
 /// Builds the web application router.
 ///
@@ -29,8 +29,8 @@ use crate::{Cli, ForwardService};
 /// Missing assets return a real 404 instead of HTML, so a stale hashed
 /// stylesheet (e.g. after a rebuild) never surfaces as a `text/html` CSS.
 pub fn build_router(client: DaemonClient<Channel>, static_dir: PathBuf) -> Router {
-    let grpc_web =
-        tonic_web::GrpcWebLayer::new().layer(DaemonServer::new(ForwardService::new(client)));
+    let grpc_web = tonic_web::GrpcWebLayer::new()
+        .layer(DaemonServer::new(ForwardService::new(client.clone())));
     let static_dir = Arc::new(static_dir);
     Router::new()
         .route_service(
@@ -38,6 +38,10 @@ pub fn build_router(client: DaemonClient<Channel>, static_dir: PathBuf) -> Route
             axum::routing::any_service(GrpcWebAdapter(grpc_web)),
         )
         .route("/api/pick-directory", axum::routing::post(pick_directory))
+        // The chat stream over server-sent events; everything else stays on
+        // grpc-web, which already carries unary calls well.
+        .route("/api/chat/stream", axum::routing::post(sse::chat_stream))
+        .with_state(client)
         .fallback(move |uri: Uri| async move { serve_static(static_dir.clone(), uri).await })
 }
 

@@ -77,6 +77,11 @@ pub struct ReactOptions {
     pub label: String,
     /// Scripted text for the mock provider.
     pub mock_text: Option<String>,
+    /// Scripted steps for the mock provider; overrides `mock_text` when set.
+    ///
+    /// A tool turn cannot be scripted with a single text answer, and the chat
+    /// RPC has no other way to reach one without a provider.
+    pub mock_steps: Option<Vec<MockStep>>,
     /// Artificial delay before each mock response.
     pub mock_delay_ms: Option<u64>,
     /// Consecutive tool failures tolerated before giving up (`0` disables).
@@ -118,6 +123,7 @@ impl Default for ReactOptions {
             compress_after_messages: None,
             label: String::new(),
             mock_text: None,
+            mock_steps: None,
             mock_delay_ms: None,
             tool_error_limit: DEFAULT_TOOL_ERROR_LIMIT,
             repeat_call_limit: DEFAULT_REPEAT_CALL_LIMIT,
@@ -141,10 +147,43 @@ pub enum ReactEvent {
         /// The reasoning that preceded the answer, when the model produced any.
         reasoning: String,
     },
-    /// A tool invocation with its (still anonymized) textual result.
-    Tool {
+    /// Text the assistant produced in a turn that also called tools.
+    ///
+    /// The live client already streamed this text, so it is not re-sent for
+    /// display; a transcript needs it to replay the conversation faithfully.
+    AssistantText {
+        /// The text of the turn (never empty).
+        text: String,
+    },
+    /// A tool call that is about to run.
+    ///
+    /// Emitted before the tool starts so the UI can show what is happening
+    /// while a slow command or a large edit is still in flight.
+    ToolStart {
+        /// Provider-assigned id of the call.
+        call_id: String,
         /// The tool name.
         name: String,
+        /// One-line summary of the arguments (may be empty).
+        summary: String,
+    },
+    /// Incremental output of a still-running tool.
+    ToolProgress {
+        /// Provider-assigned id of the call.
+        call_id: String,
+        /// Trailing output lines, already trimmed.
+        tail: String,
+    },
+    /// A tool invocation with its (still anonymized) textual result.
+    Tool {
+        /// Provider-assigned id of the call.
+        call_id: String,
+        /// The tool name.
+        name: String,
+        /// Whether the call succeeded.
+        ok: bool,
+        /// Wall-clock duration of the call in milliseconds.
+        elapsed_ms: u64,
         /// The tool's textual result.
         content: String,
     },
@@ -231,6 +270,9 @@ async fn react_loop_inner(
 
     let mut total_usage = Usage::default();
     let mut final_text = String::new();
+    // Set when the model finished on its own, which is what separates "answered
+    // with nothing to say" from "ran out of turns".
+    let mut answered = false;
     // Consecutive tool failures and repeated `(name, arguments)` signatures.
     let mut consecutive_errors: u32 = 0;
     let mut repeat_counts: HashMap<String, u32> = HashMap::new();
@@ -266,6 +308,12 @@ async fn react_loop_inner(
             context.push_message(Message::text(Role::User, msg));
         }
         if let Some(bus) = &ctx.interrupts {
+            // A queued (normal) message from a client lands at the next LLM
+            // call, which is the same point the interpreter injects it. Without
+            // this drain a message typed into a running chat would be lost.
+            for msg in bus.drain(InterruptPriority::Normal) {
+                context.push_message(Message::text(Role::User, msg));
+            }
             for msg in bus.drain(InterruptPriority::Urgent) {
                 context.push_message(Message::text(Role::User, msg));
             }
@@ -355,6 +403,7 @@ async fn react_loop_inner(
                 }
             }
             final_text = response.text.clone();
+            answered = true;
             if let Some(cb) = on_event.as_deref_mut() {
                 cb(ReactEvent::Assistant {
                     text: final_text.clone(),
@@ -398,7 +447,28 @@ async fn react_loop_inner(
         if response.tool_calls.iter().any(|call| call.name == "SpawnSubAgent") {
             ctx.parent_context = Some(context.clone());
         }
-        let outcomes = execute_tool_calls(ctx, &response.tool_calls, opts, &anonymizer).await;
+        // Announce every call before running it: a slow command or a large edit
+        // would otherwise leave the UI with nothing to show for minutes.
+        if let Some(cb) = on_event.as_deref_mut() {
+            // Text that accompanies tool calls is part of the conversation and
+            // belongs in a transcript, even though the live client has already
+            // displayed it via the delta stream.
+            let text = response.text.trim();
+            if !text.is_empty() {
+                cb(ReactEvent::AssistantText {
+                    text: response.text.clone(),
+                });
+            }
+            for call in &response.tool_calls {
+                cb(ReactEvent::ToolStart {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    summary: crate::registry::tool::summarize_call(&call.arguments),
+                });
+            }
+        }
+        let outcomes =
+            execute_tool_calls(ctx, &response.tool_calls, opts, &anonymizer, &mut on_event).await;
         ctx.parent_context = None;
 
         // Context operations requested by the calls above apply to the results
@@ -410,6 +480,7 @@ async fn react_loop_inner(
                 result: outcome,
                 read_paths: paths,
                 full_reads,
+                elapsed_ms,
             } = outcome;
             // A complete read replaces an earlier complete read of the same
             // paths: keeping both would duplicate content the model already
@@ -421,10 +492,10 @@ async fn react_loop_inner(
                     ctx.audit("context.supersede", serde_json::json!({ "results": superseded }));
                 }
             }
-            let text = match outcome {
+            let (text, ok) = match outcome {
                 Ok(text) => {
                     consecutive_errors = 0;
-                    text
+                    (text, true)
                 }
                 Err(err) => {
                     consecutive_errors += 1;
@@ -443,7 +514,7 @@ async fn react_loop_inner(
                             context,
                         ));
                     }
-                    message
+                    (message, false)
                 }
             };
 
@@ -475,7 +546,10 @@ async fn react_loop_inner(
 
             if let Some(cb) = on_event.as_deref_mut() {
                 cb(ReactEvent::Tool {
+                    call_id: call.id.clone(),
                     name: call.name.clone(),
+                    ok,
+                    elapsed_ms,
                     content: displayed.clone(),
                 });
             }
@@ -511,9 +585,12 @@ async fn react_loop_inner(
         }
     }
 
-    if final_text.is_empty() {
+    if !answered {
+        // Running out of turns is a failure; the wrap-up turn exists exactly so
+        // this does not happen, and its absence means the model never stopped
+        // asking for tools.
         return Err((
-            DaemonError::Execution("model produced no final answer".to_string()),
+            DaemonError::Execution("iteration budget exhausted without a final answer".to_string()),
             context,
         ));
     }
@@ -1031,9 +1108,15 @@ fn build_client(
     defaults: &LlmConfig,
 ) -> DaemonResult<Arc<dyn LlmClient>> {
     if opts.provider == "mock" {
-        let text = opts.mock_text.clone().unwrap_or_else(|| "mock response".to_string());
         let delay_ms = std::time::Duration::from_millis(opts.mock_delay_ms.unwrap_or(0));
-        return Ok(Arc::new(MockClient::new_delayed(vec![MockStep::Text(text)], delay_ms)));
+        let steps = match &opts.mock_steps {
+            Some(steps) if !steps.is_empty() => steps.clone(),
+            _ => {
+                let text = opts.mock_text.clone().unwrap_or_else(|| "mock response".to_string());
+                vec![MockStep::Text(text)]
+            }
+        };
+        return Ok(Arc::new(MockClient::new_delayed(steps, delay_ms)));
     }
 
     let model_key = opts
@@ -1058,10 +1141,27 @@ fn build_client(
         other => return Err(DaemonError::Execution(format!("unknown llm provider '{other}'"))),
     };
 
+    let model_key = model_key.or_else(|| {
+        // A request that names no model (an older client, a stale selection)
+        // still has an unambiguous answer when exactly one is configured.
+        let mut keys: Vec<&String> = defaults.models.keys().collect();
+        keys.sort();
+        match keys.as_slice() {
+            [only] => Some((*only).clone()),
+            _ => None,
+        }
+    });
     let model_key = model_key.ok_or_else(|| {
-        DaemonError::Execution(
-            "no model configured; add one under Settings > LLM & Models".to_string(),
-        )
+        let mut available: Vec<&String> = defaults.models.keys().collect();
+        available.sort();
+        DaemonError::Execution(if available.is_empty() {
+            "no model configured; add one under Settings > LLM & Models".to_string()
+        } else {
+            format!(
+                "no model selected and no default is set; configured models: {}",
+                available.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        })
     })?;
     // The id sent to the provider usually differs from the config key.
     let model = model_cfg
@@ -1081,9 +1181,13 @@ fn build_client(
         .or_else(|| model_cfg.map(|cfg| cfg.api_key.clone()).filter(|key| !key.is_empty()))
         .unwrap_or_default();
 
+    let replay_reasoning = model_cfg
+        .and_then(|cfg| cfg.replay_reasoning)
+        .unwrap_or_else(|| LlmProviderConfig::is_deepseek_model(&model));
     let config = LlmProviderConfig::new(kind, base_url, api_key, model)
         .with_thinking_budget(defaults.thinking_budget_tokens)
-        .with_prompt_cache(defaults.prompt_cache);
+        .with_prompt_cache(defaults.prompt_cache)
+        .with_reasoning_replay(replay_reasoning);
     ctx.llm_factory.create(&config).map_err(|e| DaemonError::Llm(e.to_string()))
 }
 
@@ -1169,6 +1273,8 @@ struct ToolOutcome {
     read_paths: Vec<std::path::PathBuf>,
     /// Workspace paths the call read *in full*.
     full_reads: Vec<std::path::PathBuf>,
+    /// Wall-clock duration of the call, in milliseconds.
+    elapsed_ms: u64,
 }
 
 /// Executes the tool calls of one assistant turn, returning each result in
@@ -1178,11 +1284,17 @@ struct ToolOutcome {
 /// string (the model can recover from those). Read-only calls run concurrently
 /// when `parallel_read_tools` is set; mutating calls stay sequential so their
 /// side effects keep a deterministic order.
+///
+/// A sequential call runs against a progress channel: whatever the tool reports
+/// (a long command's trailing output) is forwarded as [`ReactEvent::ToolProgress`]
+/// while the call is still in flight. Concurrent reads are short by nature and
+/// report nothing.
 async fn execute_tool_calls(
     ctx: &mut ExecutionContext,
     calls: &[ToolCall],
     opts: &ReactOptions,
     anonymizer: &Anonymizer,
+    on_event: &mut Option<&mut (dyn FnMut(ReactEvent) + Send)>,
 ) -> Vec<ToolOutcome> {
     let parallel = opts.parallel_read_tools
         && calls.len() > 1
@@ -1192,15 +1304,18 @@ async fn execute_tool_calls(
         for call in calls {
             ctx.read_paths.clear();
             ctx.read_paths_full.clear();
-            let result = invoke_tool(ctx, call, opts.allowed_tools.as_ref(), anonymizer).await;
+            let started = std::time::Instant::now();
+            let result = run_with_progress(ctx, call, opts, anonymizer, on_event).await;
             out.push(ToolOutcome {
                 result,
                 read_paths: drain_read_paths(ctx),
                 full_reads: std::mem::take(&mut ctx.read_paths_full),
+                elapsed_ms: started.elapsed().as_millis() as u64,
             });
         }
         return out;
     }
+    let started = std::time::Instant::now();
     // Sequential bookkeeping, concurrent execution: audit and transaction
     // records keep call order while the calls themselves overlap. Each call
     // runs on a nested context so its read state stays isolated.
@@ -1246,12 +1361,16 @@ async fn execute_tool_calls(
 
     let mut out = Vec::with_capacity(calls.len());
     for (call, handle) in calls.iter().zip(handles) {
+        // The batch ran concurrently, so its wall-clock time is what each of
+        // its calls took.
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         let entry = match handle {
             Some(handle) => match handle.await {
                 Ok((result, read_paths, full_reads)) => ToolOutcome {
                     result,
                     read_paths,
                     full_reads,
+                    elapsed_ms,
                 },
                 Err(join_error) => ToolOutcome {
                     result: Err(DaemonError::Execution(format!(
@@ -1260,17 +1379,57 @@ async fn execute_tool_calls(
                     ))),
                     read_paths: Vec::new(),
                     full_reads: Vec::new(),
+                    elapsed_ms,
                 },
             },
             None => ToolOutcome {
                 result: rejected_result(ctx, call, opts.allowed_tools.as_ref()),
                 read_paths: Vec::new(),
                 full_reads: Vec::new(),
+                elapsed_ms,
             },
         };
         out.push(entry);
     }
     out
+}
+
+/// Runs one tool call while forwarding its progress reports.
+///
+/// The call and the progress receiver are polled together, so a tool that
+/// reports output every second keeps the UI alive without the tool knowing
+/// anything about events: it writes to [`ExecutionContext::progress`] and this
+/// function decides what reaches the caller.
+async fn run_with_progress(
+    ctx: &mut ExecutionContext,
+    call: &ToolCall,
+    opts: &ReactOptions,
+    anonymizer: &Anonymizer,
+    on_event: &mut Option<&mut (dyn FnMut(ReactEvent) + Send)>,
+) -> DaemonResult<String> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    ctx.progress = Some(tx);
+    let mut forward = |tail: String| {
+        if let Some(cb) = on_event.as_deref_mut() {
+            cb(ReactEvent::ToolProgress { call_id: call.id.clone(), tail });
+        }
+    };
+    let result = {
+        let running = invoke_tool(ctx, call, opts.allowed_tools.as_ref(), anonymizer);
+        tokio::pin!(running);
+        loop {
+            tokio::select! {
+                outcome = &mut running => break outcome,
+                Some(tail) = rx.recv() => forward(tail),
+            }
+        }
+    };
+    // The pinned future is gone, so the context may be touched again.
+    ctx.progress = None;
+    while let Ok(tail) = rx.try_recv() {
+        forward(tail);
+    }
+    result
 }
 
 /// Drains the paths read by tool calls since the last drain.
@@ -1748,6 +1907,19 @@ mod tests {
         assert_eq!(restricted.len(), 1);
         assert_eq!(restricted[0].name, "ReadFile");
         assert!(none.is_empty());
+    }
+
+    /// The tool array is part of the cached request prefix, so its order must
+    /// not depend on the registry's internal (hash) ordering.
+    #[tokio::test]
+    async fn tool_definitions_are_canonically_ordered() {
+        let first = tool_definitions(&crate::registry::Registry::with_builtins(), None);
+        let second = tool_definitions(&crate::registry::Registry::with_builtins(), None);
+        let names: Vec<&str> = first.iter().map(|t| t.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "tools must be sorted by name");
+        assert_eq!(names, second.iter().map(|t| t.name.as_str()).collect::<Vec<_>>());
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Folder, Star, X } from '@lucide/vue'
 import AppLogo from '@/components/AppLogo.vue'
+import { gateway } from '@/core'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { projectName } from '@/lib/path'
 import { wurl } from '@/lib/workspace-url'
@@ -38,17 +39,12 @@ async function openRecent(path: string) {
 /** Open a native folder dialog on the host via the Web Server Client. */
 async function browse() {
   openError.value = ''
-  try {
-    const res = await fetch('/api/pick-directory', { method: 'POST' })
-    if (!res.ok) {
-      openError.value = `Folder picker unavailable: ${res.statusText || res.status}`
-      return
-    }
-    const data = (await res.json()) as { path?: string | null }
-    if (data.path) pathInput.value = data.path
-  } catch (e) {
-    openError.value = `Folder picker error: ${String(e)}`
+  const result = await gateway.pickDirectory()
+  if (!result.ok) {
+    openError.value = `Folder picker unavailable: ${result.error}`
+    return
   }
+  if (result.data) pathInput.value = result.data
 }
 </script>
 
