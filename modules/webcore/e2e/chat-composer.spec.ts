@@ -17,6 +17,37 @@ async function openChat(page: Page): Promise<void> {
   await expect(page.getByRole('log', { name: 'Conversation' })).toBeVisible({ timeout: 15_000 })
 }
 
+for (const width of [1280, 800]) {
+  test(`the entire delivery menu stays inside the chat pane at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 })
+    await openChat(page)
+    await page.getByRole('button', { name: 'Delivery options' }).click()
+    const menu = page.locator('.chat-delivery-menu')
+    await expect(menu).toBeVisible()
+    // Visibility alone does not detect overflow clipping. Check the menu against
+    // the viewport and every clipping ancestor, then hit-test all its actions.
+    const contained = await menu.evaluate((el) => {
+      const rect = el.getBoundingClientRect()
+      if (rect.left < 0 || rect.right > innerWidth || rect.top < 0 || rect.bottom > innerHeight) return false
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent)
+        const bounds = parent.getBoundingClientRect()
+        if (/(hidden|clip|auto|scroll)/.test(style.overflowX) && (rect.left < bounds.left || rect.right > bounds.right)) return false
+        if (/(hidden|clip|auto|scroll)/.test(style.overflowY) && (rect.top < bounds.top || rect.bottom > bounds.bottom)) return false
+      }
+      return [...el.querySelectorAll('button')].every((button) => {
+        const bounds = button.getBoundingClientRect()
+        return [bounds.left + 2, bounds.right - 2].every((x) =>
+          button.contains(document.elementFromPoint(x, bounds.top + bounds.height / 2)),
+        )
+      })
+    })
+    expect(contained).toBe(true)
+    await page.keyboard.press('Escape')
+    await expect(menu).toHaveCount(0)
+  })
+}
+
 test('the permission selector states the mode and warns on full access', async ({ page }) => {
   await openChat(page)
 

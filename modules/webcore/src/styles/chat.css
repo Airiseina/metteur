@@ -605,6 +605,13 @@
   right: auto;
 }
 
+/* The rightmost control must expand toward the inside of the chat pane. */
+.chat-menu-up.chat-delivery-menu {
+  left: auto;
+  right: 0;
+  max-width: calc(100vw - 32px);
+}
+
 /* Delivery: one pill holding the action and its alternatives. */
 .chat-deliver-group {
   display: flex;

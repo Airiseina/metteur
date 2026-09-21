@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Copy, RotateCcw } from '@lucide/vue'
 import ReasoningBlock from './ReasoningBlock.vue'
 import { renderStreaming } from '@/lib/chat/stream-render'
@@ -25,35 +25,19 @@ const thinking = computed(() => props.message.reasoningPending === true)
 
 /** Drives the reasoning block's auto-open/auto-close. */
 const reasoning = ref<InstanceType<typeof ReasoningBlock>>()
-watch(thinking, (value) => reasoning.value?.sync(value), { immediate: true })
+watch([thinking, reasoning], ([value]) => reasoning.value?.sync(value), { flush: 'post' })
 
-/** Seconds spent thinking: counted live, kept once the answer starts. */
-const reasoningSeconds = ref(0)
-let tick: ReturnType<typeof setInterval> | undefined
-watch(
-  thinking,
-  (value) => {
-    if (!value) return
-    const started = Date.now()
-    reasoningSeconds.value = 0
-    clearInterval(tick)
-    tick = setInterval(() => {
-      reasoningSeconds.value = Math.round((Date.now() - started) / 1000)
-    }, 1000)
-  },
-  { immediate: true },
-)
-onBeforeUnmount(() => clearInterval(tick))
 </script>
 
 <template>
   <div class="chat-turn group/turn">
     <ReasoningBlock
-      v-if="message.reasoning"
+      v-if="message.reasoning || message.turnStartedAt !== undefined || message.turnElapsedMs !== undefined"
       ref="reasoning"
       :text="message.reasoning ?? ''"
       :streaming="thinking"
-      :seconds="reasoningSeconds"
+      :elapsed-ms="message.turnElapsedMs"
+      :started-at="message.turnStartedAt"
     />
     <div
       v-if="message.content"

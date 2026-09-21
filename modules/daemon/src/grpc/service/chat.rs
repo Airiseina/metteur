@@ -33,6 +33,7 @@ impl DaemonService {
         Response<tokio_stream::wrappers::UnboundedReceiverStream<Result<ChatEvent, Status>>>,
         Status,
     > {
+        let turn_started = std::time::Instant::now();
         let subject = subject_from_request(&request).unwrap_or_else(|| "local".to_string());
         let req = request.into_inner();
         let ws = self
@@ -293,12 +294,19 @@ impl DaemonService {
             let transcript = std::sync::Arc::new(parking_lot::Mutex::new(transcript));
             let delta_tx = event_tx.clone();
             let delta_cancel = cancel_flag.clone();
+            let delta_journal = std::sync::Arc::clone(&transcript);
             // Argument-size reports arrive per chunk; one per 400ms is what a
             // reader can use, and a burst would drown the transcript.
             let mut last_args_at = std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now);
             let mut on_delta = move |delta: StreamDelta| {
+                {
+                    let mut journal = delta_journal.lock();
+                    if matches!(&delta, StreamDelta::Reasoning(text) if !text.is_empty()) {
+                        journal.start_reasoning();
+                    }
+                }
                 let event = match delta {
                     StreamDelta::Text(text) => ChatEvent {
                         kind: "assistant_delta".to_string(),
@@ -334,6 +342,11 @@ impl DaemonService {
             let stream_tx = event_tx.clone();
             let journal = std::sync::Arc::clone(&transcript);
             let mut on_event = move |ev: ReactEvent| {
+                let reasoning_elapsed_ms = if matches!(&ev, ReactEvent::Assistant { .. }) {
+                    journal.lock().finish_reasoning()
+                } else {
+                    None
+                };
                 record_react_event(&journal, &ev);
                 let event = match ev {
                     ReactEvent::Assistant {
@@ -342,11 +355,11 @@ impl DaemonService {
                     } => ChatEvent {
                         kind: "assistant".to_string(),
                         content: text,
-                        detail_json: if reasoning.is_empty() {
-                            String::new()
-                        } else {
-                            serde_json::json!({ "reasoning": reasoning }).to_string()
-                        },
+                        detail_json: serde_json::json!({
+                            "reasoning": reasoning,
+                            "reasoning_elapsed_ms": reasoning_elapsed_ms,
+                        })
+                        .to_string(),
                     },
                     // The live client already streamed this text with the
                     // deltas, so it is recorded but not re-sent.
@@ -400,6 +413,8 @@ impl DaemonService {
             // The task list lives on the execution context; carry it into the
             // persisted record so a resumed session remembers the plan.
             let todos = ctx.todos.clone();
+            let turn_elapsed_ms = turn_started.elapsed().as_millis() as u64;
+            transcript.lock().finish_turn(turn_elapsed_ms);
             let (terminal, saved) = match outcome {
                 Ok(outcome) => {
                     // Text-only answers are not appended by the loop; persist
@@ -437,6 +452,7 @@ impl DaemonService {
                             // show a capacity meter without a second RPC.
                             "context": stats,
                             "session_id": session_id.to_string(),
+                            "turn_elapsed_ms": turn_elapsed_ms,
                         })
                         .to_string(),
                     });
@@ -463,7 +479,7 @@ impl DaemonService {
                     let terminal = Ok(ChatEvent {
                         kind: "error".to_string(),
                         content: err.to_string(),
-                        detail_json: String::new(),
+                        detail_json: serde_json::json!({ "turn_elapsed_ms": turn_elapsed_ms }).to_string(),
                     });
                     (terminal, Some(record))
                 }

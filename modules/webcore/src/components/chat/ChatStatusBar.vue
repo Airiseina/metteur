@@ -12,16 +12,14 @@ import {
 import type { ChatUsage } from '@/core'
 
 /**
- * What the agent is doing, and for how long.
+ * What the agent is doing and its token usage.
  *
  * One line that answers the question a spinner cannot: which phase the run is
- * in, how many seconds it has been going, and how many tokens it has spent. The
- * elapsed time is rendered with tabular digits so it does not jitter while it
- * counts.
+ * in and how many tokens it has spent. Reasoning duration is shown only in the
+ * reasoning block, not duplicated above the composer.
  */
 const props = defineProps<{
   phase: ChatPhase
-  startedAt: number
   lastEventAt: number
   usage: ChatUsage | null
   /** Tool call whose arguments are still being written. */
@@ -45,9 +43,6 @@ const pendingLabel = computed(() => {
   const size = kb < 1 ? `${pending.bytes} B` : `${kb.toFixed(1)} KB`
   return `Preparing ${pending.name || 'a tool call'} · ${size}`
 })
-const seconds = computed(() =>
-  props.startedAt ? Math.max(0, Math.round((now.value - props.startedAt) / 1000)) : 0,
-)
 const slow = computed(() => active.value && isSlow(sinceLastEvent.value))
 
 const tokens = computed(() => {
@@ -71,7 +66,6 @@ watch(active, () => (now.value = Date.now()))
     <template v-if="active">
       <Loader2 class="h-3 w-3 shrink-0 animate-spin text-status-running" />
       <span class="chat-status-label">{{ pendingLabel || phaseLabel(shown) }}</span>
-      <span class="tabular-nums text-subtle">{{ seconds }}s</span>
       <span v-if="slow" class="text-subtle">· still working, the model is slow</span>
     </template>
     <span v-if="tokens" class="ml-auto font-mono tabular-nums text-subtle">{{ tokens }}</span>

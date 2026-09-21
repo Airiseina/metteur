@@ -256,6 +256,7 @@ export const useChatStore = defineStore('chat', () => {
         sessionId.value,
         (usage) => {
           lastUsage.value = usage
+          finishReasoning(usage.turnElapsedMs)
         },
         (next) => {
           // Live plan updates stream in while the turn runs.
@@ -266,6 +267,7 @@ export const useChatStore = defineStore('chat', () => {
           // Arguments of a large call stream for seconds before the tool row
           // exists; the status line carries that time.
           pendingTool.value = progress
+          settleReasoningStream()
           lastEventAt.value = Date.now()
           phase.value = 'generating'
         },
@@ -278,6 +280,7 @@ export const useChatStore = defineStore('chat', () => {
           approval.value = request
         },
       )
+      finishReasoning()
       await refreshThreads()
       if (!r.ok) {
         // Failures used to vanish here, which made a broken turn look like a
@@ -293,6 +296,7 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       streamAbort = null
       phase.value = 'idle'
+      finishReasoning()
       if (streaming.value) {
         for (const m of messages.value) {
           m.pending = false
@@ -319,6 +323,7 @@ export const useChatStore = defineStore('chat', () => {
     // Stop reading locally first: the daemon's terminal event would otherwise
     // arrive after the user asked to stop and repaint the turn.
     streamAbort?.abort()
+    finishReasoning()
     streamAbort = null
     await gateway.abortChat(ws.path)
     for (const m of messages.value) m.pending = false
@@ -372,9 +377,33 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
 
+  /** Collapse the reasoning content without stopping the answer's timer. */
+  function settleReasoningStream() {
+    for (const message of messages.value) message.reasoningPending = false
+  }
+
+  /** The timer includes text generation and tools; stop only at completion. */
+  function finishReasoning(turnElapsedMs?: number) {
+    for (const message of messages.value) {
+      if (message.turnStartedAt !== undefined) {
+        message.turnElapsedMs = turnElapsedMs ?? Math.max(0, Date.now() - message.turnStartedAt)
+        message.turnStartedAt = undefined
+      }
+      if (message.reasoningStartedAt !== undefined) {
+        message.reasoningElapsedMs = (message.reasoningElapsedMs ?? 0)
+          + Math.max(0, Date.now() - message.reasoningStartedAt)
+        message.reasoningStartedAt = undefined
+      }
+      message.reasoningPending = false
+    }
+  }
+
   /** Insert a message, appending deltas to an open bubble of the same id. */
   function upsert(m: ChatMessage) {
     lastEventAt.value = Date.now()
+    if (m.role === 'tool' || (m.role === 'assistant' && !m.reasoningPending)) {
+      settleReasoningStream()
+    }
     if (m.role === 'tool') pendingTool.value = null
     const nextPhase = phaseOf(m)
     if (nextPhase) phase.value = nextPhase
@@ -385,6 +414,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     const idx = messages.value.findIndex((x) => x.id === m.id)
     if (idx < 0) {
+      if (m.role === 'assistant') m.turnStartedAt = turnStartedAt.value
+      if (m.reasoningPending) m.reasoningStartedAt = Date.now()
       messages.value.push(m)
       return
     }
@@ -394,7 +425,10 @@ export const useChatStore = defineStore('chat', () => {
       // separate channels, so each accumulates into its own field.
       existing.content += m.content
       if (m.reasoning) existing.reasoning = (existing.reasoning ?? '') + m.reasoning
-      if (m.reasoningPending) existing.reasoningPending = true
+      if (m.reasoningPending) {
+        existing.reasoningStartedAt ??= Date.now()
+        existing.reasoningPending = true
+      }
       return
     }
     // A final event replaces the bubble; reasoning streamed earlier survives
@@ -403,6 +437,13 @@ export const useChatStore = defineStore('chat', () => {
     if (!m.reasoning && existing.reasoning) m.reasoning = existing.reasoning
     if (m.role === 'tool' && !m.content) m.content = existing.content
     m.reasoningPending = false
+    // An assistant final-text event is not the end of the request: tools or
+    // terminal bookkeeping may still follow. Only done/error/abort freezes it.
+    m.turnStartedAt = existing.turnStartedAt
+    m.turnElapsedMs ??= existing.turnElapsedMs
+    m.reasoningElapsedMs ??= existing.reasoningStartedAt === undefined
+      ? existing.reasoningElapsedMs
+      : (existing.reasoningElapsedMs ?? 0) + Math.max(0, Date.now() - existing.reasoningStartedAt)
     messages.value[idx] = m
   }
 

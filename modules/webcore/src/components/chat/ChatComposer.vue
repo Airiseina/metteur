@@ -399,7 +399,7 @@ defineExpose({
             </button>
           </div>
 
-          <div v-if="menu === 'delivery'" class="chat-menu chat-menu-up w-64">
+          <div v-if="menu === 'delivery'" class="chat-menu chat-menu-up chat-delivery-menu w-64">
             <p class="chat-menu-head">Delivery</p>
             <button class="chat-menu-item" type="button" @click="deliver('queue')">
               <span class="font-medium">Queue</span>

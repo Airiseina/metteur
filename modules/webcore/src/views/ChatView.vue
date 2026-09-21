@@ -278,7 +278,6 @@ const starterPrompts = [
       <div class="chat-column chat-column-composer">
         <ChatStatusBar
           :phase="chat.phase"
-          :started-at="chat.turnStartedAt"
           :last-event-at="chat.lastEventAt"
           :usage="chat.lastUsage"
           :pending-tool="chat.pendingTool"

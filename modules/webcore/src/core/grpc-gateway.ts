@@ -96,11 +96,18 @@ function parseTranscript(raw: string): ChatMessage[] {
         role: 'assistant' as const,
         content,
         reasoning: String(entry.reasoning ?? '') || undefined,
+        reasoningElapsedMs: parseReasoningDuration(entry.reasoning_elapsed_ms),
+        turnElapsedMs: parseReasoningDuration(entry.turn_elapsed_ms),
         createdAt: at,
       }
     }
     return { id: `u-${index}`, role: 'user' as const, content, createdAt: at }
   })
+}
+
+/** Legacy transcripts have no timing; never coerce missing values to zero. */
+function parseReasoningDuration(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 /** Parses a `detail_json` payload, tolerating an empty or malformed value. */
@@ -798,6 +805,7 @@ export class GrpcGateway implements DaemonGateway {
               // The final reasoning settles the collapsible block; without one
               // the streamed thinking (if any) stays.
               reasoning: String(detail.reasoning ?? '') || undefined,
+              reasoningElapsedMs: parseReasoningDuration(detail.reasoning_elapsed_ms),
               reasoningPending: false,
               createdAt: Date.now(),
             })
@@ -868,6 +876,7 @@ export class GrpcGateway implements DaemonGateway {
             if (detail.context) onContext?.(parseContextStats(detail.context))
             const usage = (detail.usage ?? {}) as Record<string, unknown>
             onUsage?.({
+              turnElapsedMs: parseReasoningDuration(detail.turn_elapsed_ms),
               inputTokens: Number(usage.input_tokens) || 0,
               outputTokens: Number(usage.output_tokens) || 0,
               totalTokens: Number(usage.total_tokens) || 0,
@@ -877,6 +886,13 @@ export class GrpcGateway implements DaemonGateway {
             break
           }
           case 'error':
+            if (parseReasoningDuration(detail.turn_elapsed_ms) !== undefined) {
+              onUsage?.({
+                turnElapsedMs: parseReasoningDuration(detail.turn_elapsed_ms),
+                inputTokens: 0, outputTokens: 0, totalTokens: 0,
+                cachedInputTokens: 0, cacheWriteInputTokens: 0,
+              })
+            }
             return err(event.content || 'The turn failed.')
           default:
             break

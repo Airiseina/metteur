@@ -103,6 +103,14 @@ export interface ChatMessage {
   reasoning?: string
   /** Set while the reasoning block is still streaming. */
   reasoningPending?: boolean
+  /** Observed reasoning duration, retained independently of component lifetime. */
+  reasoningElapsedMs?: number
+  /** Start of the current reasoning segment, in client wall-clock milliseconds. */
+  reasoningStartedAt?: number
+  /** Complete request duration, including first-token wait, text and tools. */
+  turnElapsedMs?: number
+  /** Present only while this message's request is still running. */
+  turnStartedAt?: number
   /** Set on a user turn typed while the agent worked, until it is injected. */
   queued?: boolean
   /**
@@ -125,6 +133,8 @@ export interface TodoItem {
 }
 
 export interface ChatUsage {
+  /** Server-measured total duration supplied with a terminal event. */
+  turnElapsedMs?: number
   inputTokens: number
   outputTokens: number
   totalTokens: number

@@ -25,6 +25,68 @@ async function say(page: Page, text: string): Promise<void> {
   await input.press('Enter')
 }
 
+for (const next of ['text', 'tool', 'tool_args', 'done', 'error'] as const) {
+  test(`whole-turn timing continues through ${next} until the terminal event`, async ({ page }) => {
+    await openChat(page)
+    await page.clock.install()
+    // Exercise the real store/component boundary with controlled stream timing.
+    await page.evaluate(async (transition) => {
+      const path = '/src/core/index.ts'
+      const { gateway } = await import(path)
+      gateway.sendChat = async (...args: unknown[]) => {
+        const emit = args[3] as (message: Record<string, unknown>) => void
+        const progress = args[10] as (value: { name: string; bytes: number }) => void
+        const base = { id: 'timed-reasoning', role: 'assistant', createdAt: Date.now() }
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+        emit({ ...base, content: '', reasoning: 'Checking the workspace.', reasoningPending: true, pending: true })
+        await new Promise((resolve) => setTimeout(resolve, 4000))
+        if (transition === 'error') return { ok: false, error: 'Test stream failure' }
+        if (transition === 'done') return { ok: true, value: undefined }
+        if (transition === 'tool_args') progress({ name: 'ReadFile', bytes: 256 })
+        else if (transition === 'tool') {
+          emit({ id: 'timed-tool', role: 'tool', actor: 'ReadFile', content: '', pending: true, createdAt: Date.now() })
+        } else emit({ ...base, content: 'Answer in progress', pending: true })
+        await new Promise((resolve) => setTimeout(resolve, 6000))
+        emit({ ...base, content: 'Finished.', reasoningPending: false })
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        return { ok: true, value: undefined }
+      }
+    }, next)
+    await say(page, 'Check the timer')
+    const reasoning = page.locator('.chat-reasoning-trigger').first()
+    await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
+    await page.clock.runFor(2100)
+    await expect(reasoning).toHaveText('Working for 2s')
+    await page.clock.runFor(1000)
+    await expect(reasoning).toHaveText('Working for 3s')
+    await page.clock.runFor(1000)
+    await expect(reasoning).toHaveText('Working for 4s')
+    const numericStyle = await reasoning.locator('.chat-reasoning-time').evaluate((el) =>
+      getComputedStyle(el).fontVariantNumeric,
+    )
+    expect(numericStyle).toContain('tabular-nums')
+    await expect(page.locator('.chat-status')).not.toContainText(/\d+s\b/)
+    await page.clock.runFor(2000)
+    await expect(reasoning).toHaveText(`${next === 'done' || next === 'error' ? 'Worked' : 'Working'} for 6s`)
+    // Keep counting through text/tool work; terminal events stop immediately.
+    await page.clock.runFor(3000)
+    await expect(reasoning).toHaveText(`${next === 'done' || next === 'error' ? 'Worked for 6' : 'Working for 9'}s`)
+    await page.clock.runFor(3000)
+    await expect(reasoning).toHaveText(`${next === 'done' || next === 'error' ? 'Worked for 6' : 'Working for 12'}s`)
+    await page.clock.runFor(3000)
+    await expect(reasoning).toHaveText(`Worked for ${next === 'done' || next === 'error' ? 6 : 13}s`)
+    // Unmount the conversation and return: timing belongs to the message.
+    await page.evaluate(async () => {
+      const path = '/src/router.ts'
+      const { router } = await import(path)
+      const previous = router.currentRoute.value.fullPath
+      await router.push('/settings')
+      await router.push(previous)
+    })
+    await expect(reasoning).toHaveText(`Worked for ${next === 'done' || next === 'error' ? 6 : 13}s`)
+  })
+}
+
 test('a turn streams an answer and settles', async ({ page }) => {
   await openChat(page)
   await say(page, 'Summarise the metrics workspace')
@@ -34,10 +96,87 @@ test('a turn streams an answer and settles', async ({ page }) => {
 
   // The answer arrives as markdown and the thinking block reports itself.
   await expect(page.getByText(/Got it|I'll wire up a blueprint/).first()).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByRole('log').getByText(/Thinking|Thought for/).first()).toBeVisible()
+  await expect(page.getByRole('log').getByText(/^(Working|Worked|Thought)( for .+s)?$/).first()).toBeVisible()
 
   // Copy affordances appear once the turn settles.
   await expect(page.getByRole('button', { name: 'Copy answer' }).first()).toBeVisible()
+})
+
+test('text-only turns include initial waiting and freeze when cancelled', async ({ page }) => {
+  await openChat(page)
+  await page.clock.install()
+  await page.evaluate(async () => {
+    const path = '/src/core/index.ts'
+    const { gateway } = await import(path)
+    gateway.sendChat = async (...args: unknown[]) => {
+      const emit = args[3] as (message: Record<string, unknown>) => void
+      const signal = args[9] as AbortSignal
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      emit({ id: 'text-only', role: 'assistant', content: 'Still writing', pending: true, createdAt: Date.now() })
+      await new Promise((resolve) => signal.addEventListener('abort', () => resolve(undefined), { once: true }))
+      return { ok: true, data: undefined }
+    }
+  })
+  await say(page, 'No reasoning needed')
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
+  await page.clock.runFor(3100)
+  const timer = page.locator('.chat-reasoning-trigger')
+  await expect(timer).toHaveText('Working for 3s')
+  await page.getByRole('button', { name: 'Stop', exact: true }).click()
+  await page.clock.runFor(1000)
+  await expect(timer).toHaveText('Worked for 3s')
+  await page.clock.runFor(5000)
+  await expect(timer).toHaveText('Worked for 3s')
+})
+
+test('restored transcripts retain measured durations and do not invent legacy timings', async ({ page }) => {
+  await openChat(page)
+  await page.evaluate(async () => {
+    const gatewayPath = '/src/core/grpc-gateway.ts'
+    const corePath = '/src/core/index.ts'
+    const storePath = '/src/stores/chat.ts'
+    const { GrpcGateway } = await import(gatewayPath)
+    const { gateway } = await import(corePath)
+    const { useChatStore } = await import(storePath)
+    const transport = new GrpcGateway('')
+    // Keep the real wire-to-message decoder; stub only the RPC transport.
+    transport.client = {
+      getChatSession: async () => ({
+        sessionId: 'timing-history', createdAt: 123, historyJson: '[]', todosJson: '[]',
+        transcriptJson: JSON.stringify([
+          { role: 'assistant', at: 123, content: 'Measured answer', reasoning: 'Measured reasoning', turn_elapsed_ms: 7300 },
+          { role: 'assistant', at: 124, content: 'Legacy answer', reasoning: 'Legacy reasoning' },
+          { role: 'assistant', at: 125, content: 'Short answer', reasoning: 'Short reasoning', turn_elapsed_ms: 120 },
+        ]),
+      }),
+    }
+    gateway.getChatSession = transport.getChatSession.bind(transport)
+    await useChatStore().switchTo('timing-history')
+  })
+  const headings = page.locator('.chat-reasoning-trigger')
+  await expect(headings).toHaveText(['Worked for 7s', 'Thought', 'Worked for <1s'])
+})
+
+test('a buffered stream uses the daemon duration instead of near-zero arrival time', async ({ page }) => {
+  await openChat(page)
+  await page.route('**/api/chat/stream', (route) => route.fulfill({
+    contentType: 'text/event-stream',
+    body: [
+      { kind: 'reasoning_delta', content: 'Reasoning from the server.' },
+      { kind: 'assistant', content: 'The answer.', detail_json: JSON.stringify({ reasoning: 'Reasoning from the server.', reasoning_elapsed_ms: 1200 }) },
+      { kind: 'done', content: '', detail_json: JSON.stringify({ turn_elapsed_ms: 9300 }) },
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+  }))
+  await page.evaluate(async () => {
+    const gatewayPath = '/src/core/grpc-gateway.ts'
+    const corePath = '/src/core/index.ts'
+    const { GrpcGateway } = await import(gatewayPath)
+    const { gateway } = await import(corePath)
+    const transport = new GrpcGateway('')
+    gateway.sendChat = transport.sendChat.bind(transport)
+  })
+  await say(page, 'Check buffered timing')
+  await expect(page.locator('.chat-reasoning-trigger')).toHaveText('Worked for 9s')
 })
 
 test('a tool call is visible while it runs and settles with a duration', async ({ page }) => {
