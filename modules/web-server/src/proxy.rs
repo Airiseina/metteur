@@ -14,15 +14,13 @@ use metteur_proto::proto::{
     GetFileAtSnapshotResponse, GetFileHistoryRequest, InstallAddonRequest, InterruptRequest,
     JobEvent, JobList, KillJobRequest, KillJobResponse, ListAddonsRequest, ListAuditLogRequest,
     ListChatSessionsRequest, ListExecutionsRequest, ListFilesRequest, ListFunctionsRequest,
-    ListJobsRequest, ListSnapshotsRequest,
-    LoadBlueprintRequest, LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList,
-    OpenWorkspaceRequest, PauseRequest, ReadFileRequest, ReadFileResponse, RemoveFileRequest,
-    RenameFileRequest, ResumeRequest, RevealInExplorerRequest, RollbackRequest,
-    SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse, SendChatRequest,
-    SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest,
-    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchJobsRequest,
-    WatchWorkspaceRequest,
-    WorkspaceInfo, WorkspaceList, WriteFileRequest,
+    ListJobsRequest, ListSnapshotsRequest, LoadBlueprintRequest, LoadFunctionRequest,
+    LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
+    ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest, ResumeRequest,
+    RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest,
+    SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo,
+    SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent,
+    WatchJobsRequest, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList, WriteFileRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -62,6 +60,12 @@ fn pump_stream<T: Send + 'static>(
 
 #[tonic::async_trait]
 impl Daemon for ForwardService {
+    async fn rewind_chat(
+        &self,
+        request: Request<metteur_proto::proto::RewindChatRequest>,
+    ) -> Result<Response<GetChatSessionResponse>, Status> {
+        self.client.clone().rewind_chat(request).await
+    }
     // Workspace management.
     async fn open_workspace(
         &self,
@@ -478,6 +482,21 @@ mod tests {
 
     #[tonic::async_trait]
     impl Daemon for TestBackend {
+        async fn rewind_chat(
+            &self,
+            request: Request<metteur_proto::proto::RewindChatRequest>,
+        ) -> Result<Response<GetChatSessionResponse>, Status> {
+            let request = request.into_inner();
+            assert_eq!(request.workspace_path, "C:/ws");
+            assert_eq!(request.snapshot_id, "checkpoint-1");
+            Ok(Response::new(GetChatSessionResponse {
+                session_id: request.session_id,
+                history_json: "[]".into(),
+                transcript_json: "[]".into(),
+                todos_json: "[]".into(),
+                ..Default::default()
+            }))
+        }
         type ExecuteBlueprintStream = ReceiverStream<Result<ExecutionEvent, Status>>;
         type ContinueExecutionStream = ReceiverStream<Result<ExecutionEvent, Status>>;
         type SendChatStream = ReceiverStream<Result<ChatEvent, Status>>;
@@ -913,6 +932,18 @@ mod tests {
             .into_inner();
         assert_eq!(session.session_id, "s1");
         assert_eq!(session.history_json, "[]");
+
+        let restored = proxy
+            .rewind_chat(metteur_proto::proto::RewindChatRequest {
+                workspace_path: "C:/ws".into(),
+                session_id: "s1".into(),
+                snapshot_id: "checkpoint-1".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(restored.session_id, "s1");
+        assert_eq!(restored.transcript_json, "[]");
 
         let err = proxy
             .delete_chat_session(DeleteChatSessionRequest {

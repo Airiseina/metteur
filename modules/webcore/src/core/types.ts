@@ -160,6 +160,8 @@ export interface ChatOptions {
    * operations the predictor calls risky.
    */
   permission_mode?: 'ask' | 'sandbox' | 'full'
+  /** Internal marker: retry must resume the restored persisted session. */
+  retry?: boolean
 }
 
 /** What the conversation occupies in the model's window, as the daemon sees it. */

@@ -61,10 +61,7 @@ for (const next of ['text', 'tool', 'tool_args', 'done', 'error'] as const) {
     await expect(reasoning).toHaveText('Working for 3s')
     await page.clock.runFor(1000)
     await expect(reasoning).toHaveText('Working for 4s')
-    const numericStyle = await reasoning.locator('.chat-reasoning-time').evaluate((el) =>
-      getComputedStyle(el).fontVariantNumeric,
-    )
-    expect(numericStyle).toContain('tabular-nums')
+    await expect(reasoning.locator('.chat-reasoning-time')).toHaveCSS('font-variant-numeric', 'tabular-nums')
     await expect(page.locator('.chat-status')).not.toContainText(/\d+s\b/)
     await page.clock.runFor(2000)
     await expect(reasoning).toHaveText(`${next === 'done' || next === 'error' ? 'Worked' : 'Working'} for 6s`)

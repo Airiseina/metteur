@@ -62,7 +62,7 @@ watch([thinking, reasoning], ([value]) => reasoning.value?.sync(value), { flush:
         v-if="!message.pending"
         class="chat-action"
         type="button"
-        title="Send the same request again"
+        title="Restore this turn's context and regenerate the answer"
         aria-label="Retry"
         @click="onRetry(message.id)"
       >

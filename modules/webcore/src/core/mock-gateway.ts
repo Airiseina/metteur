@@ -713,7 +713,7 @@ export class MockGateway implements DaemonGateway {
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
-    onSession?: (sessionId: string) => void,
+    onSession?: (sessionId: string, checkpointId?: string) => void,
     _sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
@@ -729,8 +729,9 @@ export class MockGateway implements DaemonGateway {
     const aborted = () => this.chatAbort.has(ws) || signal?.aborted === true
     const log = this.chatLog.get(ws) ?? []
     this.chatLog.set(ws, log)
-    log.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: Date.now() })
-    onSession?.(`mock-${ws}`)
+    const checkpoint = `chat-checkpoint-${crypto.randomUUID()}`
+    log.push({ id: `u-${Date.now()}`, role: 'user', content, createdAt: Date.now(), checkpoint })
+    onSession?.('demo', checkpoint)
     const model = options?.model ?? 'demo-chat'
     const wantBlueprint = /blueprint|agent|graph|自动化|蓝图/i.test(content)
     const steps: Array<{
@@ -919,7 +920,7 @@ export class MockGateway implements DaemonGateway {
   /** Returns a demo snapshot so the mock exercises session restore, including
    *  the task list the chat surface renders above the composer. */
   async getChatSession(ws: string, _sessionId?: string): Promise<Result<ChatSessionSnapshot>> {
-    const transcript = this.chatLog.get(ws) ?? []
+    const transcript = structuredClone(this.chatLog.get(ws) ?? [])
     return ok({
       sessionId: 'demo',
       createdAt: transcript[0]?.createdAt ?? Date.now(),
@@ -933,6 +934,18 @@ export class MockGateway implements DaemonGateway {
 
   async deleteChatSession(_ws: string, _sessionId?: string): Promise<Result<void>> {
     return ok(undefined)
+  }
+
+  async rewindChat(ws: string, _sessionId: string, snapshotId: string): Promise<Result<ChatSessionSnapshot>> {
+    const log = this.chatLog.get(ws) ?? []
+    const index = log.findIndex((message) => message.role === 'user' && message.checkpoint === snapshotId)
+    if (index < 0) return err('Paired chat checkpoint not found')
+    this.chatAbort.add(ws)
+    const transcript = structuredClone(log.slice(0, index))
+    // A real RPC returns independent decoded objects, not the storage buffer.
+    this.chatLog.set(ws, structuredClone(transcript))
+    return ok({ sessionId: 'demo', createdAt: transcript[0]?.createdAt ?? Date.now(), transcript,
+      history: transcript.filter((message) => message.role === 'user' || message.role === 'assistant'), todos: index ? DEMO_TODOS : [] })
   }
 
   // Blueprints ----------------------------------------------------------------

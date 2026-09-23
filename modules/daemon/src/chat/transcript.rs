@@ -56,6 +56,9 @@ pub struct TranscriptEntry {
     /// Rendered text (the answer, the user's turn, the tool's output).
     #[serde(default)]
     pub content: String,
+    /// Pre-turn file/model checkpoint. Only user entries carry this id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkpoint: String,
     /// Reasoning that preceded an assistant answer.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning: String,
@@ -88,6 +91,7 @@ impl TranscriptEntry {
             role,
             at,
             content: String::new(),
+            checkpoint: String::new(),
             reasoning: String::new(),
             reasoning_elapsed_ms: None,
             turn_elapsed_ms: None,
@@ -141,6 +145,13 @@ impl Transcript {
         let mut entry = TranscriptEntry::new(EntryRole::User, at);
         entry.content = text.into();
         self.entries.push(entry);
+    }
+
+    /// Links the latest user turn to its paired file/model checkpoint.
+    pub fn set_user_checkpoint(&mut self, checkpoint: &str) {
+        if let Some(entry) = self.entries.last_mut().filter(|e| e.role == EntryRole::User) {
+            entry.checkpoint = checkpoint.to_string();
+        }
     }
 
     /// Records a finished assistant answer.

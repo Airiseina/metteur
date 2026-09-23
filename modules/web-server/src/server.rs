@@ -58,6 +58,7 @@ async fn serve_static(static_dir: Arc<PathBuf>, uri: Uri) -> Response {
         match tokio::fs::read(&file).await {
             Ok(bytes) => Response::builder()
                 .header(header::CONTENT_TYPE, mime_of(&file))
+                .header(header::CACHE_CONTROL, "no-store")
                 .body(AxumBody::from(bytes))
                 .unwrap(),
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -73,6 +74,9 @@ async fn serve_index(static_dir: &Path) -> Response {
     match tokio::fs::read(static_dir.join("index.html")).await {
         Ok(bytes) => Response::builder()
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            // The HTML points at hashed assets. Do not let an already-open
+            // browser keep an old entry point after a Retry fix is deployed.
+            .header(header::CACHE_CONTROL, "no-store")
             .body(AxumBody::from(bytes))
             .unwrap(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),

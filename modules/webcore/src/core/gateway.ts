@@ -108,7 +108,7 @@ export interface DaemonGateway {
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
-    onSession?: (sessionId: string) => void,
+    onSession?: (sessionId: string, checkpointId?: string) => void,
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
@@ -144,6 +144,7 @@ export interface DaemonGateway {
   listChatSessions(workspacePath: string): Promise<Result<ChatSessionInfo[]>>
   /** Load a session's history for UI restore (empty id = latest, NotFound when absent). */
   getChatSession(workspacePath: string, sessionId?: string): Promise<Result<ChatSessionSnapshot>>
+  rewindChat(workspacePath: string, sessionId: string, snapshotId: string): Promise<Result<ChatSessionSnapshot>>
   /** Delete one session (empty id = latest; stops a running chat first). */
   deleteChatSession(workspacePath: string, sessionId?: string): Promise<Result<void>>
 

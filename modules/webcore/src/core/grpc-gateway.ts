@@ -101,7 +101,7 @@ function parseTranscript(raw: string): ChatMessage[] {
         createdAt: at,
       }
     }
-    return { id: `u-${index}`, role: 'user' as const, content, createdAt: at }
+    return { id: `u-${index}`, role: 'user' as const, content, createdAt: at, checkpoint: String(entry.checkpoint ?? '') || undefined }
   })
 }
 
@@ -717,7 +717,7 @@ export class GrpcGateway implements DaemonGateway {
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
-    onSession?: (sessionId: string) => void,
+    onSession?: (sessionId: string, checkpointId?: string) => void,
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
@@ -771,7 +771,7 @@ export class GrpcGateway implements DaemonGateway {
         switch (event.kind) {
           case 'session': {
             const reported = String(detail.session_id ?? '')
-            if (reported) onSession?.(reported)
+            if (reported) onSession?.(reported, String(detail.checkpoint_id ?? '') || undefined)
           // The session event carries the context it starts from, so the meter
           // has a size immediately (and after switching conversations).
           if (detail.context) onContext?.(parseContextStats(detail.context))
@@ -992,6 +992,20 @@ export class GrpcGateway implements DaemonGateway {
     try {
       await this.client.deleteChatSession({ workspacePath, sessionId: sessionId ?? '' })
       return ok(undefined)
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async rewindChat(workspacePath: string, sessionId: string, snapshotId: string): Promise<Result<ChatSessionSnapshot>> {
+    try {
+      const res = await this.client.rewindChat({ workspacePath, sessionId, snapshotId })
+      const history = (JSON.parse(res.historyJson || '[]') as Array<{ role: string; content: string }>).map((entry, index) => ({
+        id: `restored-${index}`, role: entry.role === 'user' ? 'user' as const : 'assistant' as const,
+        content: entry.content, createdAt: Number(res.createdAt),
+      }))
+      return ok({ sessionId: res.sessionId, createdAt: Number(res.createdAt), history,
+        transcript: parseTranscript(res.transcriptJson), todos: JSON.parse(res.todosJson || '[]') })
     } catch (e) {
       return toErr(e)
     }
