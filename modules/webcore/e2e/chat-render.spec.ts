@@ -46,7 +46,7 @@ test('the reader turn is a quiet block, not a saturated bubble', async ({ page }
   expect(Number.parseFloat(colors.radius)).toBeLessThan(16)
 })
 
-test('progress is legible: a status line with text and tabular numbers', async ({ page }) => {
+test('progress shows the phase without a second elapsed-time counter', async ({ page }) => {
   await openChat(page)
   await say(page, 'Draft a blueprint for the metrics pipeline')
 
@@ -54,10 +54,7 @@ test('progress is legible: a status line with text and tabular numbers', async (
   await expect(status.first()).toBeVisible({ timeout: 10_000 })
   await expect(status.first()).toContainText(/(Thinking|Writing|Running a tool|Waiting)/)
 
-  const numeric = page.locator('.chat-status .tabular-nums').first()
-  await expect(numeric).toBeVisible()
-  const variant = await numeric.evaluate((el) => getComputedStyle(el).fontVariantNumeric)
-  expect(variant).toContain('tabular-nums')
+  await expect(status.first()).not.toContainText(/\d+s\b/)
 })
 
 test('a streaming answer renders without syntax highlighting until it settles', async ({ page }) => {

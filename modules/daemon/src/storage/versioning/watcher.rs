@@ -104,9 +104,7 @@ fn to_file_event(root: &Path, event: &Event) -> Option<FileEvent> {
     };
     // Prefer the first path inside the workspace.
     let path = event.paths.iter().find(|p| {
-        p.strip_prefix(root)
-            .map(|rel| !rel.components().any(|c| c.as_os_str() == ".metteur"))
-            .unwrap_or(false)
+        p.strip_prefix(root).map(|rel| !super::restore::excluded(rel)).unwrap_or(false)
     })?;
     Some(FileEvent {
         path: path.clone(),
@@ -147,7 +145,11 @@ async fn run_loop(
                 }
                 if matches!(event.kind, EventKind::Create(_)) {
                     for path in &event.paths {
-                        if path.is_dir() {
+                        if path.is_dir()
+                            && path
+                                .strip_prefix(&root)
+                                .is_ok_and(|rel| !super::restore::excluded(rel))
+                        {
                             let _ = watch_recursively(&mut watcher, path);
                         }
                     }
@@ -176,24 +178,29 @@ fn is_relevant(root: &Path, event: &Event) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
-    event.paths.iter().any(|p| {
-        p.strip_prefix(root)
-            .map(|rel| !rel.components().any(|c| c.as_os_str() == ".metteur"))
-            .unwrap_or(false)
-    })
+    event
+        .paths
+        .iter()
+        .any(|p| p.strip_prefix(root).map(|rel| !super::restore::excluded(rel)).unwrap_or(false))
 }
 
-/// Returns whether a directory is the workspace metadata directory.
+/// Returns whether a directory belongs to metadata or generated artifacts.
 fn is_metadata_dir(path: &Path) -> bool {
-    path.file_name().map(|n| n == ".metteur").unwrap_or(false)
+    path.file_name().map(|name| super::restore::excluded(Path::new(name))).unwrap_or(false)
 }
 
 /// Recursively adds non-recursive watches for `dir` and its subdirectories.
 fn watch_recursively(watcher: &mut RecommendedWatcher, dir: &Path) -> std::io::Result<()> {
+    if super::restore::is_link(&std::fs::symlink_metadata(dir)?) {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() && !is_metadata_dir(&path) {
+        if !is_metadata_dir(&path)
+            && entry.file_type()?.is_dir()
+            && !super::restore::is_link(&std::fs::symlink_metadata(&path)?)
+        {
             watch_recursively(watcher, &path)?;
         }
     }

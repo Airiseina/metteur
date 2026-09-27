@@ -5,5 +5,6 @@
 //! transcript the client renders (the two differ: see [`transcript`]). Storage
 //! is scoped to the workspace database; see [`session`] for the record model.
 
+pub mod checkpoint;
 pub mod session;
 pub mod transcript;

@@ -27,6 +27,8 @@ pub mod cf {
     pub const CHAT_SESSIONS: &str = "chat_sessions";
     /// Stores chat threads keyed by session id.
     pub const CHAT_THREADS: &str = "chat_threads";
+    /// Complete pre-turn chat state keyed by its file snapshot id.
+    pub const CHAT_CHECKPOINTS: &str = "chat_checkpoints";
 }
 
 /// A thin wrapper around a RocksDB instance with typed column families.
@@ -36,6 +38,31 @@ pub struct Db {
 }
 
 impl Db {
+    /// Atomically replaces a chat thread and removes invalidated checkpoints.
+    pub fn commit_chat_rewind(
+        &self,
+        session_id: &[u8],
+        data: &[u8],
+        obsolete: &[Vec<u8>],
+    ) -> DaemonResult<()> {
+        let threads = self
+            .inner
+            .cf_handle(cf::CHAT_THREADS)
+            .ok_or_else(|| DaemonError::Internal("missing chat threads family".into()))?;
+        let checkpoints = self
+            .inner
+            .cf_handle(cf::CHAT_CHECKPOINTS)
+            .ok_or_else(|| DaemonError::Internal("missing chat checkpoints family".into()))?;
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(threads, session_id, data);
+        for key in obsolete {
+            batch.delete_cf(checkpoints, key);
+        }
+        self.inner
+            .write(batch)
+            .map_err(|e| DaemonError::Internal(format!("chat rewind commit failed: {e}")))
+    }
+
     /// Opens (or creates) a database at `path` with the standard column
     /// families.
     pub fn open(path: &Path) -> DaemonResult<Self> {
@@ -54,6 +81,7 @@ impl Db {
             ColumnFamilyDescriptor::new(cf::FUNCTIONS, rocksdb::Options::default()),
             ColumnFamilyDescriptor::new(cf::CHAT_SESSIONS, rocksdb::Options::default()),
             ColumnFamilyDescriptor::new(cf::CHAT_THREADS, rocksdb::Options::default()),
+            ColumnFamilyDescriptor::new(cf::CHAT_CHECKPOINTS, rocksdb::Options::default()),
         ];
 
         // RocksDB on Windows rejects the `\\?\` extended-length path prefix

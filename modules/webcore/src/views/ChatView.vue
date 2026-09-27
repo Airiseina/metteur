@@ -106,16 +106,18 @@ function edit(text: string): void {
   composer.value?.setDraft(text)
 }
 
-/** Re-sends the user turn that produced this answer. */
-function retry(assistantId: string): void {
-  const index = chat.messages.findIndex((m) => m.id === assistantId)
-  for (let i = index - 1; i >= 0; i--) {
-    const candidate = chat.messages[i]
-    if (candidate.role === 'user') {
-      edit(candidate.content)
-      return
-    }
-  }
+/** Regenerates against the original pre-turn context, not the old answer. */
+async function retry(assistantId: string): Promise<void> {
+  if (!hasModel.value) { openSettings(); return }
+  if (chat.busy || chat.rewinding || chat.retrying) return
+  const confirmed = await feedback.confirm({
+    header: 'Retry this turn?',
+    message: 'Restore files and context to before the original request, discard this answer and all later turns, then generate a new answer automatically. Your input draft will be kept.',
+    acceptLabel: 'Retry', danger: true,
+  })
+  if (!confirmed) return
+  const error = await chat.retry(assistantId, chatOptions.value)
+  if (error !== null) feedback.toast('error', 'Retry failed', error)
 }
 
 function openFile(path: string | undefined): void {
@@ -132,20 +134,20 @@ function openSettings(): void {
  * Rolls the workspace back to the checkpoint a turn started from.
  *
  * Restoring rewrites files, so it is confirmed first and reported afterwards;
- * the conversation itself is left alone (only the workspace moves).
+ * both the visible conversation and the model's context return to that point.
  */
 async function restore(snapshotId: string): Promise<void> {
   const confirmed = await feedback.confirm({
-    header: 'Restore the workspace?',
+    header: 'Restore files and conversation?',
     message:
-      'Files changed since this turn started will be rolled back. The conversation stays as it is.',
+      'Files will return to the state before this turn. This message and all later messages, tool results and model context will be removed. Any running reply will be stopped.',
     acceptLabel: 'Restore',
     danger: true,
   })
   if (!confirmed) return
-  const ok = await workspace.restoreCheckpoint(snapshotId)
-  if (ok) feedback.toast('success', 'Workspace restored', 'Files are back to the state before that turn.')
-  else feedback.toast('error', 'Restore failed', 'The checkpoint may have been removed.')
+  const error = await chat.rewind(snapshotId)
+  if (error === null) feedback.toast('success', 'Conversation restored', 'Files and model context are back to the state before that turn.')
+  else feedback.toast('error', 'Restore failed', error)
 }
 
 function attach(file: FileTreeNode): void {
@@ -230,7 +232,7 @@ const starterPrompts = [
       :active-title="chat.threads.find((t) => t.sessionId === chat.sessionId)?.title || 'New chat'"
       :addons="chat.addons"
       :addons-loading="chat.addonsLoading"
-      :busy="chat.busy"
+      :busy="chat.busy || chat.retrying || chat.rewinding"
       :on-select-session="(id) => void chat.switchTo(id)"
       :on-delete-session="(id) => void chat.deleteThread(id)"
       :on-new-session="() => void chat.clear()"
@@ -243,7 +245,7 @@ const starterPrompts = [
       :on-open-file="openFile"
       :on-copy="copy"
       :on-edit="edit"
-      :on-retry="retry"
+      :on-retry="(id) => void retry(id)"
       :on-restore="(id) => void restore(id)"
     >
       <template #empty>
@@ -278,7 +280,6 @@ const starterPrompts = [
       <div class="chat-column chat-column-composer">
         <ChatStatusBar
           :phase="chat.phase"
-          :started-at="chat.turnStartedAt"
           :last-event-at="chat.lastEventAt"
           :usage="chat.lastUsage"
           :pending-tool="chat.pendingTool"
@@ -298,7 +299,7 @@ const starterPrompts = [
           :usage="chat.lastUsage"
           :permission-mode="chat.permissionMode"
           :running="running"
-          :ready="hasModel"
+          :ready="hasModel && !chat.rewinding && !chat.retrying"
           :on-send="(text) => void send(text)"
           :on-queue="(text) => void queue(text)"
           :on-steer="(text) => void steer(text)"

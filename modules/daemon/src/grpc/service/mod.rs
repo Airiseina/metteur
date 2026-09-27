@@ -36,13 +36,13 @@ use super::proto::{
     InstallAddonRequest, InterruptRequest, JobEvent, JobList, KillJobRequest, KillJobResponse,
     ListAddonsRequest, ListAuditLogRequest, ListChatSessionsRequest, ListExecutionsRequest,
     ListFilesRequest, ListFunctionsRequest, ListJobsRequest, ListSnapshotsRequest,
-    LoadBlueprintRequest, LoadFunctionRequest,
-    LoadFunctionResponse, McpServerList, NodeKindList, OpenWorkspaceRequest, PauseRequest,
-    ReadFileRequest, ReadFileResponse, RemoveFileRequest, RenameFileRequest, ResumeRequest,
-    RevealInExplorerRequest, RollbackRequest, SaveBlueprintRequest, SaveFunctionRequest,
-    SaveFunctionResponse, SendChatRequest, SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo,
-    SnapshotList, StatFileRequest, ToolList, UninstallAddonRequest, UsageSummary, WatchEvent,
-    WatchJobsRequest, WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList, WriteFileRequest,
+    LoadBlueprintRequest, LoadFunctionRequest, LoadFunctionResponse, McpServerList, NodeKindList,
+    OpenWorkspaceRequest, PauseRequest, ReadFileRequest, ReadFileResponse, RemoveFileRequest,
+    RenameFileRequest, ResumeRequest, RevealInExplorerRequest, RollbackRequest,
+    SaveBlueprintRequest, SaveFunctionRequest, SaveFunctionResponse, SendChatRequest,
+    SetAddonEnabledRequest, SetConfigRequest, SnapshotInfo, SnapshotList, StatFileRequest,
+    ToolList, UninstallAddonRequest, UsageSummary, WatchEvent, WatchJobsRequest,
+    WatchWorkspaceRequest, WorkspaceInfo, WorkspaceList, WriteFileRequest,
 };
 
 pub use state::AppState;
@@ -76,6 +76,12 @@ impl DaemonService {
 
 #[tonic::async_trait]
 impl Daemon for DaemonService {
+    async fn rewind_chat(
+        &self,
+        request: Request<super::proto::RewindChatRequest>,
+    ) -> Result<Response<GetChatSessionResponse>, Status> {
+        self.rewind_chat(request).await
+    }
     type ExecuteBlueprintStream =
         tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>;
     type ContinueExecutionStream =

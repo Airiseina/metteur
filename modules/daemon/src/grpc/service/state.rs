@@ -14,8 +14,8 @@ use crate::error::DaemonError;
 use crate::execution::RunStatus;
 use crate::execution::interrupt::InterruptBus;
 use crate::execution::react::{DEFAULT_MAX_ITERATIONS, ReactOptions};
-use crate::llm::MockStep;
 use crate::llm::LlmClientFactory;
+use crate::llm::MockStep;
 use crate::observability::audit::AuditWriter;
 use crate::registry::Registry;
 use crate::sandbox::approval::ApprovalBroker;
@@ -320,6 +320,15 @@ pub(crate) async fn spawn_execution(
     version_manager: Option<Arc<crate::storage::versioning::VersionManager>>,
     jobs: Arc<crate::execution::JobManager>,
 ) -> Result<tokio_stream::wrappers::ReceiverStream<Result<ExecutionEvent, Status>>, Status> {
+    let workspace = state
+        .workspaces
+        .get(&ws_key)
+        .await
+        .ok_or_else(|| Status::not_found("workspace not open"))?;
+    let _admission = workspace.activity_gate.lock().await;
+    if state.chats.read().await.contains_key(&ws_key) {
+        return Err(Status::failed_precondition("workspace already has a running chat"));
+    }
     let broker = Arc::new(ApprovalBroker::new());
     {
         // Check and register under one write lock so two concurrent requests

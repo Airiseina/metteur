@@ -9,6 +9,7 @@
 //! The optional [`watcher`] module turns file system changes into automatic
 //! snapshots.
 
+mod restore;
 pub mod watcher;
 
 use std::collections::{HashMap, HashSet};
@@ -73,6 +74,8 @@ pub struct FileHistoryEntry {
 pub struct VersionManager {
     db: Db,
     root: PathBuf,
+    /// Prevent the watcher from capturing a half-applied restore.
+    operation_gate: parking_lot::Mutex<()>,
 }
 
 impl VersionManager {
@@ -81,6 +84,7 @@ impl VersionManager {
         Self {
             db,
             root,
+            operation_gate: parking_lot::Mutex::new(()),
         }
     }
 
@@ -102,6 +106,7 @@ impl VersionManager {
         description: &str,
         alias: Option<&str>,
     ) -> DaemonResult<Snapshot> {
+        let _guard = self.operation_gate.lock();
         let (snapshot, _) = self.build_snapshot(description, alias)?;
         self.store_snapshot(&snapshot)?;
         Ok(snapshot)
@@ -112,6 +117,7 @@ impl VersionManager {
     /// Returns `None` when the file manifest is identical to the previous
     /// snapshot, avoiding noise from file watchers and idle runs.
     pub fn create_snapshot_if_changed(&self, description: &str) -> DaemonResult<Option<Snapshot>> {
+        let _guard = self.operation_gate.lock();
         let (snapshot, changed) = self.build_snapshot(description, None)?;
         if !changed {
             return Ok(None);
@@ -138,7 +144,8 @@ impl VersionManager {
                 .strip_prefix(&self.root)
                 .map_err(|_| DaemonError::Internal("path outside workspace".to_string()))?;
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let meta = std::fs::metadata(&file)?;
+            let meta = std::fs::metadata(&file)
+                .map_err(|error| restore::io_at("inspect snapshot file", &file, error))?;
             let mtime = meta
                 .modified()
                 .ok()
@@ -212,7 +219,8 @@ impl VersionManager {
     /// Reads a file, stores its content in the blob store if absent, and
     /// returns its content hash.
     fn store_blob(&self, file: &Path) -> DaemonResult<String> {
-        let data = std::fs::read(file)?;
+        let data = std::fs::read(file)
+            .map_err(|error| restore::io_at("read snapshot file", file, error))?;
         let hash = hash_content(&data);
         if self.db.get(cf::FILE_BLOBS, hash.as_bytes())?.is_none() {
             self.db.put(cf::FILE_BLOBS, hash.as_bytes(), &data)?;
@@ -269,14 +277,7 @@ impl VersionManager {
     /// Files in the snapshot's manifest are written from their blobs; files
     /// tracked in any snapshot but absent from this one are deleted.
     pub fn rollback(&self, snapshot_id: Uuid) -> DaemonResult<()> {
-        let meta = self
-            .db
-            .get(cf::SNAPSHOTS, snapshot_id.as_bytes())?
-            .ok_or_else(|| DaemonError::NotFound(format!("snapshot {snapshot_id}")))?;
-        let snapshot: Snapshot =
-            serde_json::from_slice(&meta).map_err(|e| DaemonError::Serialization(e.to_string()))?;
-
-        self.rollback_snapshot(&snapshot)
+        self.rollback_with_commit(snapshot_id, || Ok(()))
     }
 
     /// Restores to the snapshot matched by the given alias.
@@ -287,7 +288,7 @@ impl VersionManager {
         let snapshot = self
             .find_snapshot_by_alias(alias)?
             .ok_or_else(|| DaemonError::NotFound(format!("snapshot with alias {alias}")))?;
-        self.rollback_snapshot(&snapshot)
+        self.rollback(snapshot.id)
     }
 
     /// Finds the most recent snapshot matching the given alias.
@@ -297,32 +298,6 @@ impl VersionManager {
     pub fn find_snapshot_by_alias(&self, alias: &str) -> DaemonResult<Option<Snapshot>> {
         let snapshots = self.list_snapshots()?;
         Ok(snapshots.into_iter().rfind(|s| s.alias.as_deref() == Some(alias)))
-    }
-
-    fn rollback_snapshot(&self, snapshot: &Snapshot) -> DaemonResult<()> {
-        // Restore each file from its blob.
-        for (rel, hash) in &snapshot.files {
-            let blob = self
-                .db
-                .get(cf::FILE_BLOBS, hash.as_bytes())?
-                .ok_or_else(|| DaemonError::NotFound(format!("blob {hash}")))?;
-            let target = self.root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(target, blob)?;
-        }
-
-        // Delete files tracked in any snapshot but absent from this one.
-        for rel in self.all_tracked_files()? {
-            if !snapshot.files.contains_key(&rel) {
-                let target = self.root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-                if target.exists() {
-                    std::fs::remove_file(target)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Returns the set of file paths tracked across all snapshots.
@@ -337,16 +312,27 @@ impl VersionManager {
     /// Recursively collects the files under `dir`.
     fn collect_files(&self, dir: &Path) -> DaemonResult<Vec<PathBuf>> {
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        for entry in std::fs::read_dir(dir)
+            .map_err(|error| restore::io_at("scan snapshot directory", dir, error))?
+        {
+            let entry = entry
+                .map_err(|error| restore::io_at("read snapshot directory entry", dir, error))?;
             let path = entry.path();
-            if path.is_dir() {
-                // Skip the metadata directory to avoid self-referential data.
-                if path.file_name().map(|n| n == ".metteur").unwrap_or(false) {
-                    continue;
-                }
+            let rel = path
+                .strip_prefix(&self.root)
+                .map_err(|_| DaemonError::Internal("snapshot path outside workspace".into()))?;
+            if restore::excluded(rel) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| restore::io_at("inspect snapshot file", &path, error))?;
+            // Includes Windows junctions/reparse points, not just Unix symlinks.
+            if restore::is_link(&metadata) {
+                continue;
+            }
+            if metadata.is_dir() {
                 out.extend(self.collect_files(&path)?);
-            } else {
+            } else if metadata.is_file() {
                 out.push(path);
             }
         }

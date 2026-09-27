@@ -96,11 +96,18 @@ function parseTranscript(raw: string): ChatMessage[] {
         role: 'assistant' as const,
         content,
         reasoning: String(entry.reasoning ?? '') || undefined,
+        reasoningElapsedMs: parseReasoningDuration(entry.reasoning_elapsed_ms),
+        turnElapsedMs: parseReasoningDuration(entry.turn_elapsed_ms),
         createdAt: at,
       }
     }
-    return { id: `u-${index}`, role: 'user' as const, content, createdAt: at }
+    return { id: `u-${index}`, role: 'user' as const, content, createdAt: at, checkpoint: String(entry.checkpoint ?? '') || undefined }
   })
+}
+
+/** Legacy transcripts have no timing; never coerce missing values to zero. */
+function parseReasoningDuration(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 /** Parses a `detail_json` payload, tolerating an empty or malformed value. */
@@ -710,7 +717,7 @@ export class GrpcGateway implements DaemonGateway {
     history: ChatMessage[],
     onMessage: (m: ChatMessage) => void,
     options?: ChatOptions,
-    onSession?: (sessionId: string) => void,
+    onSession?: (sessionId: string, checkpointId?: string) => void,
     sessionId?: string,
     onUsage?: (usage: ChatUsage) => void,
     onTodos?: (todos: TodoItem[]) => void,
@@ -764,7 +771,7 @@ export class GrpcGateway implements DaemonGateway {
         switch (event.kind) {
           case 'session': {
             const reported = String(detail.session_id ?? '')
-            if (reported) onSession?.(reported)
+            if (reported) onSession?.(reported, String(detail.checkpoint_id ?? '') || undefined)
           // The session event carries the context it starts from, so the meter
           // has a size immediately (and after switching conversations).
           if (detail.context) onContext?.(parseContextStats(detail.context))
@@ -798,6 +805,7 @@ export class GrpcGateway implements DaemonGateway {
               // The final reasoning settles the collapsible block; without one
               // the streamed thinking (if any) stays.
               reasoning: String(detail.reasoning ?? '') || undefined,
+              reasoningElapsedMs: parseReasoningDuration(detail.reasoning_elapsed_ms),
               reasoningPending: false,
               createdAt: Date.now(),
             })
@@ -868,6 +876,7 @@ export class GrpcGateway implements DaemonGateway {
             if (detail.context) onContext?.(parseContextStats(detail.context))
             const usage = (detail.usage ?? {}) as Record<string, unknown>
             onUsage?.({
+              turnElapsedMs: parseReasoningDuration(detail.turn_elapsed_ms),
               inputTokens: Number(usage.input_tokens) || 0,
               outputTokens: Number(usage.output_tokens) || 0,
               totalTokens: Number(usage.total_tokens) || 0,
@@ -877,6 +886,13 @@ export class GrpcGateway implements DaemonGateway {
             break
           }
           case 'error':
+            if (parseReasoningDuration(detail.turn_elapsed_ms) !== undefined) {
+              onUsage?.({
+                turnElapsedMs: parseReasoningDuration(detail.turn_elapsed_ms),
+                inputTokens: 0, outputTokens: 0, totalTokens: 0,
+                cachedInputTokens: 0, cacheWriteInputTokens: 0,
+              })
+            }
             return err(event.content || 'The turn failed.')
           default:
             break
@@ -976,6 +992,20 @@ export class GrpcGateway implements DaemonGateway {
     try {
       await this.client.deleteChatSession({ workspacePath, sessionId: sessionId ?? '' })
       return ok(undefined)
+    } catch (e) {
+      return toErr(e)
+    }
+  }
+
+  async rewindChat(workspacePath: string, sessionId: string, snapshotId: string): Promise<Result<ChatSessionSnapshot>> {
+    try {
+      const res = await this.client.rewindChat({ workspacePath, sessionId, snapshotId })
+      const history = (JSON.parse(res.historyJson || '[]') as Array<{ role: string; content: string }>).map((entry, index) => ({
+        id: `restored-${index}`, role: entry.role === 'user' ? 'user' as const : 'assistant' as const,
+        content: entry.content, createdAt: Number(res.createdAt),
+      }))
+      return ok({ sessionId: res.sessionId, createdAt: Number(res.createdAt), history,
+        transcript: parseTranscript(res.transcriptJson), todos: JSON.parse(res.todosJson || '[]') })
     } catch (e) {
       return toErr(e)
     }

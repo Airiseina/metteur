@@ -46,13 +46,9 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref('')
   /** Aborts the local event stream; the daemon is stopped separately. */
   let streamAbort: AbortController | null = null
-
-  /** Short label for a turn's checkpoint, derived from its first line. */
-  function turnLabel(body: string): string {
-    const first = body.split('\n').find((line) => !line.startsWith('@file')) ?? body
-    const text = first.trim().replace(/\s+/g, ' ')
-    return `chat: ${text.length > 60 ? `${text.slice(0, 59)}…` : text}`
-  }
+  let pendingSend: Promise<void> | null = null
+  const rewinding = ref(false)
+  const retrying = ref(false)
 
   /** All persisted threads, newest first. */
   const threads = ref<ChatSessionInfo[]>([])
@@ -207,29 +203,27 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * Appends a turn and streams the reply.
    *
-   * Before the turn runs, a checkpoint is taken when versioning is available:
+   * Before the turn runs, the daemon captures a paired file/context checkpoint:
    * it is what the transcript's "Restore" action rolls back to, and without it
    * an agent's edits cannot be undone from the conversation.
    */
-  async function send(content: string, options?: ChatOptions): Promise<boolean> {
+  async function send(content: string, options?: ChatOptions, mode: 'normal' | 'retry' = 'normal'): Promise<boolean> {
     const ws = workspace.active
     const text = content.trim()
-    if (!ws || !text || streaming.value) return false
+    if (!ws || !text || streaming.value || busy.value || rewinding.value || (retrying.value && mode !== 'retry')) return false
     // File references travel with the turn: the daemon learns about the
     // attached files from the message text, and the transcript shows the same
     // lines the model receives.
-    const refs = pendingFiles.value.map((f) => `@file ${f.path}`)
+    const refs = mode === 'retry' ? [] : pendingFiles.value.map((f) => `@file ${f.path}`)
     const body = refs.length ? `${[...refs, text].join('\n')}` : text
     const userMessageId = `u-${Date.now()}`
-    const checkpoint = await workspace.createCheckpoint(turnLabel(body))
     messages.value.push({
       id: userMessageId,
       role: 'user',
       content: body,
       createdAt: Date.now(),
-      checkpoint: checkpoint ?? undefined,
     })
-    pendingFiles.value = []
+    if (mode !== 'retry') pendingFiles.value = []
     // A "new chat" turn creates a fresh thread; sending into an existing one
     // keeps its id (non-empty below).
     streamAbort = new AbortController()
@@ -240,6 +234,9 @@ export const useChatStore = defineStore('chat', () => {
     turnStartedAt.value = Date.now()
     lastEventAt.value = Date.now()
     phase.value = 'thinking'
+    let resolveFinished!: () => void
+    const finished = new Promise<void>((resolve) => { resolveFinished = resolve })
+    pendingSend = finished
     try {
       // The new turn is sent as the message itself; including it in the
       // history as well made the daemon seed a fresh session with it twice.
@@ -250,12 +247,15 @@ export const useChatStore = defineStore('chat', () => {
         history,
         (m) => upsert(m),
         options,
-        (id) => {
+        (id, checkpointId) => {
           sessionId.value = id
+          const user = messages.value.find((message) => message.id === userMessageId)
+          if (user) user.checkpoint = checkpointId
         },
         sessionId.value,
         (usage) => {
           lastUsage.value = usage
+          finishReasoning(usage.turnElapsedMs)
         },
         (next) => {
           // Live plan updates stream in while the turn runs.
@@ -266,6 +266,7 @@ export const useChatStore = defineStore('chat', () => {
           // Arguments of a large call stream for seconds before the tool row
           // exists; the status line carries that time.
           pendingTool.value = progress
+          settleReasoningStream()
           lastEventAt.value = Date.now()
           phase.value = 'generating'
         },
@@ -278,6 +279,7 @@ export const useChatStore = defineStore('chat', () => {
           approval.value = request
         },
       )
+      finishReasoning()
       await refreshThreads()
       if (!r.ok) {
         // Failures used to vanish here, which made a broken turn look like a
@@ -293,6 +295,7 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       streamAbort = null
       phase.value = 'idle'
+      finishReasoning()
       if (streaming.value) {
         for (const m of messages.value) {
           m.pending = false
@@ -301,6 +304,79 @@ export const useChatStore = defineStore('chat', () => {
         streaming.value = false
       }
       busy.value = false
+      if (pendingSend === finished) pendingSend = null
+      resolveFinished()
+    }
+  }
+
+  /** Rewind files, persisted model context and display transcript as one operation. */
+  async function rewind(snapshotId: string): Promise<string | null> {
+    const ws = workspace.active
+    if (!ws || !sessionId.value) return 'No active conversation to restore.'
+    if (rewinding.value) return 'A restore is already in progress.'
+    const targetSession = sessionId.value
+    rewinding.value = true
+    try {
+      const pending = pendingSend
+      if (streaming.value) await abort()
+      if (pending) await pending
+      busy.value = true
+      const result = await gateway.rewindChat(ws.path, targetSession, snapshotId)
+      if (!result.ok) return result.error
+      workspace.invalidateTree(ws.path)
+      // A different workspace/thread may have been opened while the RPC ran.
+      if (workspace.active?.path !== ws.path || sessionId.value !== targetSession) return null
+      messages.value = result.data.transcript.length ? result.data.transcript : result.data.history
+      sessionId.value = result.data.sessionId
+      todos.value = result.data.todos ?? []
+      queued.value = []
+      pendingTool.value = null
+      approval.value = null
+      contextStats.value = null
+      lastUsage.value = null
+      phase.value = 'idle'
+      turnStartedAt.value = 0
+      await refreshThreads()
+      return null
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    } finally {
+      rewinding.value = false
+      busy.value = false
+    }
+  }
+
+  /** Restore the selected answer's starting state, then regenerate automatically. */
+  async function retry(assistantId: string, options?: ChatOptions): Promise<string | null> {
+    if (retrying.value || rewinding.value || busy.value) return 'Wait for the current operation to finish before retrying.'
+    const targetWorkspace = workspace.active?.path
+    const targetSession = sessionId.value
+    const index = messages.value.findIndex((message) => message.id === assistantId && message.role === 'assistant')
+    if (index < 0) return 'The answer is no longer in this conversation.'
+    let original: ChatMessage | undefined
+    for (let i = index - 1; i >= 0; i--) {
+      if (messages.value[i].role === 'user') { original = messages.value[i]; break }
+    }
+    if (!original?.checkpoint) return 'This turn has no paired context checkpoint. It cannot be retried safely without retaining the old answer.'
+    const prompt = original.content
+    const checkpoint = original.checkpoint
+    retrying.value = true
+    try {
+      const error = await rewind(checkpoint)
+      if (error !== null) return error
+      if (workspace.active?.path !== targetWorkspace || sessionId.value !== targetSession) {
+        return 'Conversation changed during retry; the prompt was not sent to another conversation.'
+      }
+      // Send directly; never seed from the discarded messages or consume the
+      // unrelated draft/attachments currently waiting in the composer.
+      // Mark this as a session-bound retry. The daemon will reject a retry
+      // without a restored session instead of seeding a new context from the
+      // display history (which could reintroduce the discarded answer).
+      return await send(prompt, { ...options, retry: true }, 'retry')
+        ? null
+        : 'The old turn was restored, but the new reply failed.'
+    } finally {
+      retrying.value = false
     }
   }
 
@@ -319,6 +395,7 @@ export const useChatStore = defineStore('chat', () => {
     // Stop reading locally first: the daemon's terminal event would otherwise
     // arrive after the user asked to stop and repaint the turn.
     streamAbort?.abort()
+    finishReasoning()
     streamAbort = null
     await gateway.abortChat(ws.path)
     for (const m of messages.value) m.pending = false
@@ -372,9 +449,33 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
 
+  /** Collapse the reasoning content without stopping the answer's timer. */
+  function settleReasoningStream() {
+    for (const message of messages.value) message.reasoningPending = false
+  }
+
+  /** The timer includes text generation and tools; stop only at completion. */
+  function finishReasoning(turnElapsedMs?: number) {
+    for (const message of messages.value) {
+      if (message.turnStartedAt !== undefined) {
+        message.turnElapsedMs = turnElapsedMs ?? Math.max(0, Date.now() - message.turnStartedAt)
+        message.turnStartedAt = undefined
+      }
+      if (message.reasoningStartedAt !== undefined) {
+        message.reasoningElapsedMs = (message.reasoningElapsedMs ?? 0)
+          + Math.max(0, Date.now() - message.reasoningStartedAt)
+        message.reasoningStartedAt = undefined
+      }
+      message.reasoningPending = false
+    }
+  }
+
   /** Insert a message, appending deltas to an open bubble of the same id. */
   function upsert(m: ChatMessage) {
     lastEventAt.value = Date.now()
+    if (m.role === 'tool' || (m.role === 'assistant' && !m.reasoningPending)) {
+      settleReasoningStream()
+    }
     if (m.role === 'tool') pendingTool.value = null
     const nextPhase = phaseOf(m)
     if (nextPhase) phase.value = nextPhase
@@ -385,6 +486,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     const idx = messages.value.findIndex((x) => x.id === m.id)
     if (idx < 0) {
+      if (m.role === 'assistant') m.turnStartedAt = turnStartedAt.value
+      if (m.reasoningPending) m.reasoningStartedAt = Date.now()
       messages.value.push(m)
       return
     }
@@ -394,7 +497,10 @@ export const useChatStore = defineStore('chat', () => {
       // separate channels, so each accumulates into its own field.
       existing.content += m.content
       if (m.reasoning) existing.reasoning = (existing.reasoning ?? '') + m.reasoning
-      if (m.reasoningPending) existing.reasoningPending = true
+      if (m.reasoningPending) {
+        existing.reasoningStartedAt ??= Date.now()
+        existing.reasoningPending = true
+      }
       return
     }
     // A final event replaces the bubble; reasoning streamed earlier survives
@@ -403,6 +509,13 @@ export const useChatStore = defineStore('chat', () => {
     if (!m.reasoning && existing.reasoning) m.reasoning = existing.reasoning
     if (m.role === 'tool' && !m.content) m.content = existing.content
     m.reasoningPending = false
+    // An assistant final-text event is not the end of the request: tools or
+    // terminal bookkeeping may still follow. Only done/error/abort freezes it.
+    m.turnStartedAt = existing.turnStartedAt
+    m.turnElapsedMs ??= existing.turnElapsedMs
+    m.reasoningElapsedMs ??= existing.reasoningStartedAt === undefined
+      ? existing.reasoningElapsedMs
+      : (existing.reasoningElapsedMs ?? 0) + Math.max(0, Date.now() - existing.reasoningStartedAt)
     messages.value[idx] = m
   }
 
@@ -457,6 +570,10 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     messages,
+    rewind,
+    rewinding,
+    retry,
+    retrying,
     streaming,
     busy,
     contextStats,

@@ -107,9 +107,7 @@ pub fn load_thread(db: &Db, session_id: &Uuid) -> DaemonResult<Option<ChatSessio
     // the conversation is resumed (the next save persists the fix).
     let repaired = record.context.repair_tool_pairing();
     if repaired > 0 {
-        tracing::warn!(
-            "chat session {session_id}: repaired {repaired} out-of-order message(s)"
-        );
+        tracing::warn!("chat session {session_id}: repaired {repaired} out-of-order message(s)");
     }
     Ok(Some(record))
 }
@@ -133,6 +131,7 @@ pub fn save_thread(db: &Db, record: &ChatSessionRecord) -> DaemonResult<()> {
 
 /// Removes one thread by session id (idempotent).
 pub fn delete_thread(db: &Db, session_id: &Uuid) -> DaemonResult<()> {
+    super::checkpoint::delete_for_session(db, *session_id)?;
     db.delete(cf::CHAT_THREADS, session_id.as_bytes())
 }
 

@@ -88,8 +88,8 @@ const time = computed(() =>
         v-if="checkpoint"
         class="chat-action !h-5 !px-1"
         type="button"
-        title="Roll the workspace back to this turn's start"
-        aria-label="Restore workspace to before this turn"
+        title="Restore files and conversation to this turn's start"
+        aria-label="Restore files and conversation to before this turn"
         @click="onRestore(checkpoint)"
       >
         <History class="h-3 w-3" />

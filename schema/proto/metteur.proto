@@ -97,6 +97,8 @@ service Daemon {
   rpc ListChatSessions(ListChatSessionsRequest) returns (ChatSessionList);
   rpc GetChatSession(GetChatSessionRequest) returns (GetChatSessionResponse);
   rpc DeleteChatSession(DeleteChatSessionRequest) returns (Empty);
+  // Restores files and the complete pre-turn model/display state together.
+  rpc RewindChat(RewindChatRequest) returns (GetChatSessionResponse);
 }
 
 message Empty {}
@@ -602,7 +604,8 @@ message SendChatRequest {
   // Only consulted when creating a new session; persisted sessions are authoritative.
   string history_json = 3;
   // JSON object with model / temperature / top_p / max_tokens /
-  // reasoning_effort / max_iterations.
+  // reasoning_effort / max_iterations. `retry: true` is an internal marker
+  // requiring a non-empty persisted session; it must never seed a new context.
   string options_json = 4;
   // Empty = reuse the workspace's active session (create when none exists);
   // non-empty = resume that session (NotFound if unknown or mismatched).
@@ -662,6 +665,12 @@ message DeleteChatSessionRequest {
   string workspace_path = 1;
   // Empty = delete the workspace's active session.
   string session_id = 2;
+}
+
+message RewindChatRequest {
+  string workspace_path = 1;
+  string session_id = 2;
+  string snapshot_id = 3;
 }
 
 // Blueprint model mirrored from the shared crate.

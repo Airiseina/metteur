@@ -13,6 +13,8 @@
 //! failures, and the assistant's reasoning. [`Transcript`] accumulates those
 //! entries while a turn streams, and the record persists them.
 
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum transcript entries kept per session.
@@ -54,9 +56,18 @@ pub struct TranscriptEntry {
     /// Rendered text (the answer, the user's turn, the tool's output).
     #[serde(default)]
     pub content: String,
+    /// Pre-turn file/model checkpoint. Only user entries carry this id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkpoint: String,
     /// Reasoning that preceded an assistant answer.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning: String,
+    /// Time from first reasoning through the complete answer, including tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_elapsed_ms: Option<u64>,
+    /// Whole request duration, distinct from legacy reasoning-only timing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_elapsed_ms: Option<u64>,
     /// Tool name, for `Tool` entries.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool: String,
@@ -80,7 +91,10 @@ impl TranscriptEntry {
             role,
             at,
             content: String::new(),
+            checkpoint: String::new(),
             reasoning: String::new(),
+            reasoning_elapsed_ms: None,
+            turn_elapsed_ms: None,
             tool: String::new(),
             call_id: String::new(),
             summary: String::new(),
@@ -99,6 +113,8 @@ pub struct Transcript {
     entries: Vec<TranscriptEntry>,
     /// Previous transcript of the session, carried through the turn.
     history: Vec<TranscriptEntry>,
+    reasoning_started: Option<Instant>,
+    reasoning_elapsed: Option<Duration>,
 }
 
 impl Transcript {
@@ -107,7 +123,21 @@ impl Transcript {
         Self {
             entries: Vec::new(),
             history,
+            ..Self::default()
         }
+    }
+
+    /// Starts a reasoning segment without resetting earlier segments.
+    pub fn start_reasoning(&mut self) {
+        self.reasoning_started.get_or_insert_with(Instant::now);
+    }
+
+    /// Freezes the measured time once the complete answer has arrived.
+    pub fn finish_reasoning(&mut self) -> Option<u64> {
+        if let Some(started) = self.reasoning_started.take() {
+            *self.reasoning_elapsed.get_or_insert(Duration::ZERO) += started.elapsed();
+        }
+        self.reasoning_elapsed.map(|elapsed| elapsed.as_millis() as u64)
     }
 
     /// Records the user's turn.
@@ -115,6 +145,13 @@ impl Transcript {
         let mut entry = TranscriptEntry::new(EntryRole::User, at);
         entry.content = text.into();
         self.entries.push(entry);
+    }
+
+    /// Links the latest user turn to its paired file/model checkpoint.
+    pub fn set_user_checkpoint(&mut self, checkpoint: &str) {
+        if let Some(entry) = self.entries.last_mut().filter(|e| e.role == EntryRole::User) {
+            entry.checkpoint = checkpoint.to_string();
+        }
     }
 
     /// Records a finished assistant answer.
@@ -127,6 +164,10 @@ impl Transcript {
         let mut entry = TranscriptEntry::new(EntryRole::Assistant, at);
         entry.content = text.into();
         entry.reasoning = reasoning.into();
+        if !entry.reasoning.is_empty() {
+            entry.reasoning_elapsed_ms = self.finish_reasoning();
+            self.reasoning_elapsed = None;
+        }
         self.entries.push(entry);
     }
 
@@ -194,6 +235,15 @@ impl Transcript {
         self.entries.push(entry);
     }
 
+    /// Attaches the complete request duration only to this turn's answers.
+    pub fn finish_turn(&mut self, elapsed_ms: u64) {
+        for entry in &mut self.entries {
+            if entry.role == EntryRole::Assistant {
+                entry.turn_elapsed_ms = Some(elapsed_ms);
+            }
+        }
+    }
+
     /// Returns the session's transcript, oldest entry first, bounded in size.
     pub fn finish(self) -> Vec<TranscriptEntry> {
         let mut all = self.history;
@@ -220,4 +270,83 @@ fn truncate(text: String, max: usize) -> String {
 /// Serializes a transcript for the wire, or `[]` when it cannot be encoded.
 pub fn to_json(entries: &[TranscriptEntry]) -> String {
     serde_json::to_string(entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+
+    #[test]
+    fn whole_turn_timing_updates_current_answers_without_changing_history() {
+        let mut old = Transcript::default();
+        old.push_assistant("old answer", "", 1);
+        old.finish_turn(1000);
+        let mut current = Transcript::resuming(old.finish());
+        current.push_assistant("preamble", "", 2);
+        current.push_tool_start("call", "ReadFile", "file", 3);
+        current.push_assistant("answer", "", 4);
+        current.finish_turn(9300);
+        let entries: Vec<TranscriptEntry> =
+            serde_json::from_str(&to_json(&current.finish())).unwrap();
+        assert_eq!(entries[0].turn_elapsed_ms, Some(1000));
+        assert_eq!(entries[1].turn_elapsed_ms, Some(9300));
+        assert_eq!(entries[2].turn_elapsed_ms, None);
+        assert_eq!(entries[3].turn_elapsed_ms, Some(9300));
+    }
+
+    #[test]
+    fn duration_freezes_and_survives_serialization() {
+        let mut transcript = Transcript {
+            reasoning_started: Some(Instant::now() - Duration::from_secs(2)),
+            ..Transcript::default()
+        };
+        let elapsed = transcript.finish_reasoning().unwrap();
+        assert!(elapsed >= 2000);
+        assert_eq!(transcript.finish_reasoning(), Some(elapsed));
+        transcript.push_assistant("answer", "reasoning", 123);
+        let restored: Vec<TranscriptEntry> =
+            serde_json::from_str(&to_json(&transcript.finish())).unwrap();
+        assert_eq!(restored[0].reasoning_elapsed_ms, Some(elapsed));
+    }
+
+    #[test]
+    fn separate_segments_accumulate_but_answers_reset_timing() {
+        let mut transcript = Transcript {
+            reasoning_started: Some(Instant::now() - Duration::from_secs(2)),
+            ..Transcript::default()
+        };
+        let _ = transcript.finish_reasoning();
+        transcript.reasoning_started = Some(Instant::now() - Duration::from_secs(3));
+        transcript.push_assistant("answer", "reasoning", 123);
+        transcript.push_assistant("untimed", "old reasoning", 124);
+        let entries = transcript.finish();
+        assert!(entries[0].reasoning_elapsed_ms.unwrap() >= 5000);
+        assert_eq!(entries[1].reasoning_elapsed_ms, None);
+    }
+
+    #[test]
+    fn legacy_transcripts_have_unknown_duration_not_zero() {
+        let entry: TranscriptEntry = serde_json::from_str(
+            r#"{"role":"assistant","at":123,"content":"answer","reasoning":"thinking"}"#,
+        )
+        .unwrap();
+        assert_eq!(entry.reasoning_elapsed_ms, None);
+        assert!(!serde_json::to_string(&entry).unwrap().contains("reasoning_elapsed_ms"));
+    }
+
+    #[test]
+    fn interim_text_and_tools_do_not_stop_the_answer_timer() {
+        let mut transcript = Transcript {
+            reasoning_started: Some(Instant::now() - Duration::from_secs(2)),
+            ..Transcript::default()
+        };
+        transcript.push_assistant("Let me read the file.", "", 1);
+        transcript.push_tool_start("call", "ReadFile", "file", 2);
+        assert!(transcript.reasoning_started.is_some());
+        transcript.push_assistant("Complete answer.", "Reasoning", 3);
+        assert!(transcript.reasoning_started.is_none());
+        let entries = transcript.finish();
+        assert_eq!(entries[0].reasoning_elapsed_ms, None);
+        assert!(entries[2].reasoning_elapsed_ms.unwrap() >= 2000);
+    }
 }

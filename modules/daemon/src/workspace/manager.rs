@@ -18,6 +18,8 @@ pub const METADATA_DIR: &str = ".metteur";
 
 /// A single open workspace.
 pub struct Workspace {
+    /// Serializes run admission and chat rewind for this workspace.
+    pub activity_gate: tokio::sync::Mutex<()>,
     /// Absolute path to the workspace root.
     pub root: PathBuf,
     /// Path to the `/.metteur` metadata directory.
@@ -154,6 +156,7 @@ impl WorkspaceManager {
         };
 
         let workspace = Arc::new(Workspace {
+            activity_gate: tokio::sync::Mutex::new(()),
             root: root.clone(),
             metadata_dir,
             config: Arc::new(RwLock::new(config)),

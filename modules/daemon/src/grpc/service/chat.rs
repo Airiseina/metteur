@@ -21,7 +21,8 @@ use crate::sandbox::approval::ApprovalBroker;
 use super::super::acl::subject_from_request;
 use super::super::proto::{
     AbortChatRequest, ChatEvent, ChatSessionInfo, ChatSessionList, DeleteChatSessionRequest, Empty,
-    GetChatSessionRequest, GetChatSessionResponse, ListChatSessionsRequest, SendChatRequest,
+    GetChatSessionRequest, GetChatSessionResponse, ListChatSessionsRequest, RewindChatRequest,
+    SendChatRequest,
 };
 use super::*;
 
@@ -33,6 +34,7 @@ impl DaemonService {
         Response<tokio_stream::wrappers::UnboundedReceiverStream<Result<ChatEvent, Status>>>,
         Status,
     > {
+        let turn_started = std::time::Instant::now();
         let subject = subject_from_request(&request).unwrap_or_else(|| "local".to_string());
         let req = request.into_inner();
         let ws = self
@@ -45,6 +47,17 @@ impl DaemonService {
         let run_id = uuid::Uuid::new_v4();
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let ws_db = ws.db.clone();
+        let _admission = ws.activity_gate.lock().await;
+
+        // A retry is deliberately session-bound. If the client loses the
+        // restored session id, fail closed instead of treating the request as
+        // a new conversation seeded from display history, which could contain
+        // the answer that was just discarded.
+        if chat_option_bool(&req.options_json, "retry") && req.session_id.trim().is_empty() {
+            return Err(Status::failed_precondition(
+                "retry requires the restored persisted chat session",
+            ));
+        }
 
         // Resolve the session before claiming the chat slot: an explicitly
         // named session must exist and belong to this workspace; an empty id
@@ -67,6 +80,7 @@ impl DaemonService {
         let old_turns = existing.as_ref().map(|r| r.turns).unwrap_or(0);
         let title = existing.as_ref().and_then(|r| r.title.clone());
         let existing_transcript = existing.as_ref().map(|r| r.transcript.clone());
+        let existing_todos = existing.as_ref().map(|r| r.todos.clone()).unwrap_or_default();
 
         // A workspace hosts either one execution or one chat at a time.
         {
@@ -75,15 +89,34 @@ impl DaemonService {
                 return Err(Status::failed_precondition("workspace has a running execution"));
             }
         }
-        let mut chats = self.state.chats.write().await;
-        if chats.contains_key(&ws_key) {
+        if self.state.chats.read().await.contains_key(&ws_key) {
             return Err(Status::failed_precondition("workspace already has an active chat"));
         }
+        // Capture the exact model state, not a reconstruction from UI messages.
+        let before = existing.clone().unwrap_or_else(|| {
+            let mut context = ContextManager::default();
+            history_messages(&req.history_json, &mut context.messages);
+            let mut record = ChatSessionRecord::new(now, context);
+            record.session_id = session_id;
+            record
+        });
+        let checkpoint_id = match crate::chat::checkpoint::capture(
+            &ws_db,
+            &ws.version_manager,
+            before,
+            &format!("Before chat turn {}", old_turns + 1),
+        ) {
+            Ok(id) => id.to_string(),
+            Err(error) => {
+                tracing::warn!("chat checkpoint unavailable: {error}");
+                String::new()
+            }
+        };
         let interrupt_bus = InterruptBus::new();
         let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let broker = Arc::new(ApprovalBroker::new());
         let persist = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        chats.insert(
+        self.state.chats.write().await.insert(
             ws_key.clone(),
             ChatRun {
                 interrupt_bus: Some(interrupt_bus.clone()),
@@ -93,7 +126,6 @@ impl DaemonService {
                 session_id: Some(session_id),
             },
         );
-        drop(chats);
 
         let addon_fragments = match &self.state.addon_host {
             Some(host) => host.fragments_for(ws.root()).await,
@@ -127,6 +159,7 @@ impl DaemonService {
             ctx.lsp = lsp;
             ctx.version_manager = Some(version_manager);
             ctx.jobs = Arc::clone(&jobs);
+            ctx.todos = existing_todos;
             if let Some(global_db) = state.global_db.clone() {
                 ctx.global_db = Some(global_db);
             }
@@ -136,9 +169,8 @@ impl DaemonService {
             if let Some(mode) = chat_option(&options_json, "permission_mode") {
                 ctx.permission_mode = crate::sandbox::PermissionMode::parse(&mode);
             } else if let Some(config) = &ctx.config {
-                let configured = metteur_shared::config::effective_permission_mode(
-                    &config.read().await.sandbox,
-                );
+                let configured =
+                    metteur_shared::config::effective_permission_mode(&config.read().await.sandbox);
                 ctx.permission_mode = crate::sandbox::PermissionMode::parse(configured);
             }
 
@@ -184,9 +216,9 @@ impl DaemonService {
 
             // The transcript is the display view: it keeps tool calls, notices
             // and the timing the model's context cannot reproduce.
-            let mut transcript =
-                Transcript::resuming(existing_transcript.unwrap_or_default());
+            let mut transcript = Transcript::resuming(existing_transcript.unwrap_or_default());
             transcript.push_user(message.clone(), now);
+            transcript.set_user_checkpoint(&checkpoint_id);
 
             // New sessions take their title from the first user message.
             let title = title.or_else(|| title_of(&context));
@@ -201,6 +233,7 @@ impl DaemonService {
                 detail_json: serde_json::json!({
                     "session_id": session_id.to_string(),
                     "created_at": created_at,
+                    "checkpoint_id": checkpoint_id,
                     "context": opening_stats,
                 })
                 .to_string(),
@@ -293,12 +326,19 @@ impl DaemonService {
             let transcript = std::sync::Arc::new(parking_lot::Mutex::new(transcript));
             let delta_tx = event_tx.clone();
             let delta_cancel = cancel_flag.clone();
+            let delta_journal = std::sync::Arc::clone(&transcript);
             // Argument-size reports arrive per chunk; one per 400ms is what a
             // reader can use, and a burst would drown the transcript.
             let mut last_args_at = std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now);
             let mut on_delta = move |delta: StreamDelta| {
+                {
+                    let mut journal = delta_journal.lock();
+                    if matches!(&delta, StreamDelta::Reasoning(text) if !text.is_empty()) {
+                        journal.start_reasoning();
+                    }
+                }
                 let event = match delta {
                     StreamDelta::Text(text) => ChatEvent {
                         kind: "assistant_delta".to_string(),
@@ -315,7 +355,8 @@ impl DaemonService {
                         bytes,
                     } => {
                         let now = std::time::Instant::now();
-                        if now.duration_since(last_args_at) < std::time::Duration::from_millis(400) {
+                        if now.duration_since(last_args_at) < std::time::Duration::from_millis(400)
+                        {
                             return;
                         }
                         last_args_at = now;
@@ -334,6 +375,11 @@ impl DaemonService {
             let stream_tx = event_tx.clone();
             let journal = std::sync::Arc::clone(&transcript);
             let mut on_event = move |ev: ReactEvent| {
+                let reasoning_elapsed_ms = if matches!(&ev, ReactEvent::Assistant { .. }) {
+                    journal.lock().finish_reasoning()
+                } else {
+                    None
+                };
                 record_react_event(&journal, &ev);
                 let event = match ev {
                     ReactEvent::Assistant {
@@ -342,11 +388,11 @@ impl DaemonService {
                     } => ChatEvent {
                         kind: "assistant".to_string(),
                         content: text,
-                        detail_json: if reasoning.is_empty() {
-                            String::new()
-                        } else {
-                            serde_json::json!({ "reasoning": reasoning }).to_string()
-                        },
+                        detail_json: serde_json::json!({
+                            "reasoning": reasoning,
+                            "reasoning_elapsed_ms": reasoning_elapsed_ms,
+                        })
+                        .to_string(),
                     },
                     // The live client already streamed this text with the
                     // deltas, so it is recorded but not re-sent.
@@ -400,6 +446,8 @@ impl DaemonService {
             // The task list lives on the execution context; carry it into the
             // persisted record so a resumed session remembers the plan.
             let todos = ctx.todos.clone();
+            let turn_elapsed_ms = turn_started.elapsed().as_millis() as u64;
+            transcript.lock().finish_turn(turn_elapsed_ms);
             let (terminal, saved) = match outcome {
                 Ok(outcome) => {
                     // Text-only answers are not appended by the loop; persist
@@ -437,6 +485,7 @@ impl DaemonService {
                             // show a capacity meter without a second RPC.
                             "context": stats,
                             "session_id": session_id.to_string(),
+                            "turn_elapsed_ms": turn_elapsed_ms,
                         })
                         .to_string(),
                     });
@@ -463,7 +512,8 @@ impl DaemonService {
                     let terminal = Ok(ChatEvent {
                         kind: "error".to_string(),
                         content: err.to_string(),
-                        detail_json: String::new(),
+                        detail_json: serde_json::json!({ "turn_elapsed_ms": turn_elapsed_ms })
+                            .to_string(),
                     });
                     (terminal, Some(record))
                 }
@@ -570,6 +620,70 @@ impl DaemonService {
         }))
     }
 
+    /// Rewinds a whole user turn, including everything produced after it.
+    pub(crate) async fn rewind_chat(
+        &self,
+        request: Request<RewindChatRequest>,
+    ) -> Result<Response<GetChatSessionResponse>, Status> {
+        let subject = subject_from_request(&request).unwrap_or_else(|| "local".into());
+        let req = request.into_inner();
+        let session_id = uuid::Uuid::parse_str(&req.session_id)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let snapshot_id = uuid::Uuid::parse_str(&req.snapshot_id)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let ws = self
+            .state
+            .workspaces
+            .get(&PathBuf::from(&req.workspace_path))
+            .await
+            .ok_or_else(|| Status::not_found("workspace not open"))?;
+        let _gate = ws.activity_gate.lock().await;
+        crate::chat::checkpoint::check_owner(&ws.db, session_id, snapshot_id).map_err(to_status)?;
+        if self.state.running.read().await.contains_key(ws.root()) {
+            return Err(Status::failed_precondition(
+                "stop the blueprint execution before rewinding chat",
+            ));
+        }
+        {
+            let chats = self.state.chats.read().await;
+            if let Some(run) = chats.get(ws.root()) {
+                if run.session_id != Some(session_id) {
+                    return Err(Status::failed_precondition("another conversation is running"));
+                }
+                run.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // Keep admission blocked until the old task has persisted and killed its
+        // jobs; otherwise a late finalizer could overwrite the restored context.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while self.state.chats.read().await.contains_key(ws.root()) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| Status::failed_precondition("chat is still stopping; retry rewind shortly"))?;
+        if ws.jobs.list(None).iter().any(|job| job.state.is_running()) {
+            return Err(Status::failed_precondition("stop background jobs before rewinding files"));
+        }
+        let record =
+            crate::chat::checkpoint::restore(&ws.db, &ws.version_manager, session_id, snapshot_id)
+                .map_err(to_status)?;
+        let _ = AuditWriter::new(ws.db.clone()).record(
+            &subject,
+            "chat.rewind",
+            serde_json::json!({
+                "session_id": session_id, "snapshot_id": snapshot_id,
+            }),
+        );
+        Ok(Response::new(GetChatSessionResponse {
+            session_id: record.session_id.to_string(),
+            created_at: record.created_at as i64,
+            history_json: context_history_json(&record.context),
+            todos_json: serde_json::to_string(&record.todos).unwrap_or_else(|_| "[]".into()),
+            transcript_json: crate::chat::transcript::to_json(&record.transcript),
+        }))
+    }
+
     pub(crate) async fn delete_chat_session(
         &self,
         request: Request<DeleteChatSessionRequest>,
@@ -583,6 +697,7 @@ impl DaemonService {
             .ok_or_else(|| Status::not_found("workspace not open"))?;
         let ws_key = ws.root().to_path_buf();
         // An empty id targets the most recently updated thread.
+        let _gate = ws.activity_gate.lock().await;
         let target = if req.session_id.is_empty() {
             let mut threads = list_threads(&ws.db).map_err(|e| Status::internal(e.to_string()))?;
             threads.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
@@ -628,6 +743,14 @@ fn chat_option(options_json: &str, key: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Reads a boolean option without making malformed options fatal.
+fn chat_option_bool(options_json: &str, key: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(options_json)
+        .ok()
+        .and_then(|value| value.get(key).and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// Input window assumed when the model's configuration does not state one.
 const DEFAULT_CONTEXT_WINDOW: u64 = 128 * 1024;
 
@@ -655,9 +778,7 @@ async fn context_stats(ctx: &ExecutionContext, context: &ContextManager) -> serd
     let regions: Vec<serde_json::Value> = context
         .usage_report()
         .into_iter()
-        .map(|region| {
-            serde_json::json!({ "region": region.region, "tokens": region.tokens })
-        })
+        .map(|region| serde_json::json!({ "region": region.region, "tokens": region.tokens }))
         .collect();
     let configured = crate::llm::context_window_budget(model, None).is_some();
     serde_json::json!({
@@ -672,7 +793,10 @@ async fn context_stats(ctx: &ExecutionContext, context: &ContextManager) -> serd
 ///
 /// Only the durable steps are recorded: progress tails belong to a running
 /// call and a restored turn shows the result, not every intermediate chunk.
-fn record_react_event(journal: &std::sync::Arc<parking_lot::Mutex<Transcript>>, event: &ReactEvent) {
+fn record_react_event(
+    journal: &std::sync::Arc<parking_lot::Mutex<Transcript>>,
+    event: &ReactEvent,
+) {
     let at = chrono::Utc::now().timestamp_millis() as u64;
     let mut journal = journal.lock();
     match event {
@@ -695,7 +819,9 @@ fn record_react_event(journal: &std::sync::Arc<parking_lot::Mutex<Transcript>>, 
             elapsed_ms,
             content,
         } => journal.push_tool_result(call_id, name, *ok, *elapsed_ms, content.clone(), at),
-        ReactEvent::ToolProgress { .. } => {}
+        ReactEvent::ToolProgress {
+            ..
+        } => {}
     }
 }
 
@@ -748,5 +874,12 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["role"], "user");
         assert_eq!(entries[1]["content"], "reply");
+    }
+
+    #[test]
+    fn retry_option_is_strict_and_malformed_values_are_ignored() {
+        assert!(chat_option_bool(r#"{"retry":true}"#, "retry"));
+        assert!(!chat_option_bool(r#"{"retry":"true"}"#, "retry"));
+        assert!(!chat_option_bool("not-json", "retry"));
     }
 }
