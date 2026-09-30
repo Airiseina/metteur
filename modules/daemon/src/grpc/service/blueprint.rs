@@ -37,6 +37,7 @@ impl DaemonService {
         let proto_blueprint =
             req.blueprint.ok_or_else(|| Status::invalid_argument("blueprint is required"))?;
         let blueprint = proto_to_blueprint(&proto_blueprint).map_err(to_status)?;
+        ensure_valid(&blueprint)?;
         let data = serde_json::to_vec(&blueprint).map_err(|e| Status::internal(e.to_string()))?;
         ws.db
             .put(crate::storage::persistence::cf::BLUEPRINTS, blueprint.id.as_bytes(), &data)
@@ -99,6 +100,9 @@ impl DaemonService {
         } else {
             let parsed: metteur_shared::Blueprint = serde_json::from_str(&req.blueprint_json)
                 .map_err(|e| Status::invalid_argument(format!("invalid blueprint: {e}")))?;
+            // Validate before mirroring: an invalid graph must not overwrite
+            // the stored copy that a later Run would pick up.
+            ensure_valid(&parsed)?;
             let encoded =
                 serde_json::to_vec(&parsed).map_err(|e| Status::internal(e.to_string()))?;
             ws.db
@@ -106,6 +110,10 @@ impl DaemonService {
                 .map_err(to_status)?;
             parsed
         };
+        // A blueprint saved before validation existed, or edited directly in
+        // the database, is re-checked here so execution never runs a graph that
+        // would fail halfway through.
+        ensure_valid(&blueprint)?;
         let run_id = uuid::Uuid::new_v4();
         let ws_key = ws.root().to_path_buf();
 
@@ -402,6 +410,29 @@ impl DaemonService {
             source: metteur_shared::dsl::decompile(&blueprint),
         }))
     }
+}
+
+/// Rejects a structurally invalid blueprint before it is stored or run.
+///
+/// Running an invalid graph surfaces the problem only when the offending node
+/// executes, by which point the checkpoint machinery, the LLM budget and any
+/// earlier file mutations are already committed. Every problem is reported at
+/// once so a client can show the full list rather than one mistake per run.
+fn ensure_valid(blueprint: &metteur_shared::Blueprint) -> Result<(), Status> {
+    let report = metteur_shared::validate(blueprint);
+    if report.is_ok() {
+        return Ok(());
+    }
+    let detail = report
+        .errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(Status::invalid_argument(format!(
+        "blueprint is invalid ({} problem(s)): {detail}",
+        report.errors.len()
+    )))
 }
 
 /// Converts a proto blueprint into the shared model.

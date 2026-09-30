@@ -693,7 +693,7 @@ async fn smoke_completed_run_cannot_continue() {
 }
 
 #[tokio::test]
-async fn smoke_cancel_marks_run_failed() {
+async fn smoke_cancel_marks_run_cancelled() {
     let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
     let ws_path = workspace.to_string_lossy().to_string();
 
@@ -734,7 +734,9 @@ async fn smoke_cancel_marks_run_failed() {
     // Cancellation aborts the stream with a status; drain until it ends.
     while matches!(stream.message().await, Ok(Some(_))) {}
 
-    wait_for_status(&mut client, &ws_path, "Failed").await;
+    // A user cancel is not a failure: the run records its own terminal status
+    // so a client can tell an abandoned run from a broken one.
+    wait_for_status(&mut client, &ws_path, "Cancelled").await;
 }
 
 #[tokio::test]
@@ -1530,6 +1532,7 @@ async fn smoke_addon_install_call_uninstall() {
     let tool_node = uuid::Uuid::new_v4();
     let start_exec = uuid::Uuid::new_v4();
     let text_pin = uuid::Uuid::new_v4();
+    let tool_text = uuid::Uuid::new_v4();
     let exec_in = uuid::Uuid::new_v4();
     let result_pin = uuid::Uuid::new_v4();
     let blueprint = proto::Blueprint {
@@ -1575,7 +1578,7 @@ async fn smoke_addon_install_call_uninstall() {
                         ..Default::default()
                     },
                     proto::Pin {
-                        id: text_pin.to_string(),
+                        id: tool_text.to_string(),
                         name: "text".into(),
                         pin_type: "DataInput".into(),
                         data_type: "String".into(),
@@ -1605,7 +1608,7 @@ async fn smoke_addon_install_call_uninstall() {
                 source_node: start.to_string(),
                 source_pin: text_pin.to_string(),
                 target_node: tool_node.to_string(),
-                target_pin: text_pin.to_string(),
+                target_pin: tool_text.to_string(),
             },
         ],
         entry_node_id: start.to_string(),
@@ -3629,4 +3632,228 @@ async fn smoke_chat_transcript_keeps_tool_calls() {
     assert!(tool["content"].as_str().unwrap_or_default().contains("Error"));
     assert!(transcript.iter().any(|entry| entry["role"] == "user"));
     assert!(transcript.iter().any(|entry| entry["role"] == "assistant"));
+}
+
+/// A `Float -> Int` edge must be rejected at save time, before any node runs:
+/// the executor would silently truncate `3.99` to `3`.
+#[tokio::test]
+async fn smoke_rejects_narrowing_float_into_int_edge() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    let start = uuid::Uuid::new_v4();
+    let sink = uuid::Uuid::new_v4();
+    let start_float = uuid::Uuid::new_v4();
+    let start_exec = uuid::Uuid::new_v4();
+    let sink_exec = uuid::Uuid::new_v4();
+    let sink_int = uuid::Uuid::new_v4();
+
+    let blueprint = proto::Blueprint {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "narrowing".to_string(),
+        nodes: vec![
+            proto::Node {
+                id: start.to_string(),
+                node_type: "Event".into(),
+                kind: "Start".into(),
+                pos_x: 0.0,
+                pos_y: 0.0,
+                pins: vec![
+                    proto::Pin {
+                        id: start_exec.to_string(),
+                        name: "Exec".into(),
+                        pin_type: "ExecOutput".into(),
+                        data_type: "Void".into(),
+                        ..Default::default()
+                    },
+                    proto::Pin {
+                        id: start_float.to_string(),
+                        name: "F".into(),
+                        pin_type: "DataOutput".into(),
+                        data_type: "Float".into(),
+                        ..Default::default()
+                    },
+                ],
+                data_json: r#"{"F":3.99}"#.into(),
+            },
+            proto::Node {
+                id: sink.to_string(),
+                node_type: "Pure".into(),
+                kind: "ToInt".into(),
+                pos_x: 10.0,
+                pos_y: 0.0,
+                pins: vec![
+                    proto::Pin {
+                        id: sink_exec.to_string(),
+                        name: "Exec".into(),
+                        pin_type: "ExecInput".into(),
+                        data_type: "Void".into(),
+                        ..Default::default()
+                    },
+                    proto::Pin {
+                        id: sink_int.to_string(),
+                        name: "V".into(),
+                        pin_type: "DataInput".into(),
+                        data_type: "Int".into(),
+                        ..Default::default()
+                    },
+                ],
+                data_json: "{}".into(),
+            },
+        ],
+        edges: vec![
+            proto::Edge {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_node: start.to_string(),
+                source_pin: start_exec.to_string(),
+                target_node: sink.to_string(),
+                target_pin: sink_exec.to_string(),
+            },
+            proto::Edge {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_node: start.to_string(),
+                source_pin: start_float.to_string(),
+                target_node: sink.to_string(),
+                target_pin: sink_int.to_string(),
+            },
+        ],
+        entry_node_id: start.to_string(),
+    };
+
+    // Saving is where an author expects to hear about it, with the pin named.
+    let err = client
+        .save_blueprint(SaveBlueprintRequest {
+            workspace_path: ws_path.clone(),
+            blueprint: Some(blueprint.clone()),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message().contains("carries float into a int pin"),
+        "message should name the narrowing: {}",
+        err.message()
+    );
+
+    // Handing the same graph to Run inline must be rejected too: that path
+    // bypasses Save entirely, so it is the one a stale editor could exploit.
+    let inline = format!(
+        r#"{{"id":"{id}","name":"narrowing","entry_node_id":"{entry}",
+            "nodes":[
+                {{"id":"{start}","node_type":"Event","kind":"Start","pos_x":0,"pos_y":0,
+                  "pins":[{{"id":"{start_exec}","name":"Exec","pin_type":"ExecOutput","data_type":"Void"}},
+                          {{"id":"{start_float}","name":"F","pin_type":"DataOutput","data_type":"Float"}}],
+                  "data":{{"F":3.99}}}},
+                {{"id":"{sink}","node_type":"Pure","kind":"ToInt","pos_x":10,"pos_y":0,
+                  "pins":[{{"id":"{sink_exec}","name":"Exec","pin_type":"ExecInput","data_type":"Void"}},
+                          {{"id":"{sink_int}","name":"V","pin_type":"DataInput","data_type":"Int"}}],
+                  "data":{{}}}}],
+            "edges":[
+                {{"id":"{edge1}","source_node":"{start}","source_pin":"{start_exec}","target_node":"{sink}","target_pin":"{sink_exec}"}},
+                {{"id":"{edge2}","source_node":"{start}","source_pin":"{start_float}","target_node":"{sink}","target_pin":"{sink_int}"}}]}}"#,
+        id = blueprint.id,
+        entry = blueprint.entry_node_id,
+        start = start,
+        start_exec = start_exec,
+        start_float = start_float,
+        sink = sink,
+        sink_exec = sink_exec,
+        sink_int = sink_int,
+        edge1 = uuid::Uuid::new_v4(),
+        edge2 = uuid::Uuid::new_v4(),
+    );
+    let err = client
+        .execute_blueprint(ExecuteBlueprintRequest {
+            workspace_path: ws_path,
+            blueprint_id: blueprint.id,
+            blueprint_json: inline,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// An execution output wired to a data input silently does nothing at run time:
+/// the node is never triggered and the run completes without it. That has to be
+/// a save-time error, not a silent no-op.
+#[tokio::test]
+async fn smoke_rejects_exec_output_wired_to_data_input() {
+    let (mut client, workspace) = start_server(metteur_shared::config::Config::default()).await;
+    let ws_path = workspace.to_string_lossy().to_string();
+    client
+        .open_workspace(OpenWorkspaceRequest {
+            path: ws_path.clone(),
+        })
+        .await
+        .unwrap();
+
+    let start = uuid::Uuid::new_v4();
+    let sink = uuid::Uuid::new_v4();
+    let start_exec = uuid::Uuid::new_v4();
+    let sink_int = uuid::Uuid::new_v4();
+
+    let blueprint = proto::Blueprint {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "pin-kind".to_string(),
+        nodes: vec![
+            proto::Node {
+                id: start.to_string(),
+                node_type: "Event".into(),
+                kind: "Start".into(),
+                pos_x: 0.0,
+                pos_y: 0.0,
+                pins: vec![proto::Pin {
+                    id: start_exec.to_string(),
+                    name: "Exec".into(),
+                    pin_type: "ExecOutput".into(),
+                    data_type: "Void".into(),
+                    ..Default::default()
+                }],
+                data_json: "{}".into(),
+            },
+            proto::Node {
+                id: sink.to_string(),
+                node_type: "Pure".into(),
+                kind: "ToInt".into(),
+                pos_x: 10.0,
+                pos_y: 0.0,
+                pins: vec![proto::Pin {
+                    id: sink_int.to_string(),
+                    name: "V".into(),
+                    pin_type: "DataInput".into(),
+                    data_type: "Int".into(),
+                    ..Default::default()
+                }],
+                data_json: "{}".into(),
+            },
+        ],
+        edges: vec![proto::Edge {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_node: start.to_string(),
+            source_pin: start_exec.to_string(),
+            target_node: sink.to_string(),
+            target_pin: sink_int.to_string(),
+        }],
+        entry_node_id: start.to_string(),
+    };
+
+    let err = client
+        .save_blueprint(SaveBlueprintRequest {
+            workspace_path: ws_path,
+            blueprint: Some(blueprint),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message().contains("cannot be mixed"),
+        "message should name the pin-kind clash: {}",
+        err.message()
+    );
 }

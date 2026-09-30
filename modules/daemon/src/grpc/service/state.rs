@@ -618,6 +618,7 @@ pub(crate) fn status_str(status: RunStatus) -> String {
         RunStatus::Running => "Running",
         RunStatus::Suspended => "Suspended",
         RunStatus::Completed => "Completed",
+        RunStatus::Cancelled => "Cancelled",
         RunStatus::Failed => "Failed",
     }
     .to_string()

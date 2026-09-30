@@ -641,13 +641,21 @@ impl ContextManager {
     /// Estimates the context composition by region for the audit UI.
     ///
     /// System fragments form the `system` region; messages are grouped by
-    /// [`Role`] into `user`, `assistant` and `tool` regions. Token counts are a
-    /// coarse `chars / 4` proxy so the UI can show a live region ratio.
+    /// [`Role`] into `user`, `assistant` and `tool` regions.
+    ///
+    /// Tokens come from the same estimator the window guard uses. A separate
+    /// formula here would let the meter the user sees disagree with the guard
+    /// that actually protects the request, which is worse than either number
+    /// being approximate.
     pub fn usage_report(&self) -> Vec<ContextRegion> {
-        let mut chars = std::collections::HashMap::new();
-        let sys: usize = self.system_fragments.iter().map(|f| f.content.chars().count()).sum();
-        if sys > 0 {
-            chars.insert("system".to_string(), sys);
+        let mut tokens: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        let mut chars: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let sys_chars: usize = self.system_fragments.iter().map(|f| f.content.chars().count()).sum();
+        let sys_tokens: u64 =
+            self.system_fragments.iter().map(|f| super::token::estimate_tokens(&f.content)).sum();
+        if sys_tokens > 0 {
+            tokens.insert("system", sys_tokens);
+            chars.insert("system", sys_chars);
         }
         for message in &self.messages {
             let region = match message.role {
@@ -657,14 +665,15 @@ impl ContextManager {
                 Role::Tool => "tool",
             };
             let text = message.text_content();
-            *chars.entry(region.to_string()).or_insert(0) += text.chars().count();
+            *chars.entry(region).or_insert(0) += text.chars().count();
+            *tokens.entry(region).or_insert(0) += super::token::estimate_message(message);
         }
-        let mut regions: Vec<ContextRegion> = chars
+        let mut regions: Vec<ContextRegion> = tokens
             .into_iter()
-            .map(|(region, chars)| ContextRegion {
-                region,
-                chars,
-                tokens: chars / 4,
+            .map(|(region, region_tokens)| ContextRegion {
+                region: region.to_string(),
+                chars: chars.get(region).copied().unwrap_or(0),
+                tokens: region_tokens as usize,
             })
             .collect();
         regions.sort_by_key(|a| std::cmp::Reverse(a.tokens));

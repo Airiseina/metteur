@@ -22,6 +22,8 @@ pub use llm::{
 pub use model::{
     Blueprint, DataType, Edge, EdgeId, Node, NodeId, NodeType, Pin, PinId, PinType, Value,
 };
+pub use model::types::{coerce, compatible};
+pub use model::validate::{BlueprintError, validate};
 pub use uri::Uri;
 
 #[doc(inline)]

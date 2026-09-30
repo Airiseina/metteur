@@ -2,6 +2,7 @@
 
 pub mod checkpoint;
 pub mod context;
+pub mod control;
 pub mod interpreter;
 pub mod interrupt;
 pub mod jobs;

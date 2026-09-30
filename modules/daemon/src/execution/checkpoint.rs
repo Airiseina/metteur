@@ -24,6 +24,12 @@ pub enum RunStatus {
     Suspended,
     /// Finished successfully.
     Completed,
+    /// Stopped on an explicit user cancel; not an error and not resumable.
+    ///
+    /// Kept distinct from [`RunStatus::Failed`] so a client can tell an
+    /// abandoned run from a broken one, and so the audit trail records why the
+    /// run stopped.
+    Cancelled,
     /// Finished with an error; cannot be resumed.
     Failed,
 }
@@ -32,6 +38,11 @@ impl RunStatus {
     /// Returns whether a run in this state may be resumed.
     pub fn resumable(&self) -> bool {
         matches!(self, RunStatus::Running | RunStatus::Suspended)
+    }
+
+    /// Returns whether the run reached a state it will not leave on its own.
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, RunStatus::Running)
     }
 }
 
@@ -84,6 +95,19 @@ pub struct ExecutionCheckpoint {
     /// Tree ids of entered function frames, innermost last.
     #[serde(default)]
     pub frame_trees: Vec<String>,
+    /// Tree id of the node in flight when the checkpoint was taken.
+    ///
+    /// Restoring the parent frame is what keeps post-resume nodes (and any
+    /// sub-agent a resumed node spawns) attached to the right branch instead of
+    /// re-parenting them under a stale frame root.
+    #[serde(default)]
+    pub current_tree: Option<String>,
+    /// Consecutive validation failures seen so far, feeding the circuit breaker.
+    ///
+    /// Persisted so a resumed run cannot reset the counter and slip past the
+    /// replan threshold it had already reached.
+    #[serde(default)]
+    pub circuit_failures: u32,
     /// The failure reason, if the run failed.
     pub error: Option<String>,
 }
@@ -111,6 +135,8 @@ impl ExecutionCheckpoint {
             todos: Vec::new(),
             exec_tree: super::tree::ExecTree::new(),
             frame_trees: Vec::new(),
+            current_tree: None,
+            circuit_failures: 0,
             error: None,
         }
     }

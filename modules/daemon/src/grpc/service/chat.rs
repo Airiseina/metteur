@@ -771,16 +771,17 @@ async fn context_stats(ctx: &ExecutionContext, context: &ContextManager) -> serd
         .as_deref()
         .and_then(|key| llm.models.get(key))
         .or_else(|| llm.models.values().next());
-    // A configured window wins; otherwise assume the common modern default so
-    // the meter has a percentage at all. The client labels an assumed limit as
-    // such, and Settings → LLM & Models sets the real one.
+    // A configured window wins; otherwise a built-in default for a known model
+    // family, and failing both the common modern default so the meter still has
+    // a percentage. Only the last case is an *assumption*: the other two are
+    // either an operator assertion or a documented default.
+    let configured = crate::llm::has_configured_window(model);
     let limit = crate::llm::context_window_budget(model, None).or(Some(DEFAULT_CONTEXT_WINDOW));
     let regions: Vec<serde_json::Value> = context
         .usage_report()
         .into_iter()
         .map(|region| serde_json::json!({ "region": region.region, "tokens": region.tokens }))
         .collect();
-    let configured = crate::llm::context_window_budget(model, None).is_some();
     serde_json::json!({
         "tokens": metteur_shared::llm::estimate_context_tokens(context),
         "limit": limit,

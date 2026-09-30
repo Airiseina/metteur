@@ -5,9 +5,14 @@ use super::value::Value;
 
 /// Whether a value of `source` type may flow into a `target` pin.
 ///
-/// The matrix is deliberately loose: `Any`/`Json` accept everything, numeric
-/// types are interchangeable, and object/list types compare structurally.
-/// `Context` only pairs with `Context`.
+/// The matrix is deliberately loose: `Any`/`Json` accept everything, object and
+/// list types compare structurally, and `Context` only pairs with `Context`.
+///
+/// Narrowing is never implicit. `Int -> Float` is lossless and allowed, but
+/// `Float -> Int` is rejected: truncating `3.99` to `3` is silent data loss, so
+/// a blueprint that needs an integer has to say so with an explicit `ToInt`
+/// node. [`coerce`] still performs the narrowing as a runtime fallback, which
+/// is what keeps hand-written and LLM-generated blueprints working.
 pub fn compatible(source: &DataType, target: &DataType) -> bool {
     match (source, target) {
         (_, DataType::Any) | (DataType::Any, _) => true,
@@ -22,7 +27,11 @@ pub fn compatible(source: &DataType, target: &DataType) -> bool {
             a.iter()
                 .all(|(name, a_type)| b.get(name).is_none_or(|b_type| compatible(a_type, b_type)))
         }
-        (DataType::Int, DataType::Float) | (DataType::Float, DataType::Int) => true,
+        (DataType::Int, DataType::Float) => true,
+        // Any scalar has a faithful textual form, and executors render one when
+        // a string pin receives a scalar. Unlike `Float -> Int` below, nothing
+        // is lost, so the wiring is accepted.
+        (DataType::Int | DataType::Float | DataType::Bool, DataType::String) => true,
         // A choice is a constrained string: strings flow into it freely and it
         // flows out as a string.
         (DataType::Choice, DataType::Choice)
@@ -119,6 +128,7 @@ pub fn data_type_of(value: &Value) -> DataType {
 mod tests {
     use super::*;
     use crate::llm::ContextManager;
+    use std::collections::HashMap;
 
     fn dt(s: &str) -> DataType {
         s.parse().unwrap()
@@ -127,14 +137,26 @@ mod tests {
     #[test]
     fn compatible_matrix() {
         assert!(compatible(&dt("int"), &dt("float")));
-        assert!(compatible(&dt("list<int>"), &dt("list<int>")));
-        assert!(!compatible(&dt("list<int>"), &dt("list<string>")));
+        // Widening is allowed, narrowing is not: truncating 3.99 to 3 is silent
+        // data loss and needs an explicit ToInt node.
+        assert!(!compatible(&dt("float"), &dt("int")));
+        // A scalar's textual form is faithful, so it propagates element-wise
+        // through lists and objects.
+        assert!(compatible(&dt("list<int>"), &dt("list<string>")));
+        assert!(compatible(&dt("object{a:int}"), &dt("object{a:string}")));
         assert!(compatible(&dt("string"), &dt("any")));
         assert!(compatible(&dt("any"), &dt("bool")));
         assert!(compatible(&dt("context"), &dt("context")));
         assert!(!compatible(&dt("context"), &dt("string")));
         assert!(compatible(&dt("object{a:int}"), &dt("object{a:int,b:string}")));
-        assert!(!compatible(&dt("object{a:int}"), &dt("object{a:string}")));
+    }
+
+    #[test]
+    fn narrowing_is_rejected_deeply() {
+        // The ban on `Float -> Int` must reach nested positions, not just the
+        // top-level pin pair.
+        assert!(!compatible(&dt("list<float>"), &dt("list<int>")));
+        assert!(!compatible(&dt("object{a:float}"), &dt("object{a:int}")));
     }
 
     #[test]
@@ -151,5 +173,63 @@ mod tests {
         let ctx = ContextManager::default();
         assert!(coerce(&Value::Context(ctx.clone()), &dt("context")).is_some());
         assert!(coerce(&Value::Context(ctx), &dt("string")).is_none());
+    }
+
+    /// Every type must accept itself, and `Any`/`Json` must accept everything.
+    ///
+    /// Reflexivity is what lets an editor always offer "connect two pins of the
+    /// same type"; the universal acceptors are what let `Any`-typed tool
+    /// arguments and arbitrary JSON compose with anything.
+    #[test]
+    fn compatibility_is_reflexive_and_supertypes_are_universal() {
+        for ty in &all_types() {
+            assert!(compatible(ty, ty), "{ty:?} must flow into itself");
+            assert!(compatible(ty, &DataType::Any), "{ty:?} must flow into Any");
+            assert!(compatible(ty, &DataType::Json), "{ty:?} must flow into Json");
+            assert!(compatible(&DataType::Any, ty), "Any must flow into {ty:?}");
+        }
+    }
+
+    /// `Float -> Int` is the one numeric direction that must stay closed, in
+    /// every nesting position, because it is the only one that silently drops
+    /// information.
+    #[test]
+    fn narrowing_never_becomes_legal_through_nesting() {
+        let floatish = [
+            dt("float"),
+            dt("list<float>"),
+            dt("object{a:float}"),
+            dt("object{a:float,b:list<float>}"),
+        ];
+        let intish = [
+            dt("int"),
+            dt("list<int>"),
+            dt("object{a:int}"),
+            dt("object{a:int,b:list<int>}"),
+        ];
+        for source in &floatish {
+            for target in &intish {
+                assert!(
+                    !compatible(source, target),
+                    "{source} must not flow into {target}"
+                );
+            }
+        }
+    }
+
+    fn all_types() -> Vec<DataType> {
+        vec![
+            DataType::Void,
+            DataType::Bool,
+            DataType::Int,
+            DataType::Float,
+            DataType::String,
+            DataType::Json,
+            DataType::Object(HashMap::new()),
+            DataType::Any,
+            DataType::Context,
+            DataType::Choice,
+            DataType::List(Box::new(DataType::Int)),
+        ]
     }
 }

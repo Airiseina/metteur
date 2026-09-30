@@ -112,6 +112,11 @@ pub struct Interpreter {
     jobs: Option<Arc<crate::execution::JobManager>>,
     shared_blueprint: Option<SharedBlueprint>,
     circuit_failures: u32,
+    /// Whether a cancelled run rolls its file mutations back before exiting.
+    ///
+    /// Command side effects stay outside the WAL either way; this only governs
+    /// the file mutations the run recorded.
+    rollback_on_cancel: bool,
     tree: super::tree::ExecTree,
     /// The run root of the tree, if the run started one.
     tree_root: Option<String>,
@@ -156,6 +161,7 @@ impl Interpreter {
             jobs: None,
             shared_blueprint: None,
             circuit_failures: 0,
+            rollback_on_cancel: true,
             tree: super::tree::ExecTree::new(),
             tree_root: None,
             frame_trees: Vec::new(),
@@ -180,6 +186,16 @@ impl Interpreter {
     pub fn with_config(mut self, config: Arc<RwLock<Config>>) -> Self {
         self.config = Some(config);
         self
+    }
+
+    /// Resolves whether a cancelled run should roll its mutations back,
+    /// preferring the live config over the value captured at build time.
+    fn should_rollback_on_cancel(&self, ctx: &ExecutionContext) -> bool {
+        ctx.config
+            .as_ref()
+            .and_then(|c| c.try_read().ok())
+            .map(|cfg| cfg.execution.rollback_on_cancel)
+            .unwrap_or(self.rollback_on_cancel)
     }
 
     /// Attaches the authenticated subject performing the execution.
@@ -342,7 +358,6 @@ impl Interpreter {
             blueprint_id: resume.blueprint_id,
             call_stack: resume.call_stack,
             data_values: resume.data_values,
-            paused_at: None,
             attempt_counts: resume.attempt_counts,
             validation_marks: resume.validation_marks,
             foreach_stack: resume.foreach_stack.clone(),
@@ -359,11 +374,13 @@ impl Interpreter {
         // The task list lives on the execution context (not the scheduler
         // state), so it is carried into the resumed run separately.
         self.resume_todos = resume.todos.clone();
-        self.circuit_failures = 0;
+        // Carried over so a resumed run cannot reset the breaker counter and
+        // slip past a replan threshold it had already reached.
+        self.circuit_failures = resume.circuit_failures;
         self.tree = resume.exec_tree.clone();
         self.tree_root = resume.exec_tree.roots.first().cloned();
         self.frame_trees = resume.frame_trees.clone();
-        self.current_tree = None;
+        self.current_tree = resume.current_tree.clone();
 
         let mut ctx = self.make_context(interrupts, pause_requested, cancel_requested);
         ctx.transaction_log = TransactionLog::from_entries(resume.transaction_log);
@@ -497,6 +514,8 @@ impl Interpreter {
             todos: ctx.todos.clone(),
             exec_tree: self.tree.clone(),
             frame_trees: self.frame_trees.clone(),
+            current_tree: self.current_tree.clone(),
+            circuit_failures: self.circuit_failures,
             error,
         };
         if let Err(err) = sink.write(&checkpoint) {
@@ -533,6 +552,31 @@ impl Interpreter {
             };
             self.tree.finish(&root, status, now);
         }
+        // A cancelled run is not a failure: record it under its own status so a
+        // client can tell an abandoned run from a broken one.
+        let cancelled = matches!(&result, Err(DaemonError::Interrupted(_)));
+        let rollback_on_cancel = self.should_rollback_on_cancel(ctx);
+        if cancelled && rollback_on_cancel {
+            // Undo the file mutations this run made, so cancelling leaves the
+            // workspace as it was found. Command side effects are outside the
+            // WAL and are not undone.
+            match ctx.transaction_log.rollback_after(0) {
+                Ok(undone) => ctx.audit(
+                    "execution.cancel_rollback",
+                    serde_json::json!({
+                        "run_id": ctx.run_id.to_string(),
+                        "undone": undone,
+                    }),
+                ),
+                Err(err) => ctx.audit(
+                    "execution.cancel_rollback_failed",
+                    serde_json::json!({
+                        "run_id": ctx.run_id.to_string(),
+                        "error": err.to_string(),
+                    }),
+                ),
+            }
+        }
         let status = match &result {
             Ok(()) => {
                 ctx.audit(
@@ -543,6 +587,17 @@ impl Interpreter {
                     }),
                 );
                 RunStatus::Completed
+            }
+            Err(_) if cancelled => {
+                ctx.audit(
+                    "execution.cancelled",
+                    serde_json::json!({
+                        "run_id": ctx.run_id.to_string(),
+                        "blueprint_id": bp_id.to_string(),
+                        "rolled_back": rollback_on_cancel,
+                    }),
+                );
+                RunStatus::Cancelled
             }
             Err(err) => {
                 ctx.audit(
@@ -580,12 +635,7 @@ impl Interpreter {
     ) -> DaemonResult<()> {
         loop {
             // Honor cancellation and pause requests between nodes.
-            if ctx.cancel_requested.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(DaemonError::Interrupted("cancelled by user".to_string()));
-            }
-            while ctx.pause_requested.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
+            super::control::gate(ctx).await?;
 
             // Resolve the active frame: the innermost entered function body,
             // or the root blueprint when no function is on the stack.
@@ -734,8 +784,6 @@ impl Interpreter {
             );
             self.tree_end(ctx, super::tree::TreeNodeStatus::Done);
 
-            self.write_checkpoint(ctx);
-
             // Defer normal interrupts until the next Call LLM node.
             if let Some(bus) = &ctx.interrupts {
                 for msg in bus.drain(InterruptPriority::Normal) {
@@ -745,7 +793,7 @@ impl Interpreter {
 
             // Validation retry: a failed validator with retry budget rolls
             // back its segment and re-queues it before any successor can be
-            // enqueued with stale data.
+            // enqueued with stale data. It persists its own checkpoint.
             if self.maybe_retry(node_id, &node, &outputs, ctx)? {
                 continue;
             }
@@ -756,6 +804,13 @@ impl Interpreter {
             // Circuit breaker: repeated validation failures trigger a
             // user-approved replan and re-run this node under the new plan.
             self.maybe_circuit_break(node_id, &node, &outputs, ctx).await?;
+
+            // Persist only once the successors are queued. A checkpoint taken
+            // before `fire_edges` would record this node as executed while its
+            // successors are in neither `executed` nor `pending`; a crash in
+            // that window would resume into a drained queue and report the run
+            // as completed with the remaining branch silently skipped.
+            self.write_checkpoint(ctx);
         }
         Ok(())
     }
@@ -1468,6 +1523,22 @@ impl Interpreter {
                     edge.source_pin
                 ))
             })?;
+            // Coerce toward the pin's declared type so a downstream executor
+            // receives the type it declared. Validation already rejects
+            // incompatible wirings, so a failure here means the graph changed
+            // under a running plan (a replan) and is worth surfacing.
+            let value = match blueprint.pin(edge.target_pin) {
+                Some(target_pin) => match metteur_shared::coerce(&value, &target_pin.data_type) {
+                    Some(coerced) => coerced,
+                    None => {
+                        return Err(DaemonError::Execution(format!(
+                            "node {node_id} input '{}' expects {} but the incoming value is {value:?}",
+                            target_pin.name, target_pin.data_type
+                        )));
+                    }
+                },
+                None => value,
+            };
             inputs.insert(edge.target_pin, value);
         }
         if let Some(node) = blueprint.node(node_id) {
@@ -2298,6 +2369,8 @@ mod tests {
             exec_tree: crate::execution::tree::ExecTree::new(),
             frame_trees: Vec::new(),
             foreach_stack: Vec::new(),
+            current_tree: None,
+            circuit_failures: 0,
             error: None,
         };
         let mut interpreter =
@@ -2746,6 +2819,106 @@ mod tests {
         }
     }
 
+    /// A sink that records every checkpoint a run produces, standing in for a
+    /// crash that can be resumed from any of them.
+    struct RecordSink {
+        run_id: uuid::Uuid,
+        checkpoints: std::sync::Mutex<Vec<ExecutionCheckpoint>>,
+    }
+
+    impl RecordSink {
+        fn new() -> Self {
+            Self {
+                run_id: Uuid::new_v4(),
+                checkpoints: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CheckpointSink for RecordSink {
+        fn run_id(&self) -> uuid::Uuid {
+            self.run_id
+        }
+
+        fn write(&self, checkpoint: &ExecutionCheckpoint) -> DaemonResult<()> {
+            self.checkpoints.lock().unwrap().push(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    /// A checkpoint taken after a node completes must already list that node's
+    /// successors as pending.
+    ///
+    /// Writing the checkpoint before the execution edges fire recorded the
+    /// just-finished node as executed while its successors were in neither
+    /// `executed` nor `pending`. Resuming such a checkpoint drained an empty
+    /// queue, reported the run as completed, and silently skipped the rest of
+    /// the graph.
+    #[tokio::test]
+    async fn checkpoint_records_successors_of_finished_node() {
+        let blueprint = build_blueprint();
+        let sink = Arc::new(RecordSink::new());
+        let mut interpreter = new_interpreter().with_checkpoint_sink(sink.clone());
+        interpreter.run(&shared(blueprint.clone()), None).await.unwrap();
+
+        let checkpoints = sink.checkpoints.lock().unwrap();
+        // Checkpoint 0 is the pre-run seed; checkpoint 1 follows Start.
+        let after_start = checkpoints
+            .get(1)
+            .expect("a checkpoint after the first node must exist");
+        assert!(
+            !after_start.pending.is_empty(),
+            "a checkpoint taken after a node finished must carry its successors, \
+             otherwise a resume silently drops them (executed={:?}, pending=[])",
+            after_start.executed,
+        );
+    }
+
+    /// Resuming from a checkpoint the run itself produced must still execute
+    /// every node that was left outstanding.
+    #[tokio::test]
+    async fn resume_from_live_checkpoint_finishes_outstanding_nodes() {
+        let blueprint = build_blueprint();
+        let sink = Arc::new(RecordSink::new());
+        let mut interpreter = new_interpreter().with_checkpoint_sink(sink.clone());
+        interpreter.run(&shared(blueprint.clone()), None).await.unwrap();
+        let captured = {
+            let checkpoints = sink.checkpoints.lock().unwrap();
+            let cp = checkpoints
+                .get(1)
+                .expect("a checkpoint after the first node must exist")
+                .clone();
+            assert!(
+                !cp.pending.is_empty(),
+                "resuming this checkpoint would skip the rest of the graph"
+            );
+            cp
+        };
+        let expected_pending: Vec<uuid::Uuid> = captured.pending.clone();
+
+        let mut resumed = new_interpreter();
+        let events = resumed
+            .resume_with_control(
+                &shared(blueprint),
+                captured,
+                None,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        // Every node the checkpoint left outstanding must actually run.
+        for node_id in expected_pending {
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    ExecutionEvent::NodeStarted { node_id: n } if *n == node_id
+                )),
+                "node {node_id} was pending at checkpoint time but never ran after resume"
+            );
+        }
+    }
+
     /// Builds a checkpoint representing the run state right after Start ran.
     fn checkpoint_after_start(blueprint: &Blueprint) -> ExecutionCheckpoint {
         let start = blueprint.entry_node_id;
@@ -2773,6 +2946,8 @@ mod tests {
             exec_tree: crate::execution::tree::ExecTree::new(),
             frame_trees: Vec::new(),
             foreach_stack: Vec::new(),
+            current_tree: None,
+            circuit_failures: 0,
             error: None,
         }
     }
@@ -2827,7 +3002,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_marks_run_failed() {
+    async fn cancel_marks_run_cancelled() {
         let blueprint = build_blueprint();
         let sink = Arc::new(MemorySink::new());
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -2842,7 +3017,42 @@ mod tests {
             .await;
         assert!(result.is_err());
         let checkpoints = sink.checkpoints.lock().unwrap();
-        assert_eq!(checkpoints.last().unwrap().status, RunStatus::Failed);
+        // A user cancel is not a failure: it gets its own terminal status so a
+        // client can tell an abandoned run from a broken one.
+        assert_eq!(checkpoints.last().unwrap().status, RunStatus::Cancelled);
+    }
+
+    /// A paused run must stay cancellable. The pause loop parks between nodes,
+    /// so without a cancel re-check on every tick a cancel issued while paused
+    /// would never be observed and the run would hold its workspace slot
+    /// forever.
+    #[tokio::test]
+    async fn cancel_while_paused_terminates() {
+        let blueprint = Arc::new(build_blueprint());
+        let pause = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The task owns the interpreter and the shared blueprint so the future
+        // is 'static.
+        let handle = {
+            let blueprint = blueprint.clone();
+            let pause = pause.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let mut interpreter = new_interpreter();
+                let result = interpreter
+                    .run_with_control(&shared((*blueprint).clone()), None, pause, cancel)
+                    .await;
+                (result, interpreter)
+            })
+        };
+        // Let the loop reach the pause gate, then cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("a paused run must observe a cancel request")
+            .expect("run task must not panic");
+        assert!(result.is_err());
     }
 
     /// A test tool that writes bad content on its first call and good content

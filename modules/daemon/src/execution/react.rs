@@ -294,12 +294,10 @@ async fn react_loop_inner(
     let budget = opts.max_iterations + notices.wrap_up_turns();
     for iteration in 0..budget {
         let wrapping = notices.is_wrap_up(iteration, opts.max_iterations);
-        // Honor cancellation and pause requests.
-        if ctx.cancel_requested.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err((DaemonError::Interrupted("cancelled by user".to_string()), context));
-        }
-        while ctx.pause_requested.load(std::sync::atomic::Ordering::SeqCst) {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Honor cancellation and pause requests. A cancelled turn hands the
+        // context back so the caller can persist it.
+        if let Err(err) = crate::execution::control::gate(ctx).await {
+            return Err((err, context));
         }
 
         // Inject deferred normal interrupts and any urgent/emergency
@@ -1706,6 +1704,43 @@ async fn window_pressure(
     Some(kept.max(1))
 }
 
+/// Token budget for the transcript handed to the summarizer.
+///
+/// The transcript is the material that just overflowed the main model's window.
+/// Concatenating all of it into one user message would overflow the summarizer
+/// too, turning the recovery path into a second failure — so it is capped, and
+/// the newest messages win because a summary is mostly about recent work.
+const MAX_TRANSCRIPT_TOKENS: u64 = 24_000;
+
+/// Renders the messages to summarize, keeping the newest within a token budget.
+///
+/// Oldest messages are dropped whole rather than truncated mid-message: a
+/// partial record is worth less to the summarizer than a complete one, and the
+/// boundary between kept and dropped messages is already arbitrary.
+fn render_transcript(older: &[Message]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(older.len());
+    let mut budget = MAX_TRANSCRIPT_TOKENS;
+    let mut dropped = 0usize;
+    for message in older.iter().rev() {
+        let line = format!("{:?}: {}\n", message.role, message.text_content());
+        let cost = metteur_shared::llm::estimate_tokens(&line);
+        if cost > budget {
+            dropped += 1;
+            continue;
+        }
+        budget -= cost;
+        lines.push(line);
+    }
+    lines.reverse();
+    let mut transcript = lines.concat();
+    if dropped > 0 {
+        // Stated in the payload so the summary can acknowledge the gap instead
+        // of presenting a truncated record as complete.
+        transcript = format!("[{dropped} older message(s) omitted for length]\n{transcript}");
+    }
+    transcript
+}
+
 /// Produces an LLM summary of the older messages and merges it in.
 #[allow(clippy::too_many_arguments)]
 async fn summarize_and_compress(
@@ -1724,10 +1759,7 @@ async fn summarize_and_compress(
     if older.is_empty() {
         return Ok(());
     }
-    let mut transcript = String::new();
-    for message in &older {
-        transcript.push_str(&format!("{:?}: {}\n", message.role, message.text_content()));
-    }
+    let transcript = render_transcript(&older);
     let summarizer_context = ContextManager::new_from_prompt(
         vec![crate::harness::HarnessPrompt::compress_fragment()],
         format!("Summarize the following conversation:\n\n{transcript}"),
@@ -1790,6 +1822,34 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transcript handed to the summarizer must fit its budget even when
+    /// the source context is far larger: an unbounded transcript would make the
+    /// compression path overflow the summarizer exactly when the main model
+    /// already has.
+    #[test]
+    fn transcript_is_bounded_and_keeps_the_newest() {
+        let messages: Vec<Message> = (0..400)
+            .map(|i| Message::text(Role::User, format!("message {i} {}", "x".repeat(400))))
+            .collect();
+        let transcript = render_transcript(&messages);
+        let cost = metteur_shared::llm::estimate_tokens(&transcript);
+        assert!(
+            cost <= MAX_TRANSCRIPT_TOKENS * 2,
+            "transcript of {cost} tokens blew past its budget"
+        );
+        // The newest message is the one a summary most needs; the oldest is the
+        // first thing worth dropping.
+        let newest = format!("message {}", messages.len() - 1);
+        let oldest = "message 0";
+        assert!(transcript.contains(&newest), "newest message was dropped");
+        assert!(
+            !transcript.contains(oldest),
+            "oldest message should be the one omitted"
+        );
+        assert!(transcript.contains("omitted for length"));
+    }
+
 
     fn new_ctx() -> ExecutionContext {
         ExecutionContext::new(

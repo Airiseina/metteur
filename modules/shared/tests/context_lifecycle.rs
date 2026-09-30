@@ -1,6 +1,7 @@
 //! Tests for context-manager lifecycle: eviction, staleness and compression
 //! boundaries, plus token estimation.
 
+use metteur_shared::llm::token::MESSAGE_ENVELOPE_TOKENS;
 use metteur_shared::llm::{
     ContentBlock, ContextManager, EvictionPolicy, Message, Role, ToolCall, ToolResult,
     ToolResultLifetime, estimate_context_tokens, estimate_message, estimate_tokens,
@@ -169,7 +170,12 @@ fn estimate_tokens_counts_cjk_per_character() {
 #[test]
 fn estimate_message_includes_tool_calls_and_thinking() {
     let plain = Message::text(Role::User, "hello");
-    assert_eq!(estimate_message(&plain), estimate_tokens("hello"));
+    // Every message carries a wire envelope the provider bills even though it is
+    // not part of the content, so the estimate is the content plus that overhead.
+    assert_eq!(
+        estimate_message(&plain),
+        estimate_tokens("hello") + MESSAGE_ENVELOPE_TOKENS
+    );
 
     let thinking = Message {
         role: Role::Assistant,
@@ -202,7 +208,9 @@ fn estimate_context_covers_system_and_messages() {
     let total = estimate_context_tokens(&context);
     assert_eq!(
         total,
-        estimate_tokens("you are a helpful assistant") + estimate_tokens("hello world")
+        estimate_tokens("you are a helpful assistant")
+            + estimate_tokens("hello world")
+            + MESSAGE_ENVELOPE_TOKENS
     );
 }
 

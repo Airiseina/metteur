@@ -9,7 +9,7 @@ pub mod provider;
 pub mod retry;
 
 pub use billing::{Cost, ModelUsageSummary, UsageSummaryData};
-pub use budget::context_window_budget;
+pub use budget::{context_window_budget, has_configured_window};
 pub use client::{
     LlmClient, LlmClientFactory, LlmProviderConfig, LlmResponse, ProviderKind, StreamDelta,
     ThinkingBlock,

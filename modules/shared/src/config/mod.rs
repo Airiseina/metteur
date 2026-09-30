@@ -633,6 +633,11 @@ pub struct ExecutionConfig {
     /// ending, so the engine wakes the model with the result.
     #[serde(default = "default_true")]
     pub job_auto_wake: bool,
+    /// Whether cancelling a run rolls its recorded file mutations back.
+    ///
+    /// Command side effects are outside the WAL and are never undone.
+    #[serde(default = "default_true")]
+    pub rollback_on_cancel: bool,
 }
 
 /// The manual [`Default`] mirrors the serde defaults field by field: a config
@@ -647,6 +652,7 @@ impl Default for ExecutionConfig {
             job_output_max_bytes: default_job_output_max_bytes(),
             job_tail_lines: default_job_tail_lines(),
             job_auto_wake: true,
+            rollback_on_cancel: true,
         }
     }
 }
@@ -1018,6 +1024,11 @@ impl Config {
                 job_auto_wake: merge_bool(
                     workspace.execution.job_auto_wake,
                     self.execution.job_auto_wake,
+                    default_true(),
+                ),
+                rollback_on_cancel: merge_bool(
+                    workspace.execution.rollback_on_cancel,
+                    self.execution.rollback_on_cancel,
                     default_true(),
                 ),
             },

@@ -10,6 +10,19 @@ import { defineConfig, devices } from '@playwright/test'
  *              `pnpm test:live` — they need the daemon, the web server and a
  *              configured model.
  */
+
+/**
+ * Dev-server port.
+ *
+ * `reuseExistingServer` trusts whatever answers on the port, so a foreign
+ * server there would silently run every test against the wrong app. The
+ * default stays off Vite's own 5173 for exactly that reason — another project
+ * on this machine legitimately holds it — and `E2E_PORT` moves the run without
+ * touching anyone else's process.
+ */
+const port = Number(process.env.E2E_PORT ?? 5317)
+const baseURL = `http://localhost:${port}`
+
 export default defineConfig({
   testDir: './e2e',
   // Fresh state per test; no cross-test pollution.
@@ -18,7 +31,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: [['list']],
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -37,7 +50,7 @@ export default defineConfig({
       timeout: 300_000,
       // The daemon is already running for these; reuse it instead of starting
       // a mock dev server.
-      use: { ...devices['Desktop Chrome'], channel: 'chromium', baseURL: 'http://localhost:5173' },
+      use: { ...devices['Desktop Chrome'], channel: 'chromium', baseURL },
     },
     {
       name: 'monkey',
@@ -49,8 +62,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'pnpm dev',
-    url: 'http://localhost:5173',
+    command: `pnpm dev --port ${port}`,
+    url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     // Every suite runs against the deterministic demo gateway: the daemon is

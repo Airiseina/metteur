@@ -180,8 +180,6 @@ pub struct ExecutionState {
     pub call_stack: Vec<Frame>,
     /// Values produced on data output pins.
     pub data_values: HashMap<PinId, Value>,
-    /// The node at which execution is paused, if any.
-    pub paused_at: Option<NodeId>,
     /// Failed validation attempts per validator node.
     pub attempt_counts: HashMap<NodeId, u32>,
     /// Rollback boundaries per validator node, refreshed on each pass.

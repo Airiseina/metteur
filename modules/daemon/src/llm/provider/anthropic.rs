@@ -22,6 +22,22 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// tail comes last.
 const MAX_CACHE_BREAKPOINTS: usize = 4;
 
+/// Lifetime of a cache entry, as a JSON value so it can be dropped verbatim
+/// into every `cache_control`.
+///
+/// The API default is 5 minutes, which a human-in-the-loop pause (blueprint
+/// approval, an edit confirmation) routinely outlives — resuming then re-writes
+/// the whole prefix at the 1.25x write price. One hour matches how long an
+/// unattended run actually sits waiting for a decision.
+fn cache_ttl() -> &'static str {
+    "1h"
+}
+
+/// Builds one `cache_control` object.
+fn cache_control() -> Json {
+    json!({ "type": "ephemeral", "ttl": cache_ttl() })
+}
+
 /// A client for the Anthropic Messages API.
 pub struct AnthropicClient {
     http: reqwest::Client,
@@ -74,11 +90,23 @@ impl AnthropicClient {
             // The canonical order is a precondition for that stability.
             let system = ctx.system_text();
             body["system"] = if mutate_system {
-                json!([{
-                    "type": "text",
-                    "text": system,
-                    "cache_control": { "type": "ephemeral" },
-                }])
+                // One block per fragment, not one concatenated block: the
+                // fragments are ordered so that volatile content (today's date)
+                // renders last, and only per-fragment blocks let a change in one
+                // fragment leave the rest of the prefix cached. A single block
+                // would invalidate everything behind it.
+                let blocks: Vec<Json> = ctx
+                    .system_fragments
+                    .iter()
+                    .map(|fragment| {
+                        json!({
+                            "type": "text",
+                            "text": fragment.content,
+                            "cache_control": cache_control(),
+                        })
+                    })
+                    .collect();
+                json!(blocks)
             } else {
                 json!(system)
             };
@@ -106,7 +134,7 @@ impl AnthropicClient {
             if mutate_tools
                 && let Some(last) = tools_json.as_array_mut().and_then(|items| items.last_mut())
             {
-                last["cache_control"] = json!({ "type": "ephemeral" });
+                last["cache_control"] = cache_control();
             }
             body["tools"] = tools_json;
         }
@@ -332,7 +360,7 @@ fn build_messages(ctx: &ContextManager, rolling_breakpoint: bool) -> Vec<Json> {
 /// Reasoning blocks are skipped: they carry a signature that must be replayed
 /// verbatim, and providers reject a breakpoint on generated reasoning.
 fn mark_last_block(message: &mut Json) {
-    let ephemeral = json!({ "type": "ephemeral" });
+    let ephemeral = cache_control();
     match message.get_mut("content") {
         Some(Json::String(text)) => {
             let text = text.clone();

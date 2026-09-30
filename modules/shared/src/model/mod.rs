@@ -3,6 +3,7 @@
 pub mod blueprint;
 pub mod function;
 pub mod types;
+pub mod validate;
 pub mod value;
 
 pub use blueprint::{
@@ -13,4 +14,5 @@ pub use function::{
     FunctionSignature, FunctionSource,
 };
 pub use types::{coerce, compatible};
+pub use validate::{BlueprintError, validate};
 pub use value::{Value, json_to_value};

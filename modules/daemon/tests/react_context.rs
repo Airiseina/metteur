@@ -511,7 +511,10 @@ async fn window_pressure_releases_results_before_summarizing() {
     let mut ctx = context_with(
         &root,
         vec![Arc::new(FixedReader {
-            payload: "p".repeat(400),
+            // Sized so three results overfill the window but one fits with room
+            // to spare under either margin (2% exact, 15% heuristic): the test
+            // must exercise relief, never fall through to summarizing.
+            payload: "p".repeat(1600),
         })],
     );
     ctx.config = Some(Arc::new(tokio::sync::RwLock::new(Config {
@@ -523,7 +526,7 @@ async fn window_pressure_releases_results_before_summarizing() {
                 LlmModelConfig {
                     model_id: "recording-model".to_string(),
                     api_type: "openai-chat".to_string(),
-                    context_window_input: Some(400),
+                    context_window_input: Some(1200),
                     context_window_output: Some(50),
                     ..Default::default()
                 },

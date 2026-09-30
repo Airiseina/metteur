@@ -221,18 +221,39 @@ async fn expand_blueprint(ctx: &mut ExecutionContext, blueprint: Blueprint) -> D
     if let Some(db) = &ctx.global_db {
         interpreter = interpreter.with_global_db(db.clone());
     }
+    // Capability handles are forwarded so the expansion runs under the same
+    // approvals, version tracking and job supervision as the outer graph.
+    interpreter = interpreter
+        .with_jobs(ctx.jobs.clone())
+        .with_addon_fragments(ctx.addon_fragments.clone());
+    if let Some(lsp) = &ctx.lsp {
+        interpreter = interpreter.with_lsp(lsp.clone());
+    }
+    if let Some(approvals) = &ctx.approvals {
+        interpreter = interpreter.with_approvals(approvals.clone());
+    }
+    if let Some(vm) = &ctx.version_manager {
+        interpreter = interpreter.with_version_manager(vm.clone());
+    }
 
-    // Interrupts are not propagated into the nested run; the returned event
-    // list is drained manually and forwarded as outer message events. The
-    // nested blueprint gets its own handle: sharing the parent's would make
-    // the nested run re-execute the outer graph.
+    // The parent's control flags are shared, not re-created: an expansion is
+    // the longest-running node kind, and with private flags a cancel or pause
+    // would stay inert for its whole duration. The interrupt bus is
+    // deliberately *not* shared — the nested blueprint gets its own handle,
+    // because sharing the parent's would make the nested run re-execute the
+    // outer graph.
+    let pause_requested = ctx.pause_requested.clone();
+    let cancel_requested = ctx.cancel_requested.clone();
     let node_count = blueprint.nodes.len();
     let shared = Arc::new(parking_lot::RwLock::new(blueprint));
     ctx.tree_ops.push(crate::execution::TreeOp::SpawnChild {
         kind: crate::execution::TreeNodeKind::Function("abstract".to_string()),
         label: format!("abstract expansion ({node_count} nodes)"),
     });
-    let nested_events = match interpreter.run(&shared, None).await {
+    let nested_events = match interpreter
+        .run_with_control(&shared, None, pause_requested, cancel_requested)
+        .await
+    {
         Ok(events) => events,
         Err(err) => {
             ctx.tree_ops.push(crate::execution::TreeOp::FinishCurrent {

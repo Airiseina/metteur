@@ -327,7 +327,19 @@ const ACCENT: Record<NodeCategory, string> = {
   flow: '#2fbf8f',
 }
 
-const kindList = Object.keys(NODE_PRESETS)
+/**
+ * Node kinds offered by the palette, restricted to what the daemon can execute.
+ *
+ * `NODE_PRESETS` is a UI catalogue (layout, title, category); the daemon's
+ * registry decides what actually runs. Intersecting the two is what keeps a
+ * preset that no longer — or not yet — has an executor out of the palette,
+ * where placing it would guarantee a run failure.
+ */
+const kindList = computed(() => {
+  const known = store.nodeKinds
+  if (known.length === 0) return Object.keys(NODE_PRESETS)
+  return Object.keys(NODE_PRESETS).filter((kind) => known.includes(kind))
+})
 
 /** Load the graph for the currently open blueprint file and reset editor state. */
 async function loadBlueprint() {
@@ -688,7 +700,7 @@ const paletteGroups = computed<MenuGroup[]>(() => {
   const groups = CATEGORIES.map((cat) => ({
     label: cat.label,
     color: ACCENT[cat.key],
-    items: kindList
+    items: kindList.value
       .filter((k) => NODE_PRESETS[k].category === cat.key)
       .map((k) => ({ id: k, label: NODE_PRESETS[k].title ?? k })),
   }))
@@ -722,7 +734,7 @@ const paletteMenuGroups = computed<MenuGroup[]>(() => {
   return CATEGORIES.map((cat) => ({
     label: cat.label,
     color: ACCENT[cat.key],
-    items: kindList
+    items: kindList.value
       .filter((k) => NODE_PRESETS[k].category === cat.key && compatible(k))
       .map((k) => ({ id: k, label: NODE_PRESETS[k].title ?? k })),
   })).filter((g) => g.items.length > 0)
