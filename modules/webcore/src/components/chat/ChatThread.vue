@@ -79,7 +79,11 @@ function scrollToBottom(smooth = false): void {
   nextTick(() => {
     const el = scroller.value
     if (!el) return
-    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+    // The welcome screen is not a transcript: keep its heading in view even
+    // when the starter cards overflow a short pane.
+    const top = props.messages.length ? Math.max(0, el.scrollHeight - el.clientHeight) : 0
+    if (Math.abs(el.scrollTop - top) < 1) return
+    el.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' })
   })
 }
 

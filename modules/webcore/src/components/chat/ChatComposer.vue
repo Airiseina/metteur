@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ChevronUp, FileCode, ListPlus, Send, Square, X } from '@lucide/vue'
+import { ArrowUp, ChevronUp, FileCode, ListPlus, Square, X } from '@lucide/vue'
 import ContextMenu from './ContextMenu.vue'
 import ContextMeter from './ContextMeter.vue'
 import ModelMenu from './ModelMenu.vue'
@@ -325,7 +325,7 @@ defineExpose({
     </div>
 
     <div class="chat-composer-controls">
-      <div class="flex min-w-0 items-center gap-1">
+      <div class="chat-composer-options flex min-w-0 items-center gap-1">
         <ContextMenu
           :files="files"
           :addons="addons"
@@ -386,7 +386,7 @@ defineExpose({
               aria-label="Send"
               @click="submit('auto')"
             >
-              <Send class="h-4 w-4" />
+              <ArrowUp class="h-4 w-4" />
             </button>
             <button
               class="chat-deliver-more"

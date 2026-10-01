@@ -10,7 +10,10 @@ export default defineConfig({
     vue(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Notify open clients rather than silently leaving old JS mounted, or
+      // reloading over unsaved source edits when a new build is deployed.
+      registerType: 'prompt',
+      injectRegister: false,
       manifest: {
         name: 'Metteur',
         short_name: 'Metteur',
@@ -25,6 +28,9 @@ export default defineConfig({
     }),
   ],
   resolve: {
+    // CodeMirror extensions use instanceof checks: nested dependency copies
+    // must resolve to the same runtime as the application's extensions.
+    dedupe: ['@codemirror/state', '@codemirror/view', '@codemirror/language'],
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },

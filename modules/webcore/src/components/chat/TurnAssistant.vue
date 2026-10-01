@@ -41,7 +41,7 @@ watch([thinking, reasoning], ([value]) => reasoning.value?.sync(value), { flush:
     />
     <div
       v-if="message.content"
-      class="md-body text-[14.5px] leading-[26px] text-foreground"
+      class="md-body text-[15px] leading-[27px] text-foreground"
       v-html="html"
     />
     <!-- Only while tokens are actually arriving: a restored answer that was

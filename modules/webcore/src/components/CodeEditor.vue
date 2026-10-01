@@ -32,7 +32,10 @@ const emit = defineEmits<{
 const themeStore = useThemeStore()
 
 const container = ref<HTMLDivElement | null>(null)
-const mode = ref<'loading' | 'monaco' | 'cm'>('loading')
+const mode = ref<'loading' | 'monaco' | 'cm' | 'error'>('loading')
+const loadError = ref('')
+let disposed = false
+let initializationFailed = false
 /** Whether the active editor has anything to undo/redo (drives tool buttons). */
 const canUndo = ref(false)
 const canRedo = ref(false)
@@ -72,6 +75,7 @@ function applyMonacoTheme() {
 
 async function setupMonaco() {
   const mod = (await import('@/lib/monaco')).default
+  if (disposed || initializationFailed || !container.value) return
   monacoMod = mod
   applyMonacoTheme()
   const lang = monacoLanguage(props.language)
@@ -87,6 +91,7 @@ async function setupMonaco() {
   if (lang === 'mbp') bindMbpDiagnostics(mod, model)
   monoEditor = mod.editor.create(container.value!, {
     model,
+    theme: themeStore.mode === 'dark' ? 'vs-dark' : 'vs',
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 12.5,
@@ -109,6 +114,7 @@ async function setupMonaco() {
 let cmView: { dispatch(t: unknown): void; destroy(): void; state: { doc: { toString(): string } } } | null = null
 let cmUndo: ((v: unknown) => boolean) | null = null
 let cmRedo: ((v: unknown) => boolean) | null = null
+let applyCmTheme: (() => void) | null = null
 
 async function cmLanguage() {
   const jsmod = await import('@codemirror/lang-javascript')
@@ -164,6 +170,8 @@ async function setupCm() {
   cmRedo = (v) => (cmdsMod.redo(v as never) ?? true)
 
   const stateSupport = (await cmLanguage()) as unknown
+  if (disposed || initializationFailed || !container.value) return
+  const themeCompartment = new stateMod.Compartment()
   const extensions = [
     viewMod.lineNumbers(),
     viewMod.highlightActiveLine(),
@@ -177,7 +185,7 @@ async function setupCm() {
     langMod.syntaxHighlighting(langMod.defaultHighlightStyle, { fallback: true }),
     cmdsMod.history(),
     viewMod.keymap.of([...cmdsMod.defaultKeymap, ...cmdsMod.historyKeymap, cmdsMod.indentWithTab]),
-    viewMod.EditorView.theme(cmBaseTheme(), { dark: themeStore.mode === 'dark' }),
+    themeCompartment.of(viewMod.EditorView.theme(cmBaseTheme(), { dark: themeStore.mode === 'dark' })),
     viewMod.EditorView.updateListener.of((update: { docChanged: boolean; state: { doc: { toString(): string } } }) => {
       if (update.docChanged) {
         const text = update.state.doc.toString()
@@ -189,35 +197,54 @@ async function setupCm() {
 
   const view = new viewMod.EditorView({
     parent: container.value!,
+    doc: props.modelValue,
     extensions,
   })
   cmView = view
+  applyCmTheme = () => view.dispatch({
+    effects: themeCompartment.reconfigure(viewMod.EditorView.theme(cmBaseTheme(), { dark: themeStore.mode === 'dark' })),
+  })
 }
 
 const isCoarsePointer = () => window.matchMedia?.('(pointer: coarse)').matches ?? false
 
 onMounted(async () => {
-  if (isCoarsePointer()) {
-    mode.value = 'cm'
-    await setupCm()
-  } else {
-    mode.value = 'monaco'
-    await setupMonaco()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    const nextMode = isCoarsePointer() ? 'cm' : 'monaco'
+    await Promise.race([
+      nextMode === 'cm' ? setupCm() : setupMonaco(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('Editor loading timed out. Reload to retry.')), 15_000)
+      }),
+    ])
+    if (!disposed) mode.value = nextMode
+  } catch (error) {
+    initializationFailed = true
+    if (disposed) return
+    loadError.value = error instanceof Error ? error.message : String(error)
+    mode.value = 'error'
+  } finally {
+    clearTimeout(timeout)
   }
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   // The editor always owns its view; the model is owned by the registry when it
   // is shared, and disposed there with the last reference.
   if (monoEditor) monoEditor.dispose()
-  if (props.modelId) releaseModel(props.modelId)
+  if (props.modelId && monoModel) releaseModel(props.modelId)
   else if (monoModel && !monoModel.isDisposed()) monoModel.dispose()
   if (cmView) cmView.destroy()
 })
 
 watch(
   () => themeStore.mode,
-  () => applyMonacoTheme(),
+  () => {
+    applyMonacoTheme()
+    applyCmTheme?.()
+  },
 )
 
 // Push externally-set content (reload-from-disk / tab restore) into the live
@@ -253,10 +280,17 @@ defineExpose({
 </script>
 
 <template>
-  <div class="h-full w-full min-h-0 overflow-hidden bg-background">
-    <div v-if="mode === 'loading'" class="flex h-full items-center justify-center text-[12px] text-subtle">
-      Loading editor…
+  <div class="relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-background">
+    <div v-if="mode === 'loading'" class="absolute inset-0 z-10 flex min-h-0 flex-col bg-background">
+      <p class="px-3 py-2 text-[12px] text-muted-foreground" role="status">Loading editor… Source is available below.</p>
+      <textarea class="min-h-0 flex-1 resize-none bg-background p-3 font-mono text-[13px] text-foreground" aria-label="Loading file source" readonly :value="modelValue" />
     </div>
-    <div v-else ref="container" class="h-full w-full" />
+    <template v-if="mode === 'error'">
+      <p class="shrink-0 px-3 py-2 text-[12px] text-danger" role="alert">
+        Editor could not load. Showing read-only source. {{ loadError }}
+      </p>
+      <textarea class="min-h-0 flex-1 resize-none bg-background p-3 font-mono text-[13px] text-foreground" aria-label="Read-only file source" readonly :value="modelValue" />
+    </template>
+    <div v-show="mode !== 'error'" ref="container" class="min-h-0 w-full flex-1" />
   </div>
 </template>

@@ -175,8 +175,11 @@ function normalize(language: string, text: string): string {
   }
 }
 
+let loadRevision = 0
 async function load() {
+  const revision = ++loadRevision
   const ws = workspace.active
+  const path = filePath.value
   if (!ws || isBlueprint.value) {
     loaded.value = true
     error.value = ''
@@ -184,16 +187,23 @@ async function load() {
   }
   loaded.value = false
   error.value = ''
-  const r = await gateway.readFile(ws.path, filePath.value)
-  if (r.ok) {
-    content.value = normalize(languageOf(filePath.value), r.data.content)
-  } else {
-    // Never show a stale buffer for a file that failed to open (binary or
-    // too large to decode as UTF-8 and render).
+  try {
+    const r = await gateway.readFile(ws.path, path)
+    // A slower read from the previously selected tab must not replace the
+    // current buffer, including replacing it with an empty file.
+    if (revision !== loadRevision) return
+    if (r.ok) content.value = normalize(languageOf(path), r.data.content)
+    else {
+      content.value = ''
+      error.value = r.error
+    }
+  } catch (cause) {
+    if (revision !== loadRevision) return
     content.value = ''
-    error.value = r.error
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    if (revision === loadRevision) loaded.value = true
   }
-  loaded.value = true
 }
 
 /** Save the active file and refresh the explorer listing of its folder. */
@@ -265,6 +275,7 @@ onMounted(() => {
   document.addEventListener('visibilitychange', onVisibility)
 })
 onBeforeUnmount(() => {
+  loadRevision += 1
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('focus', onWindowFocus)
   document.removeEventListener('visibilitychange', onVisibility)
@@ -338,6 +349,7 @@ async function compileToBlueprint() {
 
 <template>
   <div class="flex h-full flex-col bg-background">
+    <p v-if="!loaded" class="px-4 py-3 text-[13px] text-muted-foreground" role="status">Loading {{ fileName }}…</p>
     <!-- Blueprint files are edited on the visual canvas. -->
     <template v-if="isBlueprint && loaded">
       <BlueprintView :file-path="filePath" />

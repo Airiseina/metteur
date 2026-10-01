@@ -38,6 +38,7 @@ import ApprovalDialog from '@/components/ApprovalDialog.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import FolderOpenDialog from '@/components/FolderOpenDialog.vue'
 import ToastHost from '@/components/ToastHost.vue'
+import AppUpdateNotice from '@/components/AppUpdateNotice.vue'
 import TabBar from '@/components/TabBar.vue'
 import FileTree from '@/components/FileTree.vue'
 import { useSurfaceNavigation } from '@/lib/surface'
@@ -429,7 +430,7 @@ function onRightResizeStart(e: MouseEvent) {
         </nav>
         <aside
           v-if="panel.open"
-          class="relative flex shrink-0 flex-col border-r border-divider bg-sidebar"
+          class="workspace-file-panel relative flex shrink-0 flex-col bg-sidebar"
           :style="{ width: panel.width + 'px' }"
         >
           <div
@@ -455,7 +456,7 @@ function onRightResizeStart(e: MouseEvent) {
         </aside>
 
         <!-- Main editor area: one pane, or two when a file is opened to the side. -->
-        <main class="flex min-w-0 flex-1 overflow-hidden">
+        <main class="workspace-editor-surface flex min-w-0 flex-1 overflow-hidden">
           <div class="min-w-0 flex-1 overflow-hidden" :style="splitVisible ? { flex: `0 0 ${tabs.splitRatio * 100}%` } : undefined">
             <RouterView />
           </div>
@@ -564,6 +565,7 @@ function onRightResizeStart(e: MouseEvent) {
 
     <ApprovalDialog />
     <ToastHost />
+    <AppUpdateNotice />
     <ConfirmDialog />
     <FolderOpenDialog
       v-if="pendingOpen"

@@ -11,6 +11,7 @@ modules/webcore/node_modules/
 modules/webcore/dist/
 modules/webcore/playwright-report/
 modules/webcore/test-results/
+modules/webcore/.e2e-dist/
 modules/webcore/.tmp/
 
 .pnpm-store/

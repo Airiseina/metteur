@@ -22,6 +22,7 @@ import { defineConfig, devices } from '@playwright/test'
  */
 const port = Number(process.env.E2E_PORT ?? 5317)
 const baseURL = `http://localhost:${port}`
+const production = process.env.E2E_PRODUCTION === '1'
 
 export default defineConfig({
   testDir: './e2e',
@@ -62,9 +63,11 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `pnpm dev --port ${port}`,
+    command: production
+      ? `pnpm exec vite build --outDir .e2e-dist && pnpm exec vite preview --outDir .e2e-dist --port ${port} --strictPort`
+      : `pnpm dev --port ${port}`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !production && !process.env.CI,
     timeout: 60_000,
     // Every suite runs against the deterministic demo gateway: the daemon is
     // not assumed to be running, and the demo workspace is what makes editor,

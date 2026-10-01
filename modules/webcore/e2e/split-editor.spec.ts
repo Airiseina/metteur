@@ -24,7 +24,8 @@ async function treeRow(page: Page, name: string): Promise<Locator> {
   // The demo tree starts collapsed; expanding is a no-op once the row exists.
   for (const folder of ['metrics', 'src', 'blueprints']) {
     if ((await row.count()) > 0) break
-    await tree.getByRole('button', { name: folder, exact: true }).click()
+    const folderRow = tree.getByRole('button', { name: folder, exact: true })
+    if (!(await folderRow.locator('svg.rotate-90').count())) await folderRow.click()
     await page.waitForTimeout(120)
   }
   await expect(row).toHaveCount(1, { timeout: 10_000 })
@@ -73,4 +74,96 @@ test('the same file in both panes shares one buffer', async ({ page }) => {
   await expect(lines.nth(1)).toContainText('blueprint "Collect Samples"')
 
   expect(pageErrors).toEqual([])
+})
+
+test('opening source in dark mode preserves the editor theme', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('metteur.theme', 'dark'))
+  await openWorkspace(page)
+  await (await treeRow(page, 'collect.mbp')).click()
+  await expect(page.locator('.monaco-editor').first()).toBeVisible()
+  await expect(page.locator('.monaco-editor').first()).toHaveClass(/vs-dark/)
+})
+
+test('markdown source remains visible after tab changes and reload', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await openWorkspace(page)
+  await (await treeRow(page, 'README.md')).click()
+  const lines = page.locator('.monaco-editor .view-lines').first()
+  await expect(lines).toContainText('# Metrics')
+  await (await treeRow(page, 'collect.mbp')).click()
+  await expect(lines).toContainText('blueprint "Collect Samples"')
+  await page.getByRole('button', { name: /README.md/ }).first().click()
+  await expect(lines).toContainText('# Metrics')
+  await page.reload()
+  await expect(lines).toContainText('# Metrics')
+  expect(errors).toEqual([])
+})
+
+test('slow editor initialization shows source and times out with an explanation', async ({ page }) => {
+  let release: (() => void) | undefined
+  const paused = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/src/lib/monaco.ts', async (route) => {
+    await paused
+    await route.abort()
+  })
+  try {
+    await openWorkspace(page)
+    const row = await treeRow(page, 'collect.mbp')
+    await page.clock.install()
+    await row.click()
+    await expect(page.getByRole('textbox', { name: 'Loading file source' })).toHaveValue(/blueprint "Collect Samples"/)
+    await page.clock.runFor(16_000)
+    await expect(page.getByRole('alert')).toContainText('timed out')
+    await expect(page.getByRole('textbox', { name: 'Read-only file source' })).toHaveValue(/blueprint "Collect Samples"/)
+  } finally {
+    release?.()
+  }
+})
+
+test.describe('touch source viewer', () => {
+  test.use({ hasTouch: true })
+  test('opening a file displays its existing source', async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.addInitScript(() => localStorage.setItem('metteur.theme', 'dark'))
+    await openWorkspace(page)
+    await (await treeRow(page, 'collect.mbp')).click()
+    await expect(page.locator('.cm-content')).toContainText('blueprint "Collect Samples"')
+    await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(23, 23, 27)')
+    await page.evaluate(async () => {
+      const path = '/src/stores/theme.ts'
+      const { useThemeStore } = await import(path)
+      useThemeStore().mode = 'light'
+    })
+    await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(251, 251, 253)')
+    await expect(page.locator('.cm-content')).toContainText('blueprint "Collect Samples"')
+    await (await treeRow(page, 'report.mbp')).click()
+    await expect(page.locator('.cm-content')).toContainText('blueprint "Report Samples"')
+    await page.reload()
+    await expect(page.locator('.cm-content')).toContainText('blueprint "Report Samples"')
+    expect(errors).toEqual([])
+  })
+})
+
+test('failed editor loading still allows reading the file source', async ({ page }) => {
+  await page.route('**/src/lib/monaco.ts', (route) => route.abort())
+  await openWorkspace(page)
+  await (await treeRow(page, 'collect.mbp')).click()
+  await expect(page.getByRole('alert')).toContainText('Showing read-only source')
+  await expect(page.getByRole('textbox', { name: 'Read-only file source' })).toHaveValue(/blueprint "Collect Samples"/)
+})
+
+test('rounded file panel keeps its resize handle usable', async ({ page }) => {
+  await openWorkspace(page)
+  const panel = page.locator('.workspace-file-panel')
+  await expect(panel).toHaveCSS('border-top-right-radius', '14px')
+  await expect(page.locator('.workspace-editor-surface')).toHaveCSS('border-top-left-radius', '12px')
+  const before = (await panel.boundingBox())!
+  const handle = (await panel.getByRole('separator').boundingBox())!
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(handle.x + handle.width / 2 + 60, handle.y + handle.height / 2)
+  await page.mouse.up()
+  await expect.poll(async () => (await panel.boundingBox())!.width).toBeGreaterThan(before.width + 40)
 })

@@ -49,7 +49,7 @@ const time = computed(() =>
 
 <template>
   <div class="chat-turn group/turn flex flex-col items-end gap-1">
-    <div class="chat-user-turn max-w-[85%] text-[14px] leading-[26px]">
+    <div class="chat-user-turn max-w-[85%] text-[15px] leading-[26px]">
       <template v-for="(part, i) in parts" :key="i">
         <button
           v-if="part.kind === 'file'"

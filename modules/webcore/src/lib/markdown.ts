@@ -100,7 +100,7 @@ const THEME_LIGHT = 'github-light'
 const THEME_DARK = 'github-dark'
 
 interface Highlighter {
-  codeToHtml: (code: string, options: { lang: string; theme: string }) => string
+  codeToHtml: (code: string, options: { lang: string; themes: { light: string; dark: string }; defaultColor: false }) => string
   getLoadedLanguages: () => string[]
   loadLanguage: (...grammars: unknown[]) => Promise<void>
 }
@@ -210,10 +210,15 @@ function renderFence(code: string, tag: string): string {
     return plainFence(code, tag)
   }
   try {
-    return highlighter.codeToHtml(code, {
+    const html = highlighter.codeToHtml(code, {
       lang: grammar,
-      theme: document.documentElement.classList.contains('dark') ? THEME_DARK : THEME_LIGHT,
+      // Both palettes travel with the cached HTML; CSS selects the active one.
+      // No stale inline dark background survives a theme switch.
+      themes: { light: THEME_LIGHT, dark: THEME_DARK },
+      defaultColor: false,
     })
+    const label = tag ? `<span class="md-lang">${escapeHtml(tag)}</span>` : ''
+    return `<div class="md-code">${label}${html}</div>`
   } catch {
     return plainFence(code, tag)
   }

@@ -92,6 +92,28 @@ body {
 }
 
 /* Tooltips (see lib/tooltip.ts). */
+/* Inset rounded surfaces soften the file/editor junction. Keep the resize
+   handle outside the clipping surface so its full hit area remains usable. */
+.workspace-file-panel {
+  margin: 8px 0 8px 8px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  min-height: 0;
+}
+.workspace-file-panel > :first-child {
+  border-radius: 13px 13px 0 0;
+}
+.workspace-file-panel > :nth-child(2) {
+  border-radius: 0 0 13px 13px;
+}
+.workspace-editor-surface {
+  margin: 6px;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  background: var(--surface);
+  min-height: 0;
+}
+
 .app-tooltip {
   position: fixed;
   z-index: 200;
@@ -309,7 +331,11 @@ body {
    typography plugin. Sizes stay close to body text so an answer reads as prose,
    and code keeps the monospace rhythm used elsewhere in the app. */
 .md-body {
+  --code-background: #f3f4f6;
   overflow-wrap: anywhere;
+}
+html.dark .md-body {
+  --code-background: #292a30;
 }
 .md-body > :first-child {
   margin-top: 0;
@@ -394,18 +420,27 @@ body {
   border: 0;
   border-top: 1px solid var(--divider);
 }
-/* Code fences: Shiki emits <pre class="shiki"> with inline colours. */
+/* Cached Shiki HTML carries both palettes as variables, never fixed colours. */
+.md-body .shiki,
+.md-body .shiki span {
+  color: var(--shiki-light);
+}
+html.dark .md-body .shiki,
+html.dark .md-body .shiki span {
+  color: var(--shiki-dark);
+}
 .md-body pre.shiki,
 .md-body .md-pre {
   margin: 0;
   padding: 0.7em 0.9em;
   overflow-x: auto;
-  background: var(--surface-muted);
+  background: var(--code-background);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
   line-height: 1.55;
 }
 .md-body .md-code {
+  background: var(--code-background);
   position: relative;
   margin: 0.6em 0;
   border: 1px solid var(--divider);
@@ -413,11 +448,19 @@ body {
   overflow: hidden;
 }
 .md-body .md-lang {
-  position: absolute;
-  top: 4px;
-  right: 8px;
-  font-size: 10px;
+  display: block;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--code-background);
+  font-size: 11px;
   color: var(--muted-foreground);
+}
+/* Inline-code styling must not tint or indent the entire fenced code body. */
+.md-body pre code {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
 }
 /* Quiet variant for the thinking block. */
 .md-body-quiet {
@@ -426,7 +469,7 @@ body {
 }
 .md-body-quiet pre.shiki,
 .md-body-quiet .md-pre {
-  background: transparent;
+  background: var(--code-background);
 }
 
 /* Unified diffs inside tool cards. */

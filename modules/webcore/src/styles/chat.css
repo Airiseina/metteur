@@ -10,38 +10,188 @@
 /**
  * The conversation column.
  *
- * Shared by the transcript and the composer so they stay aligned, and wide by
- * default: tool output and diffs benefit from room, and the pane is the reader's
- * whole screen. The cap only matters on ultra-wide displays.
+ * A shared reading width keeps answers and the composer aligned. Code and tool
+ * output scroll inside their own containers rather than stretching the page.
  */
+.chat-surface {
+  container-type: inline-size;
+  container-name: chat;
+  --background: #ffffff;
+  --chat-user-bg: #f4f4f4;
+  --chat-action-bg: #202020;
+  --chat-action-fg: #ffffff;
+}
+
+.dark .chat-surface {
+  --background: #1f1f24;
+  --chat-user-bg: #2b2b31;
+  --chat-action-bg: #ebebf0;
+  --chat-action-fg: #1f1f24;
+}
+
+.chat-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: clamp(24px, 7vh, 88px) 0 32px;
+  text-align: center;
+}
+
+.chat-welcome h2 {
+  font-size: clamp(24px, 3.5cqi, 30px);
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.035em;
+}
+
+.chat-welcome-description {
+  margin-top: 12px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.chat-starters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
+  margin-top: 28px;
+  gap: 8px;
+}
+
+.chat-starter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-starter:hover,
+.chat-starter:focus-visible {
+  border-color: var(--border);
+  background: var(--surface-muted);
+}
+
+.chat-starter-top {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
+.chat-starter-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.chat-composer-dock {
+  background: var(--background);
+}
+
+.chat-composer-hint {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 16px;
+  padding: 0 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.chat-composer-hint kbd {
+  font-family: inherit;
+  color: var(--foreground);
+}
+
+.chat-composer-options {
+  flex-wrap: wrap;
+}
+
+@container chat (max-width: 600px) {
+  .chat-surface .chat-column {
+    padding-inline: 16px;
+  }
+
+  .chat-surface .chat-header {
+    padding-inline: 16px;
+  }
+
+  .chat-welcome {
+    padding-top: 20px;
+  }
+
+  .chat-starters {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    margin-top: 24px;
+  }
+
+  .chat-starter {
+    justify-content: flex-start;
+  }
+
+  .chat-composer-controls > :last-child {
+    margin-left: auto;
+  }
+
+  .chat-surface .chat-control-wide {
+    max-width: 12rem;
+  }
+}
+
+@media (max-height: 800px) {
+  .chat-welcome {
+    padding-block: 8px 12px;
+  }
+
+  .chat-welcome-description {
+    margin-top: 12px;
+    font-size: 14px;
+  }
+
+  .chat-starters {
+    margin-top: 24px;
+  }
+}
+
 .chat-column {
   display: flex;
   width: 100%;
-  max-width: 1600px;
+  max-width: 920px;
+  min-width: 0;
   margin-inline: auto;
   flex-direction: column;
-  gap: 20px;
-  padding: 20px 24px 12px;
+  gap: 28px;
+  padding: 32px 32px 16px;
 }
 /* The composer sits at the bottom of the pane: its own row provides the
    breathing room, so the column's bottom padding stays small. */
 .chat-column-composer {
+  gap: 10px;
   padding-top: 0;
-  padding-bottom: 14px;
+  padding-bottom: 20px;
 }
 
 .chat-header {
   display: flex;
-  height: 48px;
+  height: 56px;
   flex-shrink: 0;
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--divider);
-  padding: 0 12px;
+  padding: 0 24px;
 }
 
 .chat-header-title {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -71,8 +221,8 @@
 .chat-header-icon {
   position: relative;
   display: grid;
-  height: 28px;
-  width: 28px;
+  height: 32px;
+  width: 32px;
   place-items: center;
   border-radius: 7px;
   color: var(--muted-foreground);
@@ -126,7 +276,7 @@
 .chat-user-turn {
   border-radius: 12px;
   background: var(--chat-user-bg);
-  padding: 8px 12px;
+  padding: 12px 18px;
   color: var(--foreground);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -448,11 +598,11 @@
 /* Composer: two rows — the message, then how it runs. */
 .chat-composer {
   position: relative;
-  border-radius: 14px;
+  border-radius: 18px;
   background: var(--surface);
   box-shadow:
-    var(--shadow-card),
-    inset 0 0 0 1px var(--divider);
+    var(--shadow-soft),
+    inset 0 0 0 1px var(--border);
   transition: box-shadow var(--motion-fast) var(--ease-standard);
 }
 /* The container shows focus, so the textarea itself must not draw a second
@@ -460,7 +610,7 @@
 .chat-composer:focus-within {
   box-shadow:
     var(--shadow-soft),
-    inset 0 0 0 1px color-mix(in srgb, var(--primary) 55%, var(--divider));
+    inset 0 0 0 1px color-mix(in srgb, var(--foreground) 28%, var(--border));
 }
 .chat-composer-chips {
   display: flex;
@@ -474,13 +624,13 @@
 .chat-composer-textarea {
   display: block;
   width: 100%;
-  min-height: 44px;
+  min-height: 88px;
   max-height: 220px;
   resize: none;
   background: transparent;
-  padding: 11px 14px 4px;
-  font-size: 14px;
-  line-height: 22px;
+  padding: 18px 20px 8px;
+  font-size: 15px;
+  line-height: 24px;
   color: var(--foreground);
   outline: none;
 }
@@ -492,10 +642,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 8px 8px 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px 12px;
 }
 .chat-composer-notice {
-  padding: 0 14px 9px;
+  padding: 0 20px 14px;
   font-size: 11.5px;
   color: var(--status-error);
 }
@@ -886,6 +1037,24 @@
 }
 .status-running {
   color: var(--status-running);
+}
+
+/* Neutral composer actions; running/error indicators keep semantic colours. */
+.chat-surface .chat-deliver-group,
+.chat-surface .chat-send {
+  background: var(--chat-action-bg);
+  color: var(--chat-action-fg);
+}
+.chat-surface .chat-deliver {
+  background: var(--surface-muted);
+  color: var(--foreground);
+}
+.chat-surface .chat-deliver-more {
+  border-color: color-mix(in srgb, var(--chat-action-fg) 25%, transparent);
+  color: var(--chat-action-fg);
+}
+.chat-surface .chat-deliver-more:hover {
+  background: color-mix(in srgb, var(--chat-action-fg) 14%, transparent);
 }
 
 /* Reduced motion: keep the feedback, drop the movement. */

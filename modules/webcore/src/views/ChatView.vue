@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Sparkles } from '@lucide/vue'
+import { Bug, Compass, ListChecks } from '@lucide/vue'
 import { useChatStore } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useConfigStore } from '@/stores/config'
@@ -218,14 +218,14 @@ onMounted(() => {
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 const starterPrompts = [
-  { label: 'Explain this workspace', text: 'Explain how this workspace is organised and what the main entry points are.' },
-  { label: 'Find and fix a bug', text: 'Find the most likely bug in the modified files and fix it.' },
-  { label: 'Plan a change', text: 'Plan how to add a new feature end to end, then implement the first step.' },
+  { label: 'Explain this workspace', description: 'Find your way around the code.', icon: Compass, text: 'Explain how this workspace is organised and what the main entry points are.' },
+  { label: 'Find and fix a bug', description: 'Turn a problem into a solution.', icon: Bug, text: 'Find the most likely bug in the modified files and fix it.' },
+  { label: 'Plan a change', description: 'Make the next step a clear one.', icon: ListChecks, text: 'Plan how to add a new feature end to end, then implement the first step.' },
 ]
 </script>
 
 <template>
-  <div class="flex h-full flex-col bg-background">
+  <div class="chat-surface flex h-full min-w-0 flex-col bg-background">
     <ChatHeader
       :threads="chat.threads"
       :session-id="chat.sessionId"
@@ -249,34 +249,30 @@ const starterPrompts = [
       :on-restore="(id) => void restore(id)"
     >
       <template #empty>
-        <div class="flex flex-col items-center pt-14 text-center">
-          <span class="chat-badge-none mb-4 grid h-12 w-12 place-items-center rounded-2xl bg-primary-soft text-primary">
-            <Sparkles class="h-6 w-6" />
-          </span>
-          <h2 class="text-[16px] font-semibold tracking-tight">What should we work on?</h2>
-          <p class="mt-1.5 max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
-            Describe a task, reference files with
-            <span class="mono rounded bg-surface-muted px-1 py-0.5 text-[11.5px]">@</span>, insert a template with
-            <span class="mono rounded bg-surface-muted px-1 py-0.5 text-[11.5px]">/</span>. The agent plans, edits and
-            verifies with tools, and every step is shown as it runs.
+        <div class="chat-welcome">
+          <h2>What should we work on?</h2>
+          <p class="chat-welcome-description">
+            Ask about your code, fix a bug, or build something new.
           </p>
-          <div v-if="hasModel" class="mt-6 grid w-full max-w-lg grid-cols-1 gap-2 sm:grid-cols-3">
+          <div v-if="hasModel" class="chat-starters">
             <button
               v-for="starter in starterPrompts"
               :key="starter.label"
-              class="panel-muted px-3 py-2.5 text-left text-[12px] leading-snug transition-colors duration-100 hover:bg-hover"
+              class="chat-starter"
               type="button"
               @click="edit(starter.text)"
             >
-              <span class="block font-medium text-foreground">{{ starter.label }}</span>
-              <span class="mt-0.5 block text-muted-foreground">{{ starter.text }}</span>
+              <span class="chat-starter-top" aria-hidden="true">
+                <component :is="starter.icon" class="h-4.5 w-4.5" />
+              </span>
+              <span class="chat-starter-title">{{ starter.label }}</span>
             </button>
           </div>
         </div>
       </template>
     </ChatThread>
 
-    <div class="shrink-0">
+    <div class="chat-composer-dock shrink-0">
       <div class="chat-column chat-column-composer">
         <ChatStatusBar
           :phase="chat.phase"
@@ -314,8 +310,9 @@ const starterPrompts = [
           :on-open-parameters="() => (parametersOpen = true)"
           :on-open-settings="openSettings"
         />
-        <p class="mt-2 px-1 text-[10.5px] text-subtle">
-          Enter sends · Shift+Enter for a newline · Esc stops the turn · ⌘/Ctrl+K focuses the input
+        <p class="chat-composer-hint">
+          <span><kbd>@</kbd> files <span aria-hidden="true">·</span> <kbd>/</kbd> templates</span>
+          <span>Enter to send <span aria-hidden="true">·</span> Shift+Enter for a new line</span>
         </p>
       </div>
     </div>

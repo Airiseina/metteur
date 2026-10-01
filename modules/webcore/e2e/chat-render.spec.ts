@@ -24,6 +24,51 @@ async function say(page: Page, text: string): Promise<void> {
   await input.press('Enter')
 }
 
+for (const initialTheme of ['light', 'dark'] as const) {
+  test(`code fences follow theme switches after rendering in ${initialTheme}`, async ({ page }) => {
+    await page.addInitScript((mode) => localStorage.setItem('metteur.theme', mode), initialTheme)
+    await openChat(page)
+    await page.evaluate(async () => {
+      const path = '/src/stores/chat.ts'
+      const { useChatStore } = await import(path)
+      useChatStore().messages.push({
+        id: 'theme-regression', role: 'assistant', createdAt: Date.now(), pending: false,
+        content: '```typescript\nconst answer = 42\n```\n\n```unknown-language\nplain fallback\n```',
+      })
+    })
+    const highlighted = page.locator('.md-body pre.shiki').first()
+    const plain = page.locator('.md-body .md-pre').first()
+    await expect(highlighted).toBeVisible({ timeout: 15_000 })
+    await expect(plain).toBeVisible()
+    const html = await highlighted.innerHTML()
+    const token = highlighted.locator('span[style]').first()
+    for (const mode of ['dark', 'light', 'dark', 'light'] as const) {
+      await page.evaluate(async (value) => {
+        const path = '/src/stores/theme.ts'
+        const { useThemeStore } = await import(path)
+        useThemeStore().mode = value
+      }, mode)
+      const background = mode === 'light' ? 'rgb(243, 244, 246)' : 'rgb(41, 42, 48)'
+      await expect(highlighted).toHaveCSS('background-color', background)
+      await expect(plain).toHaveCSS('background-color', background)
+      await expect(plain.locator('code')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+      // Check token contrast follows the active palette, not just the white box.
+      const colors = await token.evaluate((el, theme) => {
+        const actual = getComputedStyle(el).color
+        const probe = document.createElement('span')
+        probe.style.color = getComputedStyle(el).getPropertyValue(`--shiki-${theme}`)
+        document.body.appendChild(probe)
+        const expected = getComputedStyle(probe).color
+        probe.remove()
+        return { actual, expected }
+      }, mode)
+      expect(colors.actual).toBe(colors.expected)
+      // Switching theme does not re-highlight or remount the existing code.
+      expect(await highlighted.innerHTML()).toBe(html)
+    }
+  })
+}
+
 test('the reader turn is a quiet block, not a saturated bubble', async ({ page }) => {
   await openChat(page)
   await say(page, 'Summarise the metrics workspace')

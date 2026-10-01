@@ -56,3 +56,40 @@ test('the header keeps session controls and leaves the model to the composer', a
   await expect(header.getByRole('button', { name: /Model and reasoning effort/ })).toHaveCount(0)
   await expect(header.getByRole('button', { name: /Permission mode/ })).toHaveCount(0)
 })
+
+for (const theme of ['light', 'dark'] as const) {
+  test(`the reading column and starter actions work in ${theme} mode`, async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await page.addInitScript((mode) => localStorage.setItem('metteur.theme', mode), theme)
+    await openChat(page)
+    const thread = page.locator('.chat-thread-inner')
+    const composer = page.locator('.chat-column-composer')
+    const readingBox = await thread.boundingBox()
+    const composerBox = await composer.boundingBox()
+    expect(readingBox).not.toBeNull()
+    expect(composerBox).not.toBeNull()
+    expect(readingBox!.width).toBeLessThanOrEqual(920)
+    expect(Math.abs(readingBox!.x - composerBox!.x)).toBeLessThan(1)
+    await expect(page.locator('.chat-starter')).toHaveCount(3)
+    await page.getByRole('button', { name: /Explain this workspace/ }).click()
+    await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue(
+      'Explain how this workspace is organised and what the main entry points are.',
+    )
+    await expect(page.locator('.chat-user-turn')).toHaveCount(0)
+  })
+}
+
+test('a narrow short chat pane keeps the welcome heading and send control reachable', async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 })
+  await openChat(page)
+  const log = page.getByRole('log', { name: 'Conversation' })
+  await expect.poll(() => log.evaluate((el) => el.scrollTop)).toBe(0)
+  await expect(page.getByRole('heading', { name: 'What should we work on?' })).toBeInViewport()
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeInViewport()
+  const overflow = await page.locator('.chat-surface').evaluate((el) => el.scrollWidth - el.clientWidth)
+  expect(overflow).toBeLessThanOrEqual(1)
+  const cards = await page.locator('.chat-starter').all()
+  const first = await cards[0].boundingBox()
+  const second = await cards[1].boundingBox()
+  expect(second!.y).toBeGreaterThan(first!.y + first!.height)
+})
